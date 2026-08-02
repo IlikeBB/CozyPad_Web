@@ -3,8 +3,6 @@
 CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。
 目前方向是把 SSH 終端、遠端檔案瀏覽、伺服器資源監控，以及 Claude / Codex / agy 類 agent 工作區整合到同一個 Web 介面。
 
-此倉庫只放公開 README、功能截圖與 Release 附件；不提交 .env、SSH key、token、log、data 或任何私有設定。
-
 ## 現有功能預覽
 
 | 畫面 | 截圖 | 重點 |
@@ -33,8 +31,6 @@ CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。
 | 型別檢查 | corepack pnpm typecheck |
 | Lint | corepack pnpm lint |
 | Build | corepack pnpm build |
-
-公開預覽：https://cozypad.modoubletw.com/
 
 ## Release 包內容
 
