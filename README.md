@@ -1,6 +1,5 @@
 # CozyPad Web
 
-CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。  
 目前方向是把 SSH 終端、遠端檔案瀏覽、伺服器資源監控，以及 Claude / Codex / agy 類 agent 工作區整合到同一個 Web 介面。
 
 ## 近期更新
