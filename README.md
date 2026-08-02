@@ -7,15 +7,15 @@ CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。
 
 | 日期 | 模組 | 更新內容 |
 | --- | --- | --- |
-| 2026-07-29 ~ 2026-08-02 | 專案整合 | 以 `CozyPad-0.2.9-alpha` 為基底建立 v3，並把 v2 Web 的版面精神融合進 v3；公開展示先保留 v3 主介面，v2 Web 暫時隱藏。 |
-| 2026-07-29 ~ 2026-08-02 | 登入與安全 | 保留 CozyPad 自有帳號密碼登入，加入 TOTP 2FA 流程；每個帳號的 SSH server 紀錄分開保存，避免互相看到設定。 |
-| 2026-07-29 ~ 2026-08-02 | SSH 管理 | 新增 server 改為先通過密碼驗證再建構可直連設定；後續以 key 連線為主，避免保存明文密碼。SSH 失敗不自動高頻重試，重新整理也加入冷卻限制。 |
-| 2026-07-29 ~ 2026-08-02 | Terminal | Terminal 已改為讀取匯入的 SSH server 清單，可依 server 開啟分頁終端，並盡量維持同一條 SSH 通道，降低被遠端主機判定為重複登入的風險。 |
-| 2026-07-29 ~ 2026-08-02 | Files | 檔案瀏覽改為連到對應 SSH server；支援遠端目錄瀏覽、文字 / Markdown / PDF / 圖片預覽，並補上右鍵刪除、重新命名，以及空白處新增資料夾。 |
-| 2026-07-29 ~ 2026-08-02 | Agents | Codex / Claude 介面改成接近 Claude 的工作區：左側 sessions、中間對話 timeline、右側 context。Codex 以遠端 server 為工作目標，文字回覆支援 Markdown，技術 log 可收合顯示。 |
-| 2026-07-29 ~ 2026-08-02 | Research | Codex / Claude 任務會同步出現在 Research；欄位改為 `run`、`status`、`duration`、`seed`、`start date`、`end date`，run 名稱以 `codex` / `claude` 加 4 位數識別。 |
-| 2026-07-29 ~ 2026-08-02 | Monitor | Monitor 參考 v1 的伺服器資源檢測，重點顯示 CPU、RAM、所有硬碟、GPU 與 GPU process；硬碟或 GPU 過多時改用可捲動區塊。 |
-| 2026-07-29 ~ 2026-08-02 | Domain / DDNS | Domain 管理限定管理員可見，並讓 DDNS agent 可選擇要更新的 record，例如 CozyPad domain；高風險更新動作保留二次確認。 |
+| 2026-08-02 | 專案整合 | 以 `CozyPad-0.2.9-alpha` 為基底建立 v3，並把 v2 Web 的版面精神融合進 v3；公開展示先保留 v3 主介面，v2 Web 暫時隱藏。 |
+| 2026-08-02 | 登入與安全 | 保留 CozyPad 自有帳號密碼登入，加入 TOTP 2FA 流程；每個帳號的 SSH server 紀錄分開保存，避免互相看到設定。 |
+| 2026-08-02 | SSH 管理 | 新增 server 改為先通過密碼驗證再建構可直連設定；後續以 key 連線為主，避免保存明文密碼。SSH 失敗不自動高頻重試，重新整理也加入冷卻限制。 |
+| 2026-08-02 | Terminal | Terminal 已改為讀取匯入的 SSH server 清單，可依 server 開啟分頁終端，並盡量維持同一條 SSH 通道，降低被遠端主機判定為重複登入的風險。 |
+| 2026-08-02 | Files | 檔案瀏覽改為連到對應 SSH server；支援遠端目錄瀏覽、文字 / Markdown / PDF / 圖片預覽，並補上右鍵刪除、重新命名，以及空白處新增資料夾。 |
+| 2026-08-02 | Agents | Codex / Claude 介面改成接近 Claude 的工作區：左側 sessions、中間對話 timeline、右側 context。Codex 以遠端 server 為工作目標，文字回覆支援 Markdown，技術 log 可收合顯示。 |
+| 2026-08-02 | Research | Codex / Claude 任務會同步出現在 Research；欄位改為 `run`、`status`、`duration`、`seed`、`start date`、`end date`，run 名稱以 `codex` / `claude` 加 4 位數識別。 |
+| 2026-08-02 | Monitor | Monitor 參考 v1 的伺服器資源檢測，重點顯示 CPU、RAM、所有硬碟、GPU 與 GPU process；硬碟或 GPU 過多時改用可捲動區塊。 |
+| 2026-07-29 | Domain / DDNS | Domain 管理限定管理員可見，並讓 DDNS agent 可選擇要更新的 record，例如 CozyPad domain；高風險更新動作保留二次確認。 |
 
 ## 現有功能預覽
 
