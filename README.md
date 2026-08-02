@@ -17,14 +17,19 @@ CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。
 | 2026-08-02 | Monitor | Monitor 參考 v1 的伺服器資源檢測，重點顯示 CPU、RAM、所有硬碟、GPU 與 GPU process；硬碟或 GPU 過多時改用可捲動區塊。 |
 | 2026-07-29 | Domain / DDNS | Domain 管理限定管理員可見，並讓 DDNS agent 可選擇要更新的 record，例如 CozyPad domain；高風險更新動作保留二次確認。 |
 
-## 現有功能預覽
+## 安裝教學
 
-| 畫面 | 截圖 | 重點 |
+| 步驟 | 操作 | 說明 |
 | --- | --- | --- |
-| Agents / Codex | ![Agents / Codex](docs/screenshots/feature-agents.png) | 類 Claude 的 agent 工作區：左側任務列表、中間對話 timeline、右側上下文與工具狀態。 |
-| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) | 連線後可開啟多分頁終端，並保留常用指令與快速執行按鈕。 |
-| Files | ![Files](docs/screenshots/feature-files.png) | 遠端檔案瀏覽入口，規劃支援文字、Markdown、PDF、圖片等彈出式預覽。 |
-| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) | 參考 v1 的伺服器資源檢測，顯示 CPU、RAM、Disk、GPU 與 GPU process 狀態。 |
+| 1 | 下載 Release `.zip` | 從 GitHub Releases 下載最新的 CozyPad3 public preview zip。 |
+| 2 | 解壓縮專案 | 將 zip 解到本機工作目錄，進入 `CozyPad3` 資料夾。 |
+| 3 | 安裝 Node.js LTS | 建議使用 Node.js LTS，並確認 `corepack` 可用。 |
+| 4 | 安裝依賴 | 執行 `corepack pnpm install`。 |
+| 5 | 建立本機設定 | 需要連接 SSH / domain / agent 時，依照 `legacy-v2.env.example` 建立自己的 `.env`。 |
+| 6 | 啟動開發模式 | 一般前端預覽執行 `corepack pnpm dev`；需要 v2 SSH API 時執行 `corepack pnpm dev:v2-web`。 |
+| 7 | 檢查專案 | 執行 `corepack pnpm typecheck`，必要時再執行 `corepack pnpm lint` / `corepack pnpm build`。 |
+
+功能截圖保留在 `docs/screenshots/`，README 不再用功能預覽表格展開。
 
 ## 功能總覽
 
