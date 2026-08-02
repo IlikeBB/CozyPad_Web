@@ -1,0 +1,28 @@
+[SYNTHETIC TEST LOG]
+experiment: swin-tiny-augmented
+dataset: fake-medical-slices-v1
+seed: 2048
+device: cuda:1
+batch_size: 16
+optimizer: AdamW
+lr: 0.0001
+augmentation: mixup=0.2, cutmix=0.1, random_crop=true
+
+2026-08-03 10:02:01 epoch=001 train_loss=1.733 val_loss=1.420 val_acc=0.478 val_f1=0.451 val_auc=0.669
+2026-08-03 10:15:18 epoch=002 train_loss=1.302 val_loss=1.104 val_acc=0.603 val_f1=0.579 val_auc=0.758
+2026-08-03 10:28:39 epoch=003 train_loss=1.012 val_loss=0.913 val_acc=0.681 val_f1=0.657 val_auc=0.824
+2026-08-03 10:42:04 epoch=004 train_loss=0.845 val_loss=0.801 val_acc=0.721 val_f1=0.701 val_auc=0.857
+2026-08-03 10:55:30 epoch=005 train_loss=0.721 val_loss=0.772 val_acc=0.733 val_f1=0.716 val_auc=0.866
+2026-08-03 11:08:59 epoch=006 train_loss=0.631 val_loss=0.788 val_acc=0.728 val_f1=0.709 val_auc=0.861
+2026-08-03 11:22:25 epoch=007 train_loss=0.575 val_loss=0.836 val_acc=0.711 val_f1=0.690 val_auc=0.849
+
+event: early_stop_triggered patience=2 monitor=val_auc
+best_checkpoint: checkpoints/swin-tiny-augmented_seed2048_epoch005.pt
+best_metric: val_auc=0.866
+issue:
+- training loss continued decreasing after epoch 5 but validation AUC dropped.
+- likely mild overfitting.
+- inference latency is higher than resnet50 baseline.
+throughput:
+- train: 151 images/sec
+- eval: 224 images/sec

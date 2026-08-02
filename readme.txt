@@ -25,7 +25,24 @@ CozyPad Web 是 CozyPad3 的公開預覽頁與輕量文件倉庫。
 | Files | 以 SSH server 為目標瀏覽遠端檔案，並提供檔案預覽與基本操作。 |
 | Monitor | 透過既有 SSH 設定讀取伺服器資源狀態；避免高頻率重複登入。 |
 | Agents | Claude、Codex、agy 等 agent 以遠端 server / cwd 為工作目標。 |
+| Markdown | 上傳多份 Markdown / text 筆記，交由後端彙整成可閱讀的 Markdown summary。 |
 | Security | 登入與高風險操作採分層確認；私密設定留在本機環境，不放入 GitHub。 |
+
+## 近期更新補充
+
+| 日期 | 模組 | 更新內容 |
+| --- | --- | --- |
+| 2026-08-03 | Markdown | 新增 Markdown 筆記彙整工作區，可拖入多個 .md / .markdown / .txt 檔案，彙整結果以 Markdown 排版呈現。 |
+| 2026-08-03 | Markdown UI | 上傳檔案與 Summary result 改為由左到右排列；彙整中會暫時隱藏上傳區，完成後再顯示。 |
+| 2026-08-03 | 測試資料 | 補上 Markdown 筆記與假模型訓練 log 測試資料，方便驗證彙整結果是否真的被整理過。 |
+
+## 測試資料
+
+| 位置 | 用途 |
+| --- | --- |
+| docs/examples/markdown-summary/notes/ | CozyPad 功能筆記、會議紀錄與待辦，用於測試多檔筆記彙整。 |
+| docs/examples/markdown-summary/messy-proof-notes/ | 故意保留重複、順序混亂與口語內容，用於確認 summary 是否有重新整理。 |
+| docs/examples/markdown-summary/fake-model-logs/ | 假模型分數、訓練 log、ablation 與錯誤分析，用於測試研究紀錄整理。 |
 
 ## 快速啟動摘要
 
