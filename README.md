@@ -18,6 +18,9 @@
 | 2026-08-03 | Markdown | 新增 Markdown 筆記彙整工作區，可拖入多個 `.md` / `.markdown` / `.txt` 檔案，彙整結果以 Markdown 排版呈現。 |
 | 2026-08-03 | Markdown UI | 上傳檔案與 Summary result 改為由左到右排列；彙整中會暫時隱藏上傳區，完成後再顯示。 |
 | 2026-08-03 | 測試資料 | 補上 Markdown 筆記與假模型訓練 log 測試資料，方便驗證彙整結果是否真的被整理過。 |
+| 2026-08-04 | Research Flowchart | Research 改成可編輯流程圖畫布，支援拖曳方塊、四向連接點、綠色方向箭頭、右鍵新增方塊與刪除連線。 |
+| 2026-08-04 | Research / MD.md | 流程圖可送到遠端分析後回填 `MD.md`；`Start Training` 改為頁面內嵌 prompt 表單，不再使用彈出式視窗。 |
+| 2026-08-04 | Work / Codex | `Start Training` 會建立訓練與監控任務並同步到 Work；Codex 回覆支援 Markdown，內部狀態與連線噪音改為收合或隱藏。 |
 
 ## 安裝教學
 
