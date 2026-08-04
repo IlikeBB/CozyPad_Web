@@ -26,15 +26,6 @@ CozyPad Web 是 CozyPad3 的公開文件與功能展示倉庫，重點整理目�
 | Markdown | 支援多個 `.md`、`.markdown`、`.txt` 檔案彙整，並以 Markdown 顯示回傳結果。 |
 | Monitor | 參考 v1 伺服器資源監控，顯示 online server 的 CPU、RAM、DISK、GPU 與硬碟狀態。 |
 
-## 介面截圖
-
-| 頁面 | 預覽 |
-| --- | --- |
-| Agents | ![Agents](docs/screenshots/feature-agents.png) |
-| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) |
-| Files | ![Files](docs/screenshots/feature-files.png) |
-| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) |
-
 ## 最近更新日誌
 
 | 日期 | 模組 | 更新內容 |
@@ -94,3 +85,11 @@ Release zip 建議保留程式碼、文件、截圖與範例資料；部署或�
 | SSH key / token | 不應放入 release 或公開倉庫。 |
 | `data/` / `.run-logs/` | 依實際內容判斷，通常不應公開。 |
 | `node_modules/` / `dist/` / build cache | 不需放入 release，可由使用者重新安裝或 build。 |
+
+## 介面截圖
+
+| 頁面 | 預覽 |
+| --- | --- |
+| Research Diagram | ![Research Diagram](docs/screenshots/feature-research-diagram.png) |
+| Codex Agent | ![Codex Agent](docs/screenshots/feature-agents-codex.png) |
+| Research MD.mix | ![Research MD.mix](docs/screenshots/feature-research-mdmix.png) |
