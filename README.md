@@ -39,6 +39,16 @@ CozyPad Web 是 CozyPad3 的公開文件與功能展示倉庫，重點整理目�
 
 | 日期 | 模組 | 更新內容 |
 | --- | --- | --- |
+| 2026-08-05 | Agents | agy 與 baillian 改成獨立視窗狀態，避免切換時共用同一個對話、輸入框或檢查結果。 |
+| 2026-08-05 | Codex | Codex 新增「檢查 Codex」按鈕；未按 Connect 時不會發 SSH 請求，檢查結果以簡短狀態顯示。 |
+| 2026-08-05 | SSH Monitor | 移除可見的 Codex sessions 區塊，只保留 Terminal channels、Monitor streams 與 Agent workers。 |
+| 2026-08-04 | SSH 連線 | 移除 SSH gate 的 block 顯示；agent 只有在已有可用 Terminal 時才走 terminal bridge，否則改走後端連線流程。 |
+| 2026-08-04 | SSH 連線 | 加入 ssh2 broker 與共用通道概念，降低短時間重複啟動 ssh.exe 的風險。 |
+| 2026-08-04 | Monitor | Monitor 改為 30 秒更新一次，並共用同台 server 的監控連線，避免多頁籤造成連線數暴增。 |
+| 2026-08-04 | Terminal | 不按 Connect 就不啟動 SSH；Terminal 以使用者主動開啟為準，避免背景自動連線。 |
+| 2026-08-04 | Diagram | 優化流程圖操作，支援畫布捲動、框選移動、Delete 刪除選取項目與更大的工作區。 |
+| 2026-08-04 | Research | 流程圖分析改成可選 agent；繪圖動作直接更新畫布，不再送到 agent 對話區。 |
+| 2026-08-04 | baillian | 新增 baillian 分頁與 key 匯入流程，並支援切換百鍊模型設定。 |
 | 2026-08-04 | Research Flowchart | 新增可拖曳流程圖節點、框選移動、上下左右連接點、綠色箭頭連線、節點刪除與右鍵新增節點。 |
 | 2026-08-04 | Research MD.md | `default analysis diagram` 會將流程圖送往 91 進行分析，回傳內容寫入 `MD.md`，作為訓練排程主 prompt。 |
 | 2026-08-04 | Research MD.mix | 新增 `mix analysis diagram`，會回傳五份 Markdown：模型建議、超參數建議、資料前處理建議、模型評估建議、整體建議。 |
