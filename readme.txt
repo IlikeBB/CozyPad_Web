@@ -54,9 +54,5 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | 操作 | 指令 |
 | --- | --- |
 | 安裝套件 | `corepack pnpm install` |
-| 啟動 Web dev server | `corepack pnpm dev` |
-| 公開預覽 domain | `https://cozypad.modoubletw.com/` |
 | 型別檢查 | `corepack pnpm typecheck` |
 | Lint | `corepack pnpm lint` |
-
-目前開發畫面可在 `http://localhost:5173/` 檢視；公開預覽已掛到 `https://cozypad.modoubletw.com/`。
