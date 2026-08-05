@@ -249,7 +249,7 @@ export function SettingsWorkspace({
         <h3>About</h3>
         <div className="settings-row">
           <span>App</span>
-          <span className="mono">CozyPad V3 0.0.1 (bootstrap)</span>
+          <span className="mono">CozyPad V4 4.0.0-alpha.0</span>
         </div>
         <div className="settings-row">
           <span>Bridge</span>

@@ -1,6 +1,6 @@
-# CozyPad3
+# CozyPad4
 
-CozyPad3 是基於 CozyPad-0.2.9-alpha 建構的遠端工作站介面，目標是把 SSH 終端機、遠端檔案瀏覽、伺服器監控，以及 Claude / Codex / agy 等 coding agent 統一放在同一個可切換的工作環境中。
+CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，目標是把 SSH 終端機、遠端檔案瀏覽、伺服器監控，以及 Claude / Codex / agy / bailian 等 coding agent 統一放在同一個可切換的工作環境中。
 
 ## 專案定位
 

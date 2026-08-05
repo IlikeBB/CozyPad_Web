@@ -1,4 +1,4 @@
-# CozyPad V3 Remote Agent Workspace 規格
+# CozyPad V4 Remote Agent Workspace 規格
 
 ## 1. 產品定位
 

@@ -1,4 +1,4 @@
-# CozyPad3
+# CozyPad4
 
 基於 `CozyPad-0.2.9-alpha` 建立的新分支專案。
 
@@ -67,8 +67,7 @@ pnpm test         # 全綠即環境就緒
 → 核對並確認 host key 指紋。關閉「以 OS 安全儲存保留驗證資料」時，憑證只保留
 到本次 app 結束，期間仍可自動重連。
 
-更多細節：[docs/DEV_V3.md](docs/DEV_V3.md)（開發指南）、
-[docs/TUTORIAL_ELECTRON_CAPACITOR.md](docs/TUTORIAL_ELECTRON_CAPACITOR.md)
+更多細節：[docs/TUTORIAL_ELECTRON_CAPACITOR.md](docs/TUTORIAL_ELECTRON_CAPACITOR.md)
 （從零到日常 routine，含手機 live reload）。
 
 ## Repository 結構

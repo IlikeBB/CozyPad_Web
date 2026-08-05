@@ -47,7 +47,7 @@ app.*.map.json
 # Zip archives
 *.zip
 
-# Node / pnpm (V3 monorepo)
+# Node / pnpm (V4 monorepo)
 node_modules/
 apps/**/dist/
 apps/desktop/release*/

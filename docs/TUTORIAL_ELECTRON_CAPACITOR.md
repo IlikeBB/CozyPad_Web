@@ -1,6 +1,6 @@
 # Tutorial: Electron + Capacitor app development
 
-**前情提要：CozyPad V3 = 一套 React code，桌面包 Electron、Android 包 Capacitor。**
+**前情提要：CozyPad V4 = 一套 React code，桌面包 Electron、Android 包 Capacitor。**
 **日常開發 99% 在瀏覽器和 Electron，手機只在需要真機手感和發版時碰。**
 
 ## 0. 從零安裝（新電腦一次性）
