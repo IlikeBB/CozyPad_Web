@@ -20,7 +20,7 @@ app、斷線、換裝置，工作都不會中斷。
 | GitHub | 角色 |
 | --- | --- |
 | [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
-| [youchengchao](https://github.com/youchengchao) | CozyPad 原始專案與協作開發 |
+| [youchengchao](https://github.com/youchengchao) | CozyPad 上游原始專案與協作開發 |
 
 ## 現在能用的功能
 
