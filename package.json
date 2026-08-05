@@ -1,0 +1,29 @@
+{
+  "name": "cozypad4",
+  "private": true,
+  "version": "4.0.0-alpha.0",
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "dev": "pnpm --filter @cozypad/app dev",
+    "dev:v2-web": "concurrently -k \"pnpm legacy-v2:api\" \"pnpm legacy-v2:local-cmd\" \"pnpm dev\"",
+    "dev:desktop": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev\"",
+    "dev:desktop:ssh": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev:ssh\"",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "legacy-v2:api": "node scripts/legacy-v2-api-server.mjs",
+    "legacy-v2:local-cmd": "node scripts/legacy-v2-local-cmd-bridge.mjs"
+  },
+  "dependencies": {
+    "jose": "^5.10.0",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4",
+    "eslint": "^10.8.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,94 +1,119 @@
-# CozyPad 功能文件
+# CozyPad3
 
-CozyPad 是一套用於遠端伺服器工作的 Web / Desktop 管理介面，整合 SSH server、Agent CLI、檔案瀏覽、終端機、研究流程圖、Markdown 彙整、Work 任務紀錄與資源監控。
+基於 `CozyPad-0.2.9-alpha` 建立的新分支專案。
 
-## 安裝教學
+**把手機／電腦連上遠端主機上的 coding agent 的工作站。**
 
-| 步驟 | 指令或動作 | 說明 |
+CozyPad 讓你從 Windows 桌面或 Android 手機，透過 SSH 管理遠端 Linux 主機：
+多分頁終端機、檔案瀏覽與編輯、CPU/GPU 監控，以及（開發中的）Claude Code /
+Codex / agy 等 remote agent 的對話介面。Agent 全部跑在遠端 tmux 裡——關掉
+app、斷線、換裝置，工作都不會中斷。
+
+一套 **React + TypeScript** codebase，桌面包 **Electron**、Android 包
+**Capacitor**；桌面安裝包約 100MB、Android release APK 約 7MB
+（實際大小依版本與簽章而異）。
+
+> 完整規格見 [SPEC.md](SPEC.md)；本 README 只講怎麼跑起來。
+
+## 現在能用的功能
+
+| 功能 | 狀態 |
+| --- | --- |
+| SSH 連線管理（密碼／SSH Key、OS 安全儲存、host key 驗證、斷線自動重連） | ✅ |
+| 多分頁終端機（xterm.js、右鍵複製貼上、常用指令面板、手機 Termux 式按鍵列） | ✅ |
+| 遠端檔案：類型圖示、symlink 跳轉、任意路徑導覽、下載保留原始檔名、右鍵／長按選單、兩段式複製搬移 | ✅ |
+| 檔案編輯：Monaco（VS Code 引擎）語法高亮、Ctrl+S 直接存回遠端；Markdown 預覽；PDF 內嵌檢視 | ✅ |
+| 監控：CPU／記憶體／GPU 與 GPU processes，每 5 秒更新 | ✅ |
+| 遠端設定：tmux 滑鼠模式開關；tmux 缺失時一鍵使用者層級安裝 | ✅ |
+| Agents 對話（Claude / Codex / agy） | 🚧 架構與 parser 完成，接線中 |
+| Research Lab（實驗管理） | 🚧 UI 雛形 |
+
+## 現有功能預覽
+
+| 畫面 | 截圖 | 說明 |
 | --- | --- | --- |
-| 1 | 安裝 Node.js LTS | 建議使用目前 LTS 版本，並啟用 Corepack。 |
-| 2 | `corepack enable` | 啟用 pnpm 管理。 |
-| 3 | `corepack pnpm install` | 安裝專案依賴。 |
-| 4 | `corepack pnpm dev` | 啟動前端開發頁面。 |
-| 5 | `corepack pnpm dev:v2-web` | 同時啟動前端與 legacy SSH API。 |
-| 6 | `corepack pnpm typecheck` | 檢查 TypeScript 型別。 |
-| 7 | `corepack pnpm build` | 建置正式版本。 |
+| Agents / Codex | ![Agents / Codex](docs/screenshots/feature-agents.png) | Codex 採用類 Claude 的 agent 工作區：左側任務列表、中間對話 timeline、右側遠端上下文與工具狀態。 |
+| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) | 連線後可開啟多分頁終端，並保留常用指令面板與快速執行按鈕。 |
+| Files | ![Files](docs/screenshots/feature-files.png) | 遠端檔案入口與預覽區，後續用 SSH server 設定瀏覽資料並支援文字、Markdown、PDF、圖片預覽。 |
+| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) | 顯示 CPU、Memory、GPU、GPU processes 等即時監控資訊，適合快速確認遠端資源狀態。 |
 
-## 功能總覽
+## 快速開始
 
-| 模組 | 目前能力 |
+### 需求
+
+只需要 **Node.js LTS + pnpm**（不需要 Flutter、Rust、Visual Studio、Android Studio）：
+
+```bash
+corepack enable   # 或 npm install -g pnpm
+pnpm install
+pnpm test         # 全綠即環境就緒
+```
+
+### 日常使用
+
+| 做什麼 | 操作 |
 | --- | --- |
-| Agents | 支援 Codex、Claude、agy、bailian 分頁；可綁定 SSH server 執行遠端 CLI 工作。 |
-| Codex | 支援遠端 Codex CLI 工作分頁、Markdown 對話輸出、圖片拖曳或貼上、Work 任務紀錄。 |
-| Claude | 支援遠端 Claude CLI 對話介面，並保留工作紀錄與使用狀態。 |
-| agy | 支援遠端 agy CLI 檢查、執行、對話式回覆與 Work 顯示。 |
-| bailian | 新增 bailian CLI 分頁，支援 txt key 載入與遠端執行。 |
-| Terminal | 使用既有 SSH server 清單連線，支援 localhost 模式與遠端 shell。 |
-| Files | 支援 SSH server 檔案瀏覽、預覽、右鍵刪除、重新命名與新增資料夾。 |
-| Research | 支援可拖曳流程圖、節點連線、MD.md、MD.mix 與送 91 分析。 |
-| Work | 彙整 Codex / Claude / agy / bailian 任務，顯示 run、status、duration、seed、start date、end date。 |
-| Markdown | 支援多個 md / markdown / txt 檔案拖曳匯入與整理結果預覽。 |
-| Monitor | 以單機一頁方式顯示 CPU、RAM、DISK、GPU，右側 drawer 顯示 online server。 |
+| 連真實主機使用 | 雙擊 `CozyPad.bat`，或 `pnpm --filter @cozypad/desktop start` |
+| Demo（內建假主機，零設定） | 雙擊 `CozyPad-Demo.bat` |
+| UI 開發（瀏覽器熱更新） | `pnpm dev` → http://localhost:5173 |
+| 公開預覽 domain | https://cozypad.modoubletw.com/ |
+| 桌面開發（Electron 熱更新，mock） | `pnpm dev:desktop` |
+| 桌面開發（真 SSH） | `pnpm dev:desktop:ssh` |
+| Android debug APK | `pnpm --filter @cozypad/mobile apk:debug`（需 Android SDK + JDK 21） |
+| Android signed release APK | 設定簽章環境變數後執行 `pnpm --filter @cozypad/mobile apk` |
+| 檢查 | `pnpm lint` / `pnpm typecheck` / `pnpm test` |
 
-## 近期更新
+第一次連主機：右上 **⚙** 新增連線 → 選擇「密碼」或「SSH Key」→ Connect
+→ 核對並確認 host key 指紋。關閉「以 OS 安全儲存保留驗證資料」時，憑證只保留
+到本次 app 結束，期間仍可自動重連。
 
-| 日期 | 模組 | 更新內容 |
+更多細節：[docs/DEV_V3.md](docs/DEV_V3.md)（開發指南）、
+[docs/TUTORIAL_ELECTRON_CAPACITOR.md](docs/TUTORIAL_ELECTRON_CAPACITOR.md)
+（從零到日常 routine，含手機 live reload）。
+
+## Repository 結構
+
+```
+apps/
+  app/        共用 React UI（桌面與手機同一套；可純瀏覽器 + mock 開發）
+  desktop/    Electron shell：SSH/ssh2、加密憑證、telemetry、檔案操作、tmux
+  mobile/     Capacitor Android shell
+packages/
+  contracts/      Zod schemas、PlatformBridge、IPC 協定（跨平台唯一事實來源）
+  telemetry/      /proc/stat、free、nvidia-smi 解析
+  tmux-runtime/   tmux session 管理、reconciliation、佈建
+  adapter-claude/ Claude CLI stream-json → normalized events
+  test-fixtures/  mock 檔案系統／PTY／telemetry／agent 資料
+docs/           開發指南、教學、ADR、協定
+lib/ 等          舊 Flutter 版（cutover 前保留，勿改）
+```
+
+架構鐵則（lint 強制）：`apps/app` 不得直接 import 任何平台 API——一律經由
+`PlatformBridge`。這使桌面殼未來可整顆替換（Electron ⇄ Tauri）而不動 UI。
+
+## 完整移除
+
+CozyPad 只寫三個地方，全部可以清乾淨：
+
+| 位置 | 內容 | 怎麼清 |
 | --- | --- | --- |
-| 2026-08-05 | Agents | 新增 `bailian` 分頁，位置在 `agy` 右側。 |
-| 2026-08-05 | bailian | 新增 `新增 key` 按鈕，只接受 `.txt` key 檔案。 |
-| 2026-08-05 | bailian | key 只保留在目前頁面記憶體，不顯示、不寫入 localStorage、不存檔、不放入 Work 紀錄。 |
-| 2026-08-05 | bailian | 新增 `/api/ssh/servers/:id/bailian-status` 與 `/api/ssh/bailian/run`。 |
-| 2026-08-05 | bailian | 送出 prompt 時，key 只在該次 request 中傳入後端，後端以環境變數提供給 CLI。 |
-| 2026-08-05 | Work | Work 新增 bailian 任務來源，刪除任務後會同步清除對應紀錄。 |
-| 2026-08-05 | Agent SSH | agy / bailian 都遵守 transport failure cooldown，不自動反覆重連 SSH。 |
-| 2026-08-05 | Docs | README 重新整理為乾淨 UTF-8 中文內容，移除亂碼。 |
-| 2026-08-04 | Research | 新增可拖曳流程圖、節點刪除、綠色連線、箭頭方向與多方向連接點。 |
-| 2026-08-04 | Research | 新增 `default analysis diagram` 與 `mix analysis diagram`。 |
-| 2026-08-04 | MD.md | 接收單一流程圖分析結果，作為訓練排程 prompt。 |
-| 2026-08-04 | MD.mix | 接收五份流程圖 feedback：模型建議、超參數建議、資料前處理建議、模型評估建議、整體建議。 |
-| 2026-08-04 | Flowchart API | 支援 batch flowchart markdown 分析，每批 2 到 3 個檔案，依空閒 GPU 判斷。 |
-| 2026-08-04 | Start Training | `Start Training` 改成內嵌輸入，不使用彈出式視窗，送出後產生 Work 任務。 |
-| 2026-08-04 | Monitor | 改為右側觸碰 drawer，online server 才顯示於 drawer。 |
-| 2026-08-03 | Files | 補上圖片、PDF、Markdown、文字檔、MP3、MP4 預覽流程。 |
-| 2026-08-03 | Research Table | Research / Work 欄位改為 run、status、duration、seed、start date、end date。 |
-| 2026-08-02 | 整合 | 以 CozyPad-0.2.9-alpha 為基礎，融合 v1 SSH 功能與 v2 Web 介面精神。 |
+| Windows 本機 | 程式本體 + Electron user data（連線設定、加密憑證、known hosts、快取） | 從「設定 → 應用程式」解除安裝即可，**app data 會一併刪除** |
+| Android | app 私有資料 | 一般解除安裝即可（Android 保證清除私有目錄）；你主動下載的檔案留在 `Downloads/CozyPad`（Android 7–9 則是儲存時選擇的位置） |
+| 遠端主機 | `~/.cozypad/`（建置暫存與 log）、shell rc 與 `~/.tmux.conf` 的 CozyPad 管理區塊、（若由 CozyPad 安裝）`~/.local/bin/tmux` | **Settings → 移除與清理 → 清除**（可選是否一併移除 tmux）；只動 CozyPad 自己的區塊，不碰你其他設定 |
 
-## bailian key 安全設計
+安裝 tmux 用的建置暫存（數百 MB）在安裝成功後會自動刪除，不需手動處理。
 
-| 項目 | 行為 |
-| --- | --- |
-| 載入方式 | 使用 `新增 key` 按鈕選擇 `.txt` 檔案。 |
-| 前端保存 | 只保留在 React state；重新整理頁面後消失。 |
-| 顯示方式 | 只顯示 `loaded` 或檔名，不顯示 key 內容。 |
-| 本地儲存 | 不寫入 localStorage、sessionStorage 或工作紀錄。 |
-| 後端傳遞 | 只在該次 `/api/ssh/bailian/run` request 中使用。 |
-| 遠端執行 | 以環境變數提供給 bailian CLI，不放在 shell command argv。 |
+## 安全性
 
-## 截圖
-
-| 功能 | 圖片 |
-| --- | --- |
-| Research Diagram | ![Research Diagram](docs/screenshots/feature-research-diagram.png) |
-| Codex Agent | ![Codex Agent](docs/screenshots/feature-agents-codex.png) |
-| Research MD.mix | ![Research MD.mix](docs/screenshots/feature-research-mdmix.png) |
-| Agents | ![Agents](docs/screenshots/feature-agents.png) |
-| Files | ![Files](docs/screenshots/feature-files.png) |
-| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) |
-| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) |
-
-## 測試資料
-
-| 路徑 | 用途 |
-| --- | --- |
-| `docs/examples/markdown-summary/notes/` | Markdown 彙整測試筆記。 |
-| `docs/examples/markdown-summary/messy-proof-notes/` | 模擬雜亂研究筆記與待辦事項。 |
-| `docs/examples/markdown-summary/fake-model-logs/` | 模型分數、ablation、scoreboard 與訓練 log 測試資料。 |
-
-## Release 打包原則
-
-| 類型 | 處理方式 |
-| --- | --- |
-| `.env` / `.env.*` | 不放入 release。 |
-| SSH key / token / API key | 不放入 release。 |
-| `data/` / `.run-logs/` | 不放入 release。 |
-| `node_modules/` / `dist/` / build cache | 不放入 release，由使用者自行安裝與建置。 |
+- Desktop 以 Electron `safeStorage` 加密整份連線 profile 與 host trust（包含名稱、
+  host、port、username、密碼、私鑰與 passphrase），舊版明文 metadata 會在首次載入時
+  原子遷移；Android 以 Android Keystore 管理的 AES-256-GCM 金鑰保護 profile secret
+  與 host trust。儲存後不再把 secret 回傳 renderer／WebView
+- 已記憶的憑證綁定 profile ID、host、port、username 與驗證方式，避免
+  profile metadata 遭竄改後把憑證送往其他主機
+- SSH host key 使用標準 OpenSSH `SHA256:` fingerprint；首次或變更時必須確認，
+  已信任資料只由 privileged platform layer 管理
+- Desktop 與 Android 僅協商現代 SSH 演算法；SHA-1、DSA、CBC、3DES、RC4 與 MD5
+  不會為相容老舊伺服器而自動降級
+- Renderer 全程 sandbox + contextIsolation + 嚴格 CSP；IPC 雙向 Zod 驗證
+- 不執行模型產生的任意 shell 字串（見 [ADR 0001](docs/adr/0001-solution-agent-bridge.md)）

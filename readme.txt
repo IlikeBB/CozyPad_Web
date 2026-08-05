@@ -1,69 +1,62 @@
-# CozyPad Web
+# CozyPad3
 
-目前方向是把 SSH 終端、遠端檔案瀏覽、伺服器資源監控，以及 Claude / Codex / agy 類 agent 工作區整合到同一個 Web 介面。
+CozyPad3 是基於 CozyPad-0.2.9-alpha 建構的遠端工作站介面，目標是把 SSH 終端機、遠端檔案瀏覽、伺服器監控，以及 Claude / Codex / agy 等 coding agent 統一放在同一個可切換的工作環境中。
 
-## 安裝教學
-
-| 步驟 | 操作 | 說明 |
-| --- | --- | --- |
-| 1 | 下載 Release .zip | 從 GitHub Releases 下載最新的 CozyPad3 public preview zip。 |
-| 2 | 解壓縮專案 | 將 zip 解到本機工作目錄，進入 CozyPad3 資料夾。 |
-| 3 | 安裝 Node.js LTS | 建議使用 Node.js LTS，並確認 corepack 可用。 |
-| 4 | 安裝依賴 | 執行 corepack pnpm install。 |
-| 5 | 建立本機設定 | 需要連接 SSH / domain / agent 時，依照 legacy-v2.env.example 建立自己的 .env。 |
-| 6 | 啟動開發模式 | 一般前端預覽執行 corepack pnpm dev；需要 v2 SSH API 時執行 corepack pnpm dev:v2-web。 |
-| 7 | 檢查專案 | 執行 corepack pnpm typecheck，必要時再執行 corepack pnpm lint / corepack pnpm build。 |
-
-功能截圖保留在 docs/screenshots/，README 不再用功能預覽表格展開。
-
-## 功能總覽
-
-| 模組 | 說明 |
-| --- | --- |
-| SSH Workspace | 管理多台 SSH server、終端分頁、常用指令與遠端工作狀態。 |
-| Files | 以 SSH server 為目標瀏覽遠端檔案，並提供檔案預覽與基本操作。 |
-| Monitor | 透過既有 SSH 設定讀取伺服器資源狀態；避免高頻率重複登入。 |
-| Agents | Claude、Codex、agy 等 agent 以遠端 server / cwd 為工作目標。 |
-| Markdown | 上傳多份 Markdown / text 筆記，交由後端彙整成可閱讀的 Markdown summary。 |
-| Security | 登入與高風險操作採分層確認；私密設定留在本機環境，不放入 GitHub。 |
-
-## 近期更新補充
-
-| 日期 | 模組 | 更新內容 |
-| --- | --- | --- |
-| 2026-08-03 | Markdown | 新增 Markdown 筆記彙整工作區，可拖入多個 .md / .markdown / .txt 檔案，彙整結果以 Markdown 排版呈現。 |
-| 2026-08-03 | Markdown UI | 上傳檔案與 Summary result 改為由左到右排列；彙整中會暫時隱藏上傳區，完成後再顯示。 |
-| 2026-08-03 | 測試資料 | 補上 Markdown 筆記與假模型訓練 log 測試資料，方便驗證彙整結果是否真的被整理過。 |
-| 2026-08-04 | Research Flowchart | Research 改成可編輯流程圖畫布，支援拖曳方塊、四向連接點、綠色方向箭頭、右鍵新增方塊與刪除連線。 |
-| 2026-08-04 | Research / MD.md | 流程圖可送到遠端分析後回填 MD.md；Start Training 改為頁面內嵌 prompt 表單，不再使用彈出式視窗。 |
-| 2026-08-04 | Work / Codex | Start Training 會建立訓練與監控任務並同步到 Work；Codex 回覆支援 Markdown，內部狀態與連線噪音改為收合或隱藏。 |
-
-## 測試資料
-
-| 位置 | 用途 |
-| --- | --- |
-| docs/examples/markdown-summary/notes/ | CozyPad 功能筆記、會議紀錄與待辦，用於測試多檔筆記彙整。 |
-| docs/examples/markdown-summary/messy-proof-notes/ | 故意保留重複、順序混亂與口語內容，用於確認 summary 是否有重新整理。 |
-| docs/examples/markdown-summary/fake-model-logs/ | 假模型分數、訓練 log、ablation 與錯誤分析，用於測試研究紀錄整理。 |
-
-## 快速啟動摘要
-
-| 操作 | 指令 |
-| --- | --- |
-| 安裝套件 | corepack pnpm install |
-| 啟動 Web dev server | corepack pnpm dev |
-| 型別檢查 | corepack pnpm typecheck |
-| Lint | corepack pnpm lint |
-| Build | corepack pnpm build |
-
-## Release 包內容
-
-Release 附件採用 .zip。打包時會排除本機環境設定、資料目錄、執行紀錄、依賴目錄、建置輸出、快取、金鑰與憑證類檔案。
-
-## 注意事項
+## 專案定位
 
 | 項目 | 說明 |
 | --- | --- |
-| GitHub README | README.md 為 GitHub 首頁；readme.txt 保留為純文字備份。 |
-| 私密資料 | 若要部署，請自行建立本機 .env 與憑證檔，不要提交到 GitHub。 |
-| 預覽截圖 | 截圖已移除登入頁與敏感連線資訊，只保留功能畫面。 |
+| 核心用途 | 透過 SSH 連到遠端 Linux 伺服器，讓使用者可以在瀏覽器、桌面端或手機端操作遠端工作環境。 |
+| Agent 設計 | Claude、Codex、agy 都以遠端伺服器為工作目標，避免把任務錯誤執行在本機電腦。 |
+| 工作保存 | 遠端任務預期綁定 SSH server 與遠端工作目錄，讓使用者切換頁面或重新開啟後仍能接續工作。 |
+| 介面方向 | v3 以 CozyPad-0.2.9-alpha 的穩定 SSH / file / monitor 基礎為主，融合 v2 Web 的 agent 對話體驗。 |
+
+## 主要功能
+
+| 功能區 | 目前方向 | 重點 |
+| --- | --- | --- |
+| SSH workspace | 遠端終端與 server 管理 | 支援多台 SSH server、server 下拉選擇、連線狀態顯示與常用指令。 |
+| Files | 遠端檔案瀏覽 | 參考 v1 file viewer，可瀏覽 server 檔案，並用彈出式視窗預覽文字、Markdown、PDF、圖片。 |
+| Monitor | 系統管理預覽 | 顯示可連線伺服器的 CPU、RAM、Disk、GPU 等狀態，避免無限制重複 SSH 嘗試。 |
+| Agents | Claude / Codex / agy 對話 | 採用類似 Claude 的 session list、對話 timeline、工具卡片、diff 區塊與底部輸入列。 |
+| Security | 帳號密碼與 2FA | CozyPad 自己保留帳密與 TOTP 2FA，並建議前層搭配 Cloudflare Access。 |
+
+## 現有功能預覽
+
+| 畫面 | 截圖 | 說明 |
+| --- | --- | --- |
+| Agents / Codex | ![Agents / Codex](docs/screenshots/feature-agents.png) | Codex 採用類 Claude 的 agent 工作區：左側任務列表、中間對話 timeline、右側遠端上下文與工具狀態。 |
+| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) | 連線後可開啟多分頁終端，並保留常用指令面板與快速執行按鈕。 |
+| Files | ![Files](docs/screenshots/feature-files.png) | 遠端檔案入口與預覽區，後續用 SSH server 設定瀏覽資料並支援文字、Markdown、PDF、圖片預覽。 |
+| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) | 顯示 CPU、Memory、GPU、GPU processes 等即時監控資訊，適合快速確認遠端資源狀態。 |
+
+## Agent 介面規劃
+
+| 元件 | Claude | Codex |
+| --- | --- | --- |
+| Session / Task 列表 | 左側顯示不同任務，可搜尋與切換。 | 左側顯示 Codex 工作，可依遠端 server 與目錄保存。 |
+| 對話排列 | 使用者訊息與 agent 回覆分流顯示，工具輸出用卡片呈現。 | 使用者在右側，Codex 在左側；長輸出折疊，指令、程式碼、diff 用不同區塊顏色呈現。 |
+| 遠端綁定 | 綁定 SSH server、project、cwd、tmux session。 | 預期每個 Codex 任務都綁定遠端 SSH server 與工作目錄。 |
+| 輸入列 | 底部固定輸入，Enter 送出，Shift+Enter 換行。 | 底部固定輸入，支援送出需求與新增工作。 |
+
+## 安全設計重點
+
+| 項目 | 做法 |
+| --- | --- |
+| 登入保護 | CozyPad 帳號密碼加上 TOTP 2FA。 |
+| 外部存取 | 建議由 Cloudflare Access / WAF 作為第一層入口保護。 |
+| SSH 憑證 | 新增 server 時用密碼安裝 key，之後優先使用 key，不保存明文密碼。 |
+| 高風險操作 | 檔案刪除、move、domain 更新等操作需要二次確認。 |
+| SSH 重試 | 連線失敗後不自動狂重試，避免被遠端主機誤判為攻擊。 |
+
+## 開發與啟動
+
+| 操作 | 指令 |
+| --- | --- |
+| 安裝套件 | `corepack pnpm install` |
+| 啟動 Web dev server | `corepack pnpm dev` |
+| 公開預覽 domain | `https://cozypad.modoubletw.com/` |
+| 型別檢查 | `corepack pnpm typecheck` |
+| Lint | `corepack pnpm lint` |
+
+目前開發畫面可在 `http://localhost:5173/` 檢視；公開預覽已掛到 `https://cozypad.modoubletw.com/`。
