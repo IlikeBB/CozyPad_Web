@@ -11,6 +11,13 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | 工作保存 | 遠端任務預期綁定 SSH server 與遠端工作目錄，讓使用者切換頁面或重新開啟後仍能接續工作。 |
 | 介面方向 | CozyPad4 以 CozyPad-0.2.9-alpha 的穩定 SSH / file / monitor 基礎為主，融合 v2 Web 的 agent 對話體驗。 |
 
+## Contributors
+
+| GitHub | 角色 |
+| --- | --- |
+| [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
+| [youchengchao](https://github.com/youchengchao) | CozyPad 原始專案與協作開發 |
+
 ## 主要功能
 
 | 功能區 | 目前方向 | 重點 |

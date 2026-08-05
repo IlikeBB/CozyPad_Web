@@ -15,6 +15,13 @@ app、斷線、換裝置，工作都不會中斷。
 
 > 完整規格見 [SPEC.md](SPEC.md)；本 README 只講怎麼跑起來。
 
+## Contributors
+
+| GitHub | 角色 |
+| --- | --- |
+| [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
+| [youchengchao](https://github.com/youchengchao) | CozyPad 原始專案與協作開發 |
+
 ## 現在能用的功能
 
 | 功能 | 狀態 |
