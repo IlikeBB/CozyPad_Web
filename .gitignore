@@ -57,3 +57,20 @@ apps/desktop/release*/
 .env.*.local
 data/
 .run-logs/
+
+# Local secrets / machine state
+credentials.json
+**/credentials.json
+known_hosts
+**/known_hosts
+ssh-config.local
+**/ssh-config.local
+*.key
+*.pem
+*.ppk
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.sqlite
+*.sqlite3

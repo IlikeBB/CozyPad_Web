@@ -198,11 +198,11 @@ const SSH_CONTROL_MASTER_ENABLED =
   process.env.COZYPAD_SSH_CONTROL_MASTER === "true" ||
   (process.env.COZYPAD_SSH_CONTROL_MASTER === undefined && process.platform !== "win32");
 const SSH_CONTROL_PERSIST_SECONDS = Number(
-  process.env.COZYPAD_SSH_CONTROL_PERSIST_SECONDS || 12 * 60 * 60,
+  process.env.COZYPAD_SSH_CONTROL_PERSIST_SECONDS || 24 * 60 * 60,
 );
 const SSH2_BROKER_ENABLED = process.env.COZYPAD_SSH2_BROKER !== "false";
 const SSH2_BROKER_IDLE_MS = Number(
-  process.env.COZYPAD_SSH2_BROKER_IDLE_MS || 30 * 60 * 1000,
+  process.env.COZYPAD_SSH2_BROKER_IDLE_MS || 24 * 60 * 60 * 1000,
 );
 const SSH2_BROKER_MAX_CHANNELS = Math.max(
   1,
@@ -225,7 +225,7 @@ const MONITOR_SHARED_IDLE_TTL_MS = Math.max(
   Number(process.env.COZYPAD_MONITOR_SHARED_IDLE_TTL_MS || 0) || 0,
 );
 const TERMINAL_DETACHED_TTL_MS = Number(
-  process.env.COZYPAD_TERMINAL_DETACHED_TTL_MS || 30 * 60 * 1000,
+  process.env.COZYPAD_TERMINAL_DETACHED_TTL_MS || 24 * 60 * 60 * 1000,
 );
 const TERMINAL_BUFFER_LIMIT = Number(process.env.COZYPAD_TERMINAL_BUFFER_LIMIT || 240000);
 const TERMINAL_WS_PING_MS = Number(process.env.COZYPAD_TERMINAL_WS_PING_MS || 25000);
@@ -234,7 +234,7 @@ const TERMINAL_AGENT_RUN_TIMEOUT_MS = Number(
 );
 const AGENT_TERMINAL_BRIDGE_ENABLED = process.env.COZYPAD_AGENT_TERMINAL_BRIDGE !== "false";
 const CODEX_SESSION_DETACHED_TTL_MS = Number(
-  process.env.COZYPAD_CODEX_SESSION_DETACHED_TTL_MS || 60 * 60 * 1000,
+  process.env.COZYPAD_CODEX_SESSION_DETACHED_TTL_MS || 24 * 60 * 60 * 1000,
 );
 const CODEX_SESSION_BUFFER_LIMIT = Number(process.env.COZYPAD_CODEX_SESSION_BUFFER_LIMIT || 240000);
 const CODEX_SESSION_PENDING_LIMIT = Number(process.env.COZYPAD_CODEX_SESSION_PENDING_LIMIT || 8);
@@ -247,6 +247,7 @@ const CLAUDE_SESSION_BUFFER_LIMIT = Number(
 const CLAUDE_SESSION_PENDING_LIMIT = Number(
   process.env.COZYPAD_CLAUDE_SESSION_PENDING_LIMIT || CODEX_SESSION_PENDING_LIMIT,
 );
+const CLAUDE_SESSION_HISTORY_LIMIT = Number(process.env.COZYPAD_CLAUDE_SESSION_HISTORY_LIMIT || 6);
 const AGY_SESSION_DETACHED_TTL_MS = Number(
   process.env.COZYPAD_AGY_SESSION_DETACHED_TTL_MS || CODEX_SESSION_DETACHED_TTL_MS,
 );
@@ -256,6 +257,7 @@ const AGY_SESSION_BUFFER_LIMIT = Number(
 const AGY_SESSION_PENDING_LIMIT = Number(
   process.env.COZYPAD_AGY_SESSION_PENDING_LIMIT || CODEX_SESSION_PENDING_LIMIT,
 );
+const AGY_SESSION_HISTORY_LIMIT = Number(process.env.COZYPAD_AGY_SESSION_HISTORY_LIMIT || 6);
 const BAILIAN_SESSION_DETACHED_TTL_MS = Number(
   process.env.COZYPAD_BAILIAN_SESSION_DETACHED_TTL_MS || CODEX_SESSION_DETACHED_TTL_MS,
 );
@@ -364,9 +366,9 @@ const REMOTE_CODEX_WORKFLOW_STDOUT_LIMIT = Number(
   process.env.COZYPAD_REMOTE_CODEX_WORKFLOW_STDOUT_LIMIT || 5 * 1024 * 1024,
 );
 const REMOTE_AGENT_WORKER_IDLE_MS = Number(
-  process.env.COZYPAD_REMOTE_AGENT_WORKER_IDLE_MS || 30 * 60 * 1000,
+  process.env.COZYPAD_REMOTE_AGENT_WORKER_IDLE_MS || 24 * 60 * 60 * 1000,
 );
-const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const SESSION_TTL_MS = Number(process.env.COZYPAD_SESSION_TTL_MS || 24 * 60 * 60 * 1000);
 const sessions = new Map();
 const twoFactorChallenges = new Map();
 const authRateLimits = new Map();
@@ -492,6 +494,33 @@ function sendEmpty(response, statusCode, headers = {}) {
     ...headers,
   });
   response.end();
+}
+
+function corsHeadersForRequest(request) {
+  const origin = normalizeOrigin(request.headers.origin);
+  if (!origin) {
+    return {};
+  }
+  if (!ALLOWED_ORIGINS.has(origin) && origin !== requestOriginFromHost(request)) {
+    return {};
+  }
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-credentials": "true",
+    "access-control-allow-methods": "GET,HEAD,POST,PUT,DELETE,OPTIONS",
+    "access-control-allow-headers":
+      "content-type,x-cozypad-request,x-cozypad-rpc,x-requested-with",
+    "access-control-max-age": "600",
+    vary: "Origin",
+  };
+}
+
+function applyCorsHeaders(request, response) {
+  const headers = corsHeadersForRequest(request);
+  for (const [key, value] of Object.entries(headers)) {
+    response.setHeader(key, value);
+  }
+  return headers;
 }
 
 function truncateForApi(value, limit = 12000) {
@@ -10789,6 +10818,69 @@ async function runRemoteAgentSocketPrompt(socket, session, payload) {
   });
 }
 
+function cleanRemoteAgentHistoryText(value, maxLength = 6000) {
+  const text = String(value || "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const lower = line.trim().toLowerCase();
+      return lower && !lower.startsWith("[cozypad]");
+    })
+    .join("\n")
+    .trim();
+  return text.length > maxLength ? text.slice(-maxLength) : text;
+}
+
+function appendRemoteAgentSessionHistory(agentSession, limit, userPrompt, assistantOutput) {
+  if (!agentSession) {
+    return;
+  }
+
+  const prompt = cleanRemoteAgentHistoryText(userPrompt, 3000);
+  const output = cleanRemoteAgentHistoryText(assistantOutput, 7000);
+  if (!prompt && !output) {
+    return;
+  }
+
+  const history = Array.isArray(agentSession.history) ? agentSession.history : [];
+  history.push({
+    prompt,
+    output,
+    timestamp: new Date().toISOString(),
+  });
+  agentSession.history = history.slice(-Math.max(1, Number(limit || 6)));
+}
+
+function buildRemoteAgentPromptWithHistory(agentLabel, agentSession, userPrompt, limit) {
+  const prompt = String(userPrompt || "").trim();
+  const history = (Array.isArray(agentSession?.history) ? agentSession.history : [])
+    .slice(-Math.max(1, Number(limit || 6)))
+    .map((turn, index) => {
+      const user = cleanRemoteAgentHistoryText(turn.prompt, 2500);
+      const assistant = cleanRemoteAgentHistoryText(turn.output, 5000);
+      return [`Turn ${index + 1}`, user ? `User:\n${user}` : "", assistant ? `${agentLabel}:\n${assistant}` : ""]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (!history) {
+    return prompt;
+  }
+
+  return [
+    `You are continuing the same CozyPad ${agentLabel} task.`,
+    "Use the previous context only when it is relevant. Do not repeat old answers unless the user asks.",
+    "",
+    "Previous task context:",
+    history,
+    "",
+    "Current user request:",
+    prompt,
+  ].join("\n");
+}
+
 function parseClaudeSessionPayload(payload) {
   const body = normalizeRemoteAgentSocketPayload(payload);
   return {
@@ -10891,7 +10983,7 @@ function detachClaudeSocket(claudeSession, socket) {
   scheduleClaudeSessionCleanup(claudeSession);
 }
 
-function attachClaudeSocket(claudeSession, socket) {
+function attachClaudeSocket(claudeSession, socket, options = {}) {
   if (!claudeSession || claudeSession.ended) {
     return;
   }
@@ -10907,7 +10999,7 @@ function attachClaudeSocket(claudeSession, socket) {
   claudeSession.lastAttachedAt = Date.now();
   socket.setKeepAlive?.(true, 30000);
 
-  if (claudeSession.buffer) {
+  if (claudeSession.buffer && !options.suppressReplay) {
     sendWebSocketText(socket, claudeSession.buffer);
   } else {
     sendWebSocketText(socket, `[CozyPad] remote Claude attached to ${claudeSession.serverName}\r\n`);
@@ -10961,6 +11053,7 @@ function getOrCreateClaudeSession(session, selectedServer, taskId = "") {
     status: "completed",
     activeJob: null,
     pendingPrompts: [],
+    history: [],
     running: false,
     sockets: new Set(),
     buffer: "",
@@ -11130,12 +11223,18 @@ async function runClaudeSessionPrompt(claudeSession, selectedServer, payload) {
   claudeSession.running = true;
   claudeSession.status = "running";
   appendClaudeSessionOutput(claudeSession, "\r\n[CozyPad] remote Claude starting\r\n");
+  const promptForRun = buildRemoteAgentPromptWithHistory(
+    "Claude",
+    claudeSession,
+    prompt,
+    CLAUDE_SESSION_HISTORY_LIMIT,
+  );
 
   if (isSystemLocalServer(runServer)) {
     try {
       const result = await runRemoteAgentRunPromptForJob(session, "claude", {
         serverId: runServer.id,
-        prompt,
+        prompt: promptForRun,
         remotePath,
         allowedDirs: parsed.allowedDirs,
         model: parsed.model,
@@ -11143,6 +11242,9 @@ async function runClaudeSessionPrompt(claudeSession, selectedServer, payload) {
       const output = result.output || result.stderr || "";
       if (output) {
         appendClaudeSessionOutput(claudeSession, output.endsWith("\n") ? output : `${output}\r\n`);
+      }
+      if (result.status === "completed") {
+        appendRemoteAgentSessionHistory(claudeSession, CLAUDE_SESSION_HISTORY_LIMIT, prompt, output);
       }
       claudeSession.status = result.status === "completed" ? "completed" : "failed";
       finishClaudeSessionJob(
@@ -11179,8 +11281,8 @@ async function runClaudeSessionPrompt(claudeSession, selectedServer, payload) {
   try {
     job =
       AGENT_TERMINAL_BRIDGE_ENABLED && findReusableTerminalSession(session, runServer.id, parsed.terminalId)
-        ? await spawnTerminalAgentJob(session, "claude", prompt, runServer, streamOptions)
-        : await spawnRemoteAgentWorkerJob("claude", prompt, runServer, streamOptions);
+        ? await spawnTerminalAgentJob(session, "claude", promptForRun, runServer, streamOptions)
+        : await spawnRemoteAgentWorkerJob("claude", promptForRun, runServer, streamOptions);
   } catch (error) {
     claudeSession.status = "failed";
     const terminalBridgeClosedByUser = isTerminalBridgeUserClosedError(error);
@@ -11213,6 +11315,9 @@ async function runClaudeSessionPrompt(claudeSession, selectedServer, payload) {
     const transportError = isRemoteCodexSshTransportError(`${stderr}\n${stdout}\n${errorMessage}`);
     const ok = !error && Number(code || 0) === 0;
     claudeSession.status = ok ? "completed" : "failed";
+    if (ok) {
+      appendRemoteAgentSessionHistory(claudeSession, CLAUDE_SESSION_HISTORY_LIMIT, prompt, stdout || stderr);
+    }
 
     let message = "";
     if (!ok) {
@@ -11346,7 +11451,7 @@ function detachAgySocket(agySession, socket) {
   scheduleAgySessionCleanup(agySession);
 }
 
-function attachAgySocket(agySession, socket) {
+function attachAgySocket(agySession, socket, options = {}) {
   if (!agySession || agySession.ended) {
     return;
   }
@@ -11362,7 +11467,7 @@ function attachAgySocket(agySession, socket) {
   agySession.lastAttachedAt = Date.now();
   socket.setKeepAlive?.(true, 30000);
 
-  if (agySession.buffer) {
+  if (agySession.buffer && !options.suppressReplay) {
     sendWebSocketText(socket, agySession.buffer);
   } else {
     sendWebSocketText(socket, `[CozyPad] remote agy attached to ${agySession.serverName}\r\n`);
@@ -11416,6 +11521,7 @@ function getOrCreateAgySession(session, selectedServer, taskId = "") {
     status: "completed",
     activeJob: null,
     pendingPrompts: [],
+    history: [],
     running: false,
     sockets: new Set(),
     buffer: "",
@@ -11584,18 +11690,27 @@ async function runAgySessionPrompt(agySession, selectedServer, payload) {
   agySession.running = true;
   agySession.status = "running";
   appendAgySessionOutput(agySession, "\r\n[CozyPad] remote agy starting\r\n");
+  const promptForRun = buildRemoteAgentPromptWithHistory(
+    "agy",
+    agySession,
+    prompt,
+    AGY_SESSION_HISTORY_LIMIT,
+  );
 
   if (isSystemLocalServer(runServer)) {
     try {
       const result = await runRemoteAgentRunPromptForJob(session, "agy", {
         serverId: runServer.id,
-        prompt,
+        prompt: promptForRun,
         remotePath,
         model: parsed.model,
       });
       const output = result.output || result.stderr || "";
       if (output) {
         appendAgySessionOutput(agySession, output.endsWith("\n") ? output : `${output}\r\n`);
+      }
+      if (result.status === "completed") {
+        appendRemoteAgentSessionHistory(agySession, AGY_SESSION_HISTORY_LIMIT, prompt, output);
       }
       agySession.status = result.status === "completed" ? "completed" : "failed";
       finishAgySessionJob(
@@ -11631,8 +11746,8 @@ async function runAgySessionPrompt(agySession, selectedServer, payload) {
   try {
     job =
       AGENT_TERMINAL_BRIDGE_ENABLED && findReusableTerminalSession(session, runServer.id, parsed.terminalId)
-        ? await spawnTerminalAgentJob(session, "agy", prompt, runServer, streamOptions)
-        : await spawnRemoteAgentWorkerJob("agy", prompt, runServer, streamOptions);
+        ? await spawnTerminalAgentJob(session, "agy", promptForRun, runServer, streamOptions)
+        : await spawnRemoteAgentWorkerJob("agy", promptForRun, runServer, streamOptions);
   } catch (error) {
     agySession.status = "failed";
     const terminalBridgeClosedByUser = isTerminalBridgeUserClosedError(error);
@@ -11665,6 +11780,9 @@ async function runAgySessionPrompt(agySession, selectedServer, payload) {
     const transportError = isRemoteCodexSshTransportError(`${stderr}\n${stdout}\n${errorMessage}`);
     const ok = !error && Number(code || 0) === 0;
     agySession.status = ok ? "completed" : "failed";
+    if (ok) {
+      appendRemoteAgentSessionHistory(agySession, AGY_SESSION_HISTORY_LIMIT, prompt, stdout || stderr);
+    }
 
     let message = "";
     if (!ok) {
@@ -14187,7 +14305,7 @@ function detachCodexSocket(codexSession, socket) {
   scheduleCodexSessionCleanup(codexSession);
 }
 
-function attachCodexSocket(codexSession, socket) {
+function attachCodexSocket(codexSession, socket, options = {}) {
   if (!codexSession || codexSession.ended) {
     return;
   }
@@ -14203,7 +14321,7 @@ function attachCodexSocket(codexSession, socket) {
   codexSession.lastAttachedAt = Date.now();
   socket.setKeepAlive?.(true, 30000);
 
-  if (codexSession.buffer) {
+  if (codexSession.buffer && !options.suppressReplay) {
     sendWebSocketText(socket, codexSession.buffer);
   } else {
     sendWebSocketText(socket, `[CozyPad] codex attached to ${codexSession.serverName}\r\n`);
@@ -14962,6 +15080,7 @@ async function handleCodexUpgrade(request, socket) {
   const frameState = { buffer: Buffer.alloc(0) };
   const requestedHistoryId = url.searchParams.get("historyId");
   const requestedTaskId = normalizeCodexSessionTaskId(url.searchParams.get("taskId"));
+  const suppressReplay = url.searchParams.get("suppressReplay") === "1";
   let activeHistory = null;
 
   if (requestedHistoryId) {
@@ -14979,7 +15098,7 @@ async function handleCodexUpgrade(request, socket) {
     activeHistory,
     requestedTaskId,
   );
-  attachCodexSocket(codexSession, socket);
+  attachCodexSocket(codexSession, socket, { suppressReplay });
 
   socket.on("data", (chunk) => {
     readWebSocketFrames(
@@ -15058,8 +15177,9 @@ async function handleClaudeUpgrade(request, socket) {
 
   const frameState = { buffer: Buffer.alloc(0) };
   const requestedTaskId = normalizeCodexSessionTaskId(url.searchParams.get("taskId"));
+  const suppressReplay = url.searchParams.get("suppressReplay") === "1";
   const claudeSession = getOrCreateClaudeSession(session, selectedServer, requestedTaskId);
-  attachClaudeSocket(claudeSession, socket);
+  attachClaudeSocket(claudeSession, socket, { suppressReplay });
 
   socket.on("data", (chunk) => {
     readWebSocketFrames(
@@ -15138,8 +15258,9 @@ async function handleAgyUpgrade(request, socket) {
 
   const frameState = { buffer: Buffer.alloc(0) };
   const requestedTaskId = normalizeCodexSessionTaskId(url.searchParams.get("taskId"));
+  const suppressReplay = url.searchParams.get("suppressReplay") === "1";
   const agySession = getOrCreateAgySession(session, selectedServer, requestedTaskId);
-  attachAgySocket(agySession, socket);
+  attachAgySocket(agySession, socket, { suppressReplay });
 
   socket.on("data", (chunk) => {
     readWebSocketFrames(
@@ -15461,6 +15582,12 @@ async function handleMonitorUpgrade(request, socket) {
 }
 
 async function handleRequest(request, response) {
+  const corsHeaders = applyCorsHeaders(request, response);
+  if (request.method === "OPTIONS") {
+    sendEmpty(response, Object.keys(corsHeaders).length > 0 ? 204 : 403, corsHeaders);
+    return;
+  }
+
   const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
   let pathname = url.pathname;
   if (pathname.startsWith("/cozypad-research/")) {

@@ -1783,6 +1783,7 @@ export function LegacyCodexPanel({
       url.searchParams.set('remotePath', task.remotePath || legacyServer.defaultPath || '~');
       url.searchParams.set('taskId', task.id);
       url.searchParams.set('historyId', task.historyId);
+      if (payload) url.searchParams.set('suppressReplay', '1');
       const socket = new WebSocket(url.toString());
       let pendingPayload = payload;
       socketsRef.current.set(task.id, socket);

@@ -1,6 +1,6 @@
 # CozyPad4
 
-基於 `CozyPad-0.2.9-alpha` 建立的新分支專案。
+基於 `CozyPad-0.2.9-alpha` 持續演進的遠端工作站專案。
 
 **把手機／電腦連上遠端主機上的 coding agent 的工作站。**
 
@@ -28,14 +28,16 @@ app、斷線、換裝置，工作都不會中斷。
 | Agents 對話（Claude / Codex / agy） | 🚧 架構與 parser 完成，接線中 |
 | Research Lab（實驗管理） | 🚧 UI 雛形 |
 
-## 現有功能預覽
+## 安裝教學
 
-| 畫面 | 截圖 | 說明 |
-| --- | --- | --- |
-| Agents / Codex | ![Agents / Codex](docs/screenshots/feature-agents.png) | Codex 採用類 Claude 的 agent 工作區：左側任務列表、中間對話 timeline、右側遠端上下文與工具狀態。 |
-| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) | 連線後可開啟多分頁終端，並保留常用指令面板與快速執行按鈕。 |
-| Files | ![Files](docs/screenshots/feature-files.png) | 遠端檔案入口與預覽區，後續用 SSH server 設定瀏覽資料並支援文字、Markdown、PDF、圖片預覽。 |
-| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) | 顯示 CPU、Memory、GPU、GPU processes 等即時監控資訊，適合快速確認遠端資源狀態。 |
+| 步驟 | 指令 / 操作 |
+| --- | --- |
+| 1. 安裝 Node.js LTS | 建議使用目前 LTS 版本。 |
+| 2. 啟用 pnpm | `corepack enable` |
+| 3. 安裝套件 | `pnpm install` |
+| 4. 啟動 Web 開發版 | `pnpm dev` |
+| 5. 啟動 API | `pnpm legacy-v2:api` |
+| 6. 型別檢查 | `pnpm typecheck` |
 
 ## 快速開始
 
@@ -55,6 +57,7 @@ pnpm test         # 全綠即環境就緒
 | --- | --- |
 | 連真實主機使用 | 雙擊 `CozyPad.bat`，或 `pnpm --filter @cozypad/desktop start` |
 | Demo（內建假主機，零設定） | 雙擊 `CozyPad-Demo.bat` |
+| UI 開發（瀏覽器熱更新） | `pnpm dev` → http://localhost:5173 |
 | 桌面開發（Electron 熱更新，mock） | `pnpm dev:desktop` |
 | 桌面開發（真 SSH） | `pnpm dev:desktop:ssh` |
 | Android debug APK | `pnpm --filter @cozypad/mobile apk:debug`（需 Android SDK + JDK 21） |

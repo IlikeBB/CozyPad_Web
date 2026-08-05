@@ -69,7 +69,6 @@ const NAV_ITEMS: { id: WorkspaceId; label: string; icon: () => React.ReactElemen
 ];
 
 const SSH_AUTO_RECONNECT_MAX_ATTEMPTS = 0;
-const SSH_RUNTIME_CLOSE_ALL_PATH = '/api/ssh/runtime/close-all';
 
 type AgentTaskOpenTarget = {
   agent: 'codex' | 'claude' | 'agy' | 'bailian';
@@ -147,42 +146,12 @@ export function App() {
   const attempts = useRef(0);
   const connectInFlight = useRef(false);
   const reconnectScheduled = useRef(false);
-  const unloadCloseSent = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTicker = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     setLegacySshExecutionEnabled(state === 'connected');
   }, [state]);
-
-  useEffect(() => {
-    if (authState !== 'authenticated') return undefined;
-
-    const closeAllSshRuntime = (): void => {
-      if (unloadCloseSent.current) return;
-      unloadCloseSent.current = true;
-
-      const payload = new Blob(['{}'], { type: 'application/json' });
-      if (navigator.sendBeacon?.(SSH_RUNTIME_CLOSE_ALL_PATH, payload)) {
-        return;
-      }
-
-      void fetch(SSH_RUNTIME_CLOSE_ALL_PATH, {
-        method: 'POST',
-        keepalive: true,
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      }).catch(() => undefined);
-    };
-
-    window.addEventListener('pagehide', closeAllSshRuntime);
-    window.addEventListener('beforeunload', closeAllSshRuntime);
-    return () => {
-      window.removeEventListener('pagehide', closeAllSshRuntime);
-      window.removeEventListener('beforeunload', closeAllSshRuntime);
-    };
-  }, [authState]);
 
   useEffect(() => {
     let active = true;

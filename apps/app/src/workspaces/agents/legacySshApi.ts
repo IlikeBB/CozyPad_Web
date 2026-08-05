@@ -514,6 +514,7 @@ export function openLegacyClaudeSession(options: {
   serverId: string;
   remotePath?: string;
   taskId?: string;
+  suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -521,6 +522,7 @@ export function openLegacyClaudeSession(options: {
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
+  if (options.suppressReplay) url.searchParams.set('suppressReplay', '1');
   return new WebSocket(url.toString());
 }
 
@@ -528,6 +530,7 @@ export function openLegacyAgySession(options: {
   serverId: string;
   remotePath?: string;
   taskId?: string;
+  suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -535,6 +538,7 @@ export function openLegacyAgySession(options: {
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
+  if (options.suppressReplay) url.searchParams.set('suppressReplay', '1');
   return new WebSocket(url.toString());
 }
 
@@ -626,6 +630,18 @@ function isCloudflareEdgeBlock(error: unknown): error is LegacyApiError {
     error.status === 403 &&
     /Cloudflare edge\/security/i.test(error.message)
   );
+}
+
+function shouldTryLocalLegacyApiFallback(error: unknown): boolean {
+  return isCloudflareEdgeBlock(error) || (error instanceof LegacyApiError && error.status === 0);
+}
+
+function localLegacyApiUrl(path: string): string | null {
+  if (typeof window === 'undefined') return null;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const host = window.location.hostname.toLowerCase();
+  if (host === '127.0.0.1' || host === 'localhost') return null;
+  return `http://127.0.0.1:5174${normalizedPath}`;
 }
 
 function createLegacyNetworkError(error: unknown): LegacyApiError {
@@ -755,6 +771,38 @@ async function legacyTextRpcRequest<T>(path: string, payload: unknown): Promise<
   }
 
   return readLegacyApiResponse<T>(response);
+}
+
+async function legacyApiRequestWithLocalFallback<T>(
+  path: string,
+  init?: RequestInit,
+  fallbackPath = path,
+): Promise<T> {
+  try {
+    return await legacyApiRequest<T>(path, init);
+  } catch (error) {
+    const localUrl = localLegacyApiUrl(fallbackPath);
+    if (!localUrl || !shouldTryLocalLegacyApiFallback(error)) {
+      throw error;
+    }
+    return legacyApiRequest<T>(localUrl, init);
+  }
+}
+
+async function legacyTextRpcRequestWithLocalFallback<T>(
+  path: string,
+  payload: unknown,
+  fallbackPath = path,
+): Promise<T> {
+  try {
+    return await legacyTextRpcRequest<T>(path, payload);
+  } catch (error) {
+    const localUrl = localLegacyApiUrl(fallbackPath);
+    if (!localUrl || !shouldTryLocalLegacyApiFallback(error)) {
+      throw error;
+    }
+    return legacyTextRpcRequest<T>(localUrl, payload);
+  }
 }
 
 export function getLegacySession(): Promise<LegacySessionResponse> {
@@ -993,7 +1041,7 @@ async function runLegacyRemoteAgentPromptJob<T extends LegacyAgyRunResponse>(
 export function getLegacyResearchFlowchartJob(
   jobId: string,
 ): Promise<LegacyResearchFlowchartMarkdownResponse> {
-  return legacyApiRequest<LegacyResearchFlowchartMarkdownResponse>(
+  return legacyApiRequestWithLocalFallback<LegacyResearchFlowchartMarkdownResponse>(
     `${RESEARCH_API_PREFIX}/flowchart-markdown/jobs/${encodeURIComponent(jobId)}`,
   );
 }
@@ -1009,7 +1057,7 @@ export async function analyzeLegacyResearchFlowchart(payload: {
 }): Promise<LegacyResearchFlowchartMarkdownResponse> {
   let initial: LegacyResearchFlowchartMarkdownResponse;
   try {
-    initial = await legacyApiRequest<LegacyResearchFlowchartMarkdownResponse>(
+    initial = await legacyApiRequestWithLocalFallback<LegacyResearchFlowchartMarkdownResponse>(
       `${RESEARCH_API_PREFIX}/flowchart-markdown`,
       {
         method: 'POST',
@@ -1018,9 +1066,10 @@ export async function analyzeLegacyResearchFlowchart(payload: {
     );
   } catch (error) {
     if (!isCloudflareEdgeBlock(error)) throw error;
-    initial = await legacyTextRpcRequest<LegacyResearchFlowchartMarkdownResponse>(
+    initial = await legacyTextRpcRequestWithLocalFallback<LegacyResearchFlowchartMarkdownResponse>(
       `${RESEARCH_RPC_PREFIX}/flowchart-markdown`,
       payload,
+      `${RESEARCH_RPC_PREFIX}/flowchart-markdown`,
     );
   }
 
@@ -1062,7 +1111,7 @@ export async function analyzeLegacyResearchFlowchartBatch(payload: {
 }): Promise<LegacyResearchFlowchartMarkdownResponse> {
   let initial: LegacyResearchFlowchartMarkdownResponse;
   try {
-    initial = await legacyApiRequest<LegacyResearchFlowchartMarkdownResponse>(
+    initial = await legacyApiRequestWithLocalFallback<LegacyResearchFlowchartMarkdownResponse>(
       `${RESEARCH_API_PREFIX}/flowchart-markdown/batch`,
       {
         method: 'POST',
@@ -1071,9 +1120,10 @@ export async function analyzeLegacyResearchFlowchartBatch(payload: {
     );
   } catch (error) {
     if (!isCloudflareEdgeBlock(error)) throw error;
-    initial = await legacyTextRpcRequest<LegacyResearchFlowchartMarkdownResponse>(
+    initial = await legacyTextRpcRequestWithLocalFallback<LegacyResearchFlowchartMarkdownResponse>(
       `${RESEARCH_RPC_PREFIX}/flowchart-markdown/batch`,
       payload,
+      `${RESEARCH_RPC_PREFIX}/flowchart-markdown/batch`,
     );
   }
 

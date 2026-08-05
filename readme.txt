@@ -9,7 +9,7 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | 核心用途 | 透過 SSH 連到遠端 Linux 伺服器，讓使用者可以在瀏覽器、桌面端或手機端操作遠端工作環境。 |
 | Agent 設計 | Claude、Codex、agy 都以遠端伺服器為工作目標，避免把任務錯誤執行在本機電腦。 |
 | 工作保存 | 遠端任務預期綁定 SSH server 與遠端工作目錄，讓使用者切換頁面或重新開啟後仍能接續工作。 |
-| 介面方向 | v3 以 CozyPad-0.2.9-alpha 的穩定 SSH / file / monitor 基礎為主，融合 v2 Web 的 agent 對話體驗。 |
+| 介面方向 | CozyPad4 以 CozyPad-0.2.9-alpha 的穩定 SSH / file / monitor 基礎為主，融合 v2 Web 的 agent 對話體驗。 |
 
 ## 主要功能
 
@@ -21,14 +21,16 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | Agents | Claude / Codex / agy 對話 | 採用類似 Claude 的 session list、對話 timeline、工具卡片、diff 區塊與底部輸入列。 |
 | Security | 帳號密碼與 2FA | CozyPad 自己保留帳密與 TOTP 2FA，並建議前層搭配 Cloudflare Access。 |
 
-## 現有功能預覽
+## 安裝教學
 
-| 畫面 | 截圖 | 說明 |
-| --- | --- | --- |
-| Agents / Codex | ![Agents / Codex](docs/screenshots/feature-agents.png) | Codex 採用類 Claude 的 agent 工作區：左側任務列表、中間對話 timeline、右側遠端上下文與工具狀態。 |
-| Terminal | ![Terminal](docs/screenshots/feature-terminal.png) | 連線後可開啟多分頁終端，並保留常用指令面板與快速執行按鈕。 |
-| Files | ![Files](docs/screenshots/feature-files.png) | 遠端檔案入口與預覽區，後續用 SSH server 設定瀏覽資料並支援文字、Markdown、PDF、圖片預覽。 |
-| Monitor | ![Monitor](docs/screenshots/feature-monitor.png) | 顯示 CPU、Memory、GPU、GPU processes 等即時監控資訊，適合快速確認遠端資源狀態。 |
+| 步驟 | 指令 / 操作 |
+| --- | --- |
+| 1. 安裝 Node.js LTS | 建議使用目前 LTS 版本。 |
+| 2. 啟用 pnpm | `corepack enable` |
+| 3. 安裝套件 | `corepack pnpm install` |
+| 4. 啟動 Web 開發版 | `corepack pnpm dev` |
+| 5. 啟動 API | `corepack pnpm legacy-v2:api` |
+| 6. 型別檢查 | `corepack pnpm typecheck` |
 
 ## Agent 介面規劃
 
@@ -54,5 +56,6 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | 操作 | 指令 |
 | --- | --- |
 | 安裝套件 | `corepack pnpm install` |
+| 啟動 Web dev server | `corepack pnpm dev` |
 | 型別檢查 | `corepack pnpm typecheck` |
 | Lint | `corepack pnpm lint` |

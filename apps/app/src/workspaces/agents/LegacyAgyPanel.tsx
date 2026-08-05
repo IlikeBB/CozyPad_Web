@@ -713,6 +713,7 @@ export function LegacyAgyPanel({
       serverId: legacyServer.id,
       remotePath: taskRemotePath,
       taskId: task.id,
+      suppressReplay: Boolean(payload),
     });
     socketsRef.current.set(task.id, socket);
     updateTask(task.id, (current) => ({ ...current, connected: false }));
