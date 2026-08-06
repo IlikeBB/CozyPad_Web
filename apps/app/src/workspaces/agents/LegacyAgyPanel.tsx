@@ -11,6 +11,7 @@ import {
   openLegacyBailianSession,
   openLegacyRemoteAgentStream,
   serializeLegacyRemoteAgentStreamPayload,
+  stopLegacyAgentLatestTask,
   syncLegacyBailianSessionKey,
   type LegacyAgyStatus,
   type LegacySshServer,
@@ -491,6 +492,7 @@ export function LegacyAgyPanel({
   const [status, setStatus] = useState<LegacyAgyStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [helperError, setHelperError] = useState('');
+  const [stoppingTaskId, setStoppingTaskId] = useState('');
   const [bailianKey, setBailianKey] = useState(() => getBailianRuntimeKey());
   const [agentModelInput, setAgentModelInput] = useState(() =>
     readStoredAgentModel(agentModelStorageKey),
@@ -1149,7 +1151,7 @@ export function LegacyAgyPanel({
     options: { title?: string; remotePath?: string; forceNew?: boolean } = {},
   ): Promise<boolean> => {
     const prompt = text.trim();
-    if (!prompt || !legacyServer || activeTask?.running || checking) return false;
+    if (!prompt || !legacyServer || checking) return false;
     if (!connected) {
       setHelperError(`Press Connect before running ${config.label}.`);
       return false;
@@ -1458,6 +1460,55 @@ export function LegacyAgyPanel({
     }
   };
 
+  const stopActiveTask = async () => {
+    if (!activeTask || !legacyServer?.id || !activeTask.running || stoppingTaskId) return;
+    const taskId = activeTask.id;
+    setStoppingTaskId(taskId);
+    completedSocketTaskIdsRef.current.add(taskId);
+    replaceNextVisibleTextRef.current.delete(taskId);
+    awaitingRunStartRef.current.delete(taskId);
+
+    try {
+      const result = await stopLegacyAgentLatestTask({
+        agent: agentName,
+        serverId: legacyServer.id,
+        taskId,
+      });
+      const message = result.stopped
+        ? 'Stopped by user.'
+        : result.message || `No running ${config.label} task was found.`;
+      const now = new Date().toISOString();
+      updateTask(taskId, (task) => ({
+        ...task,
+        status: 'failed',
+        running: false,
+        connected: false,
+        output: taskOutput(task.prompt, message, agentName),
+        updatedAt: now,
+        items: [
+          ...task.items.map((item) =>
+            item.kind === 'message' && item.role === 'assistant' && item.streaming
+              ? { ...item, streaming: false }
+              : item,
+          ),
+          {
+            kind: 'message',
+            id: `${taskId}:assistant-stop:${Date.now()}`,
+            role: 'assistant',
+            text: `**Remote ${config.label}**\n\n${message}`,
+            timestamp: now,
+          },
+        ],
+      }));
+      socketsRef.current.get(taskId)?.close();
+      socketsRef.current.delete(taskId);
+    } catch (error) {
+      setHelperError(friendlyAgentMessage(error instanceof Error ? error.message : `${config.label} stop failed`, agentName));
+    } finally {
+      setStoppingTaskId('');
+    }
+  };
+
   const applyCwdInput = () => {
     const nextPath = normalizeRemotePath(cwdInput);
     setCwdInput(nextPath);
@@ -1609,6 +1660,16 @@ export function LegacyAgyPanel({
                     {activeTask.remotePath || '~'} · {activeTask.running ? 'running' : 'saved'}
                   </span>
                 </div>
+                {activeTask.running ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void stopActiveTask()}
+                    disabled={stoppingTaskId === activeTask.id}
+                  >
+                    {stoppingTaskId === activeTask.id ? 'Stopping...' : 'Stop'}
+                  </button>
+                ) : null}
                 <button type="button" onClick={() => setActiveTaskId('')}>
                   新工作
                 </button>
@@ -1633,7 +1694,7 @@ export function LegacyAgyPanel({
             agentLabel={config.label}
             value={composerText}
             commands={[]}
-            disabled={!connected || !legacyServer || Boolean(activeTask?.running) || checking}
+            disabled={!connected || !legacyServer || checking}
             placeholder={`Message ${config.label}...（Enter 送出）`}
             onChange={setComposerText}
             onSend={(value) => void sendPrompt(value)}

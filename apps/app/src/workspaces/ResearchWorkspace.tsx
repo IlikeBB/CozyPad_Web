@@ -22,6 +22,8 @@ const RESEARCH_FLOWCHARTS_STORAGE_KEY = 'cozypad3.researchFlowcharts.v2';
 const RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY = 'cozypad3.researchActiveFlowchart.v1';
 const RESEARCH_MARKDOWN_STORAGE_KEY = 'cozypad3.researchRemoteMarkdown.v1';
 const RESEARCH_MIX_MARKDOWN_STORAGE_KEY = 'cozypad3.researchMixMarkdown.v1';
+const RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = 'cozypad3.researchRemoteMarkdownByFlowchart.v1';
+const RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = 'cozypad3.researchMixMarkdownByFlowchart.v1';
 const RESEARCH_AGENT_MODEL_STORAGE_KEYS: Partial<Record<ResearchAnalysisAgent, string>> = {
   claude: 'cozypad3.remoteClaude.model.v1',
   codex: 'cozypad3.remoteCodex.model.v1',
@@ -33,6 +35,7 @@ const RESEARCH_AGENT_MODEL_FALLBACKS: Partial<Record<ResearchAnalysisAgent, stri
   bailian: 'qwen-plus',
 };
 const INACCESSIBLE_BAILIAN_MODELS = new Set(['deepseek-v4-pro', 'deepseek-v4-pro-us', 'deepseek-v4-flash', 'deepseek-v4-flash-us']);
+const RESEARCH_MD_ANALYSIS_TIMEOUT_MS = 6 * 60 * 1000;
 
 interface ResearchWorkspaceProps {
   connected?: boolean;
@@ -119,6 +122,15 @@ type MixAnalysisFile = {
   markdown: string;
   updatedAt: string;
 };
+
+type FlowchartMarkdownEntry = {
+  markdown: string;
+  userDraft: boolean;
+  updatedAt: string;
+};
+
+type FlowchartMarkdownStore = Record<string, FlowchartMarkdownEntry>;
+type FlowchartMixMarkdownStore = Record<string, MixAnalysisFile[]>;
 
 type MixAnalysisTopic = {
   id: string;
@@ -757,6 +769,21 @@ function parseCodexDiagramDraftPayload(parsed: unknown): CodexDiagramDraft {
   return { nodes, edges };
 }
 
+function describeDiagramDraftError(error: unknown, agentLabel = 'Agent'): string {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const normalized = message.toLowerCase();
+  if (normalized.includes('paste diagram json first')) {
+    return 'Please paste Diagram JSON first, or use Agent Draw to generate one.';
+  }
+  if (normalized.includes('must contain at least one node')) {
+    return `${agentLabel} did not return usable Diagram nodes. Ask it to output JSON with a non-empty "nodes" array, or paste valid Diagram JSON in Advanced JSON.`;
+  }
+  if (normalized.includes('not valid json')) {
+    return `${agentLabel} did not return valid Diagram JSON. Try a more direct prompt, for example: "Return only JSON with nodes and edges."`;
+  }
+  return message || `${agentLabel} diagram drawing failed.`;
+}
+
 function isEditableKeyTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return (
@@ -773,6 +800,54 @@ function readResearchMarkdown(): string {
   } catch {
     return '';
   }
+}
+
+function normalizeFlowchartMarkdownEntry(value: unknown): FlowchartMarkdownEntry {
+  const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  return {
+    markdown: typeof record.markdown === 'string' ? record.markdown : '',
+    userDraft: typeof record.userDraft === 'boolean' ? record.userDraft : typeof record.markdown === 'string' && record.markdown.length > 0,
+    updatedAt:
+      typeof record.updatedAt === 'string' && record.updatedAt.trim()
+        ? record.updatedAt
+        : new Date().toISOString(),
+  };
+}
+
+function readResearchMarkdownByFlowchart(activeFlowchartId: string): FlowchartMarkdownStore {
+  const byFlowchart: FlowchartMarkdownStore = {};
+  try {
+    const raw = window.localStorage.getItem(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [flowchartId, value] of Object.entries(parsed)) {
+        if (!flowchartId.trim()) continue;
+        byFlowchart[flowchartId] = normalizeFlowchartMarkdownEntry(value);
+      }
+    }
+  } catch {
+    // Fall through to legacy fallback below.
+  }
+
+  if (activeFlowchartId && !byFlowchart[activeFlowchartId]) {
+    const legacyMarkdown = readResearchMarkdown();
+    if (legacyMarkdown) {
+      byFlowchart[activeFlowchartId] = {
+        markdown: legacyMarkdown,
+        userDraft: true,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  return byFlowchart;
+}
+
+function markdownEntryForFlowchart(
+  byFlowchart: FlowchartMarkdownStore,
+  flowchartId: string,
+): FlowchartMarkdownEntry {
+  return byFlowchart[flowchartId] || { markdown: '', userDraft: false, updatedAt: new Date().toISOString() };
 }
 
 function readResearchMixMarkdown(): MixAnalysisFile[] {
@@ -804,6 +879,59 @@ function readResearchMixMarkdown(): MixAnalysisFile[] {
   } catch {
     return [];
   }
+}
+
+function normalizeMixMarkdownFiles(value: unknown): MixAnalysisFile[] {
+  if (!Array.isArray(value)) return [];
+  return sortMixMarkdownFiles(
+    value
+      .map((item): MixAnalysisFile | null => {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        if (typeof record.id !== 'string' || typeof record.markdown !== 'string') return null;
+        const topic = MIX_ANALYSIS_TOPICS.find((candidate) => candidate.id === record.id);
+        return {
+          id: record.id,
+          title:
+            typeof record.title === 'string' && record.title.trim()
+              ? record.title
+              : topic?.title || record.id,
+          fileName:
+            typeof record.fileName === 'string' && record.fileName.trim()
+              ? record.fileName
+              : topic?.fileName || `${record.id}.md`,
+          markdown: record.markdown,
+          updatedAt:
+            typeof record.updatedAt === 'string' && record.updatedAt.trim()
+              ? record.updatedAt
+              : new Date().toISOString(),
+        };
+      })
+      .filter((item): item is MixAnalysisFile => item !== null),
+  );
+}
+
+function readResearchMixMarkdownByFlowchart(activeFlowchartId: string): FlowchartMixMarkdownStore {
+  const byFlowchart: FlowchartMixMarkdownStore = {};
+  try {
+    const raw = window.localStorage.getItem(RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [flowchartId, value] of Object.entries(parsed)) {
+        if (!flowchartId.trim()) continue;
+        byFlowchart[flowchartId] = normalizeMixMarkdownFiles(value);
+      }
+    }
+  } catch {
+    // Fall through to legacy fallback below.
+  }
+
+  if (activeFlowchartId && !byFlowchart[activeFlowchartId]) {
+    const legacyMix = readResearchMixMarkdown();
+    if (legacyMix.length) byFlowchart[activeFlowchartId] = legacyMix;
+  }
+
+  return byFlowchart;
 }
 
 function sortMixMarkdownFiles(files: MixAnalysisFile[]): MixAnalysisFile[] {
@@ -900,6 +1028,22 @@ function formatDuration(ms: number): string {
   const seconds = totalSeconds % 60;
   if (minutes <= 0) return `${seconds}s`;
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function formatNodeReference(node: PipelineNode): string {
@@ -1075,21 +1219,21 @@ function buildTrainingPromptFromMarkdown(
 }
 
 function describeFlowchartError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error || 'baillian analysis failed.');
+  const raw = error instanceof Error ? error.message : String(error || 'flowchart analysis failed.');
   const message = raw.replace(/\s+/g, ' ').trim();
   if (/bailian api request failed/i.test(message)) {
     return message;
   }
   if (/cuda out of memory|not enough eligible gpu memory|eligible gpu|--min-gpus|gpu memory|out of memory/i.test(message)) {
-    return 'baillian analysis resources are not available. Try again later.';
+    return 'Flowchart analysis resources are not available. Try again later.';
   }
   if (/timeout|timed out|waiting/i.test(message)) {
-    return 'baillian analysis timed out. Check the API key, model, and network path.';
+    return 'Flowchart analysis timed out. Check the selected agent, API key, model, and network path.';
   }
   if (/^(?:batch endpoint returned HTTP\s*)?403\b|HTTP 403\b|\(403\)/i.test(message)) {
     return `${message} Check that the imported key has permission for the selected model and that Cloudflare is not blocking /api/* POST.`;
   }
-  return message || 'baillian analysis failed.';
+  return message || 'flowchart analysis failed.';
 }
 
 function shouldSilenceFlowchartFallbackError(message: string): boolean {
@@ -1239,6 +1383,7 @@ function buildAgentDiagramJsonPrompt(
     'Do not inspect files. Do not run tools. Do not ask follow-up questions.',
     'Your entire response must be one raw valid JSON object. Do not use Markdown fences, bullets, comments, or prose.',
     'The JSON shape must be exactly: {"nodes":[...],"edges":[...]}.',
+    'The nodes array must contain at least one node. Never return an empty nodes array or an empty object.',
     'Each node must include id, title, kind, role, x, y. x/y are percentages from 0 to 100.',
     'Allowed kinds: source, operation, model, command, output, application.',
     'Allowed roles: factor, control, runner, outcome, input, application.',
@@ -1933,13 +2078,22 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const initialFlowchart =
     flowchartLibrary.flowcharts.find((flowchart) => flowchart.id === flowchartLibrary.activeFlowchartId) ||
     flowchartLibrary.flowcharts[0];
+  const initialFlowchartId = initialFlowchart?.id || '';
   const [nodes, setNodes] = useState<PipelineNode[]>(() => initialFlowchart?.nodes || []);
-  const [remoteMarkdown, setRemoteMarkdown] = useState(() => readResearchMarkdown());
+  const [markdownByFlowchart, setMarkdownByFlowchart] = useState<FlowchartMarkdownStore>(() =>
+    readResearchMarkdownByFlowchart(initialFlowchartId),
+  );
+  const [mixMarkdownByFlowchart, setMixMarkdownByFlowchart] = useState<FlowchartMixMarkdownStore>(() =>
+    readResearchMixMarkdownByFlowchart(initialFlowchartId),
+  );
+  const [remoteMarkdown, setRemoteMarkdown] = useState(() =>
+    markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).markdown,
+  );
   const [remoteMarkdownUserDraft, setRemoteMarkdownUserDraft] = useState(
-    () => readResearchMarkdown().length > 0,
+    () => markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).userDraft,
   );
   const [mixMarkdownFiles, setMixMarkdownFiles] = useState<MixAnalysisFile[]>(() =>
-    readResearchMixMarkdown(),
+    readResearchMixMarkdownByFlowchart(initialFlowchartId)[initialFlowchartId] || [],
   );
   const [markdownAnalysis, setMarkdownAnalysis] = useState<MarkdownAnalysisState>({
     status: 'idle',
@@ -2072,14 +2226,44 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   }, []);
 
   useEffect(() => {
+    const activeFlowchartId = flowchartLibrary.activeFlowchartId;
+    if (!activeFlowchartId) return;
+    setMarkdownByFlowchart((current) => {
+      const currentEntry = current[activeFlowchartId];
+      if (
+        currentEntry &&
+        currentEntry.markdown === remoteMarkdown &&
+        currentEntry.userDraft === remoteMarkdownUserDraft
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        [activeFlowchartId]: {
+          markdown: remoteMarkdown,
+          userDraft: remoteMarkdownUserDraft,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    });
     try {
       window.localStorage.setItem(RESEARCH_MARKDOWN_STORAGE_KEY, remoteMarkdown);
     } catch {
       // Ignore quota or private-mode storage failures.
     }
-  }, [remoteMarkdown]);
+  }, [flowchartLibrary.activeFlowchartId, remoteMarkdown, remoteMarkdownUserDraft]);
 
   useEffect(() => {
+    const activeFlowchartId = flowchartLibrary.activeFlowchartId;
+    if (!activeFlowchartId) return;
+    setMixMarkdownByFlowchart((current) => {
+      const currentFiles = current[activeFlowchartId] || [];
+      if (JSON.stringify(currentFiles) === JSON.stringify(mixMarkdownFiles)) return current;
+      return {
+        ...current,
+        [activeFlowchartId]: mixMarkdownFiles,
+      };
+    });
     try {
       window.localStorage.setItem(
         RESEARCH_MIX_MARKDOWN_STORAGE_KEY,
@@ -2088,7 +2272,29 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     } catch {
       // Ignore quota or private-mode storage failures.
     }
-  }, [mixMarkdownFiles]);
+  }, [flowchartLibrary.activeFlowchartId, mixMarkdownFiles]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
+        JSON.stringify(markdownByFlowchart),
+      );
+    } catch {
+      // Ignore quota or private-mode storage failures.
+    }
+  }, [markdownByFlowchart]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
+        JSON.stringify(mixMarkdownByFlowchart),
+      );
+    } catch {
+      // Ignore quota or private-mode storage failures.
+    }
+  }, [mixMarkdownByFlowchart]);
 
   useEffect(() => {
     if (!mixMarkdownFiles.length) {
@@ -2511,12 +2717,46 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setDraggingNodeId('');
   };
 
+  const saveCurrentFlowchartMarkdownState = () => {
+    const activeFlowchartId = flowchartLibrary.activeFlowchartId;
+    if (!activeFlowchartId) return;
+    setMarkdownByFlowchart((current) => ({
+      ...current,
+      [activeFlowchartId]: {
+        markdown: remoteMarkdown,
+        userDraft: remoteMarkdownUserDraft,
+        updatedAt: new Date().toISOString(),
+      },
+    }));
+    setMixMarkdownByFlowchart((current) => ({
+      ...current,
+      [activeFlowchartId]: mixMarkdownFiles,
+    }));
+  };
+
+  const loadFlowchartMarkdownState = (flowchartId: string) => {
+    const markdownEntry = markdownEntryForFlowchart(markdownByFlowchart, flowchartId);
+    const mixFiles = mixMarkdownByFlowchart[flowchartId] || [];
+    setRemoteMarkdown(markdownEntry.markdown);
+    setRemoteMarkdownUserDraft(markdownEntry.userDraft);
+    setMixMarkdownFiles(mixFiles);
+    setSelectedMixFileId(mixFiles[0]?.id || '');
+    setMarkdownSourceOpen(false);
+    setMixSourceOpen(false);
+    setTrainingPromptDialog(null);
+    setTrainingDialogSource(null);
+    setMarkdownTrainingDraft(null);
+    setMixTrainingDraft(null);
+    setMarkdownAnalysis({ status: 'idle', message: '' });
+  };
+
   const selectFlowchart = (flowchartId: string) => {
     if (flowchartId === flowchartLibrary.activeFlowchartId) return;
     const target = flowchartLibrary.flowcharts.find((flowchart) => flowchart.id === flowchartId);
     if (!target) return;
     const currentNodes = serializePipelineNodes(nodes);
     const currentEdges = serializePipelineEdges(edges);
+    saveCurrentFlowchartMarkdownState();
     setFlowchartLibrary((current) => ({
       activeFlowchartId: flowchartId,
       flowcharts: current.flowcharts.map((flowchart) =>
@@ -2527,6 +2767,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     }));
     setNodes(target.nodes);
     setEdges(target.edges);
+    loadFlowchartMarkdownState(flowchartId);
     clearFlowchartInteractionState();
     setActiveView('flow');
   };
@@ -2552,6 +2793,25 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       if (!window.confirm('Clear this flowchart?')) return;
       setNodes([]);
       setEdges([]);
+      setRemoteMarkdown('');
+      setRemoteMarkdownUserDraft(false);
+      setMixMarkdownFiles([]);
+      setSelectedMixFileId('');
+      setMarkdownSourceOpen(false);
+      setMixSourceOpen(false);
+      setTrainingPromptDialog(null);
+      setTrainingDialogSource(null);
+      setMarkdownTrainingDraft(null);
+      setMixTrainingDraft(null);
+      setMarkdownAnalysis({ status: 'idle', message: '' });
+      setMarkdownByFlowchart((current) => ({
+        ...current,
+        [activeFlowchart.id]: { markdown: '', userDraft: false, updatedAt: new Date().toISOString() },
+      }));
+      setMixMarkdownByFlowchart((current) => ({
+        ...current,
+        [activeFlowchart.id]: [],
+      }));
       clearFlowchartInteractionState();
       setFlowchartLibrary((current) => ({
         ...current,
@@ -2568,12 +2828,23 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const nextFlowcharts = flowchartLibrary.flowcharts.filter((flowchart) => flowchart.id !== activeFlowchart.id);
     const nextActive = nextFlowcharts[Math.min(activeFlowchartIndex, nextFlowcharts.length - 1)] || nextFlowcharts[0];
     if (!nextActive) return;
+    setMarkdownByFlowchart((current) => {
+      const next = { ...current };
+      delete next[activeFlowchart.id];
+      return next;
+    });
+    setMixMarkdownByFlowchart((current) => {
+      const next = { ...current };
+      delete next[activeFlowchart.id];
+      return next;
+    });
     setFlowchartLibrary({
       flowcharts: nextFlowcharts,
       activeFlowchartId: nextActive.id,
     });
     setNodes(nextActive.nodes);
     setEdges(nextActive.edges);
+    loadFlowchartMarkdownState(nextActive.id);
     clearFlowchartInteractionState();
   };
 
@@ -2611,6 +2882,9 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setRemoteMarkdown('');
     setRemoteMarkdownUserDraft(false);
     setMixMarkdownFiles([]);
+    setSelectedMixFileId('');
+    setMarkdownSourceOpen(false);
+    setMixSourceOpen(false);
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setMarkdownTrainingDraft(null);
@@ -2623,13 +2897,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     return true;
   };
 
-  const sendDiagramPromptToCodex = async () => {
+  const sendDiagramPromptToCodex = async (): Promise<boolean> => {
     if (!hasAnalysisAgent) {
       setCodexDiagramStatus({
         status: 'error',
         message: 'Select an analysis agent first.',
       });
-      return;
+      return false;
     }
     const prompt = codexDiagramPrompt.trim();
     if (!prompt) {
@@ -2637,7 +2911,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         status: 'error',
         message: 'Add a natural-language diagram request first.',
       });
-      return;
+      return false;
     }
 
     setCodexDiagramStatus({
@@ -2657,7 +2931,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         setCodexDiagramJson(raw);
         const draft = parseCodexDiagramDraft(raw);
         applyDiagramDraft(draft, `Codex drew ${draft.nodes.length} nodes / ${draft.edges.length} edges.`);
-        return;
+        return true;
       }
 
       const raw = await runSelectedTextAnalysisAgent(buildAgentDiagramJsonPrompt(prompt, nodes, edges));
@@ -2667,11 +2941,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         draft,
         `${analysisAgentLabel} drew ${draft.nodes.length} nodes / ${draft.edges.length} edges.`,
       );
+      return true;
     } catch (error) {
       setCodexDiagramStatus({
         status: 'error',
-        message: error instanceof Error ? error.message : `${analysisAgentLabel} diagram drawing failed.`,
+        message: describeDiagramDraftError(error, analysisAgentLabel),
       });
+      return false;
     }
   };
 
@@ -2686,7 +2962,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     } catch (error) {
       setCodexDiagramStatus({
         status: 'error',
-        message: error instanceof Error ? error.message : 'Failed to apply diagram JSON.',
+        message: describeDiagramDraftError(error, 'Advanced JSON'),
       });
     }
   };
@@ -2706,6 +2982,15 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     };
     const currentNodes = serializePipelineNodes(nodes);
     const currentEdges = serializePipelineEdges(edges);
+    saveCurrentFlowchartMarkdownState();
+    setMarkdownByFlowchart((current) => ({
+      ...current,
+      [nextFlowchart.id]: { markdown: '', userDraft: false, updatedAt: new Date().toISOString() },
+    }));
+    setMixMarkdownByFlowchart((current) => ({
+      ...current,
+      [nextFlowchart.id]: [],
+    }));
     setFlowchartLibrary((current) => ({
       activeFlowchartId: nextFlowchart.id,
       flowcharts: [
@@ -2719,6 +3004,17 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     }));
     setNodes([]);
     setEdges([]);
+    setRemoteMarkdown('');
+    setRemoteMarkdownUserDraft(false);
+    setMixMarkdownFiles([]);
+    setSelectedMixFileId('');
+    setMarkdownSourceOpen(false);
+    setMixSourceOpen(false);
+    setTrainingPromptDialog(null);
+    setTrainingDialogSource(null);
+    setMarkdownTrainingDraft(null);
+    setMixTrainingDraft(null);
+    setMarkdownAnalysis({ status: 'idle', message: '' });
     clearFlowchartInteractionState();
     setActiveView('flow');
   };
@@ -2745,9 +3041,14 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setMarkdownTrainingDraft(null);
+    setActiveView('markdown');
     try {
       const markdown = markdownFromAgentOutput(
-        await runSelectedTextAnalysisAgent(buildAgentFlowchartMarkdownPrompt(nodes, edges, instruction)),
+        await withTimeout(
+          runSelectedTextAnalysisAgent(buildAgentFlowchartMarkdownPrompt(nodes, edges, instruction)),
+          RESEARCH_MD_ANALYSIS_TIMEOUT_MS,
+          `${analysisAgentLabel} analysis timed out after ${formatDuration(RESEARCH_MD_ANALYSIS_TIMEOUT_MS)}.`,
+        ),
       );
       if (!markdown) {
         throw new Error(`${analysisAgentLabel} did not return Markdown content.`);
@@ -3648,31 +3949,15 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     type="button"
                     className={codexDiagramOpen ? 'research-codex-draw-toggle-active' : ''}
                     aria-pressed={codexDiagramOpen}
-                    onClick={() => setCodexDiagramOpen((current) => !current)}
+                    onClick={() => setCodexDiagramOpen(true)}
                     disabled={!hasAnalysisAgent}
                   >
                     agent draw
                   </button>
                 </div>
-                {codexDiagramOpen ? (
-                  <div className="research-codex-draw-panel">
-                    <label className="research-codex-draw-field">
-                      <span>Natural language</span>
-                      <textarea
-                        value={codexDiagramPrompt}
-                        onChange={(event) => setCodexDiagramPrompt(event.target.value)}
-                        placeholder="Example: draw a YOLO training flow from dataset, preprocessing, model, training, evaluation, and deployment."
-                      />
-                    </label>
+                {codexDiagramStatus.message || codexDiagramJson ? (
+                  <div className="research-codex-draw-panel research-codex-draw-panel-compact">
                     <div className="research-codex-draw-actions">
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() => void sendDiagramPromptToCodex()}
-                        disabled={!hasAnalysisAgent || codexDiagramStatus.status === 'running'}
-                      >
-                        Send to {analysisAgentLabel}
-                      </button>
                       <small>{analysisAgentLabel} will draw and apply the Diagram automatically.</small>
                       {codexDiagramStatus.message ? (
                         <span className={`research-codex-draw-status research-analysis-${codexDiagramStatus.status}`}>
@@ -4083,6 +4368,76 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
               </div>
             </main>
           </section>
+      {codexDiagramOpen ? (
+        <div
+          className="modal-overlay research-codex-draw-modal-overlay"
+          role="presentation"
+          onClick={() => {
+            if (codexDiagramStatus.status !== 'running') setCodexDiagramOpen(false);
+          }}
+        >
+          <section
+            className="modal research-codex-draw-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="research-codex-draw-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head research-codex-draw-modal-head">
+              <div>
+                <h2 id="research-codex-draw-modal-title">Agent Draw</h2>
+                <p className="hint">
+                  Use natural language to ask {analysisAgentLabel} to rewrite the current Diagram.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                aria-label="Close agent draw prompt"
+                onClick={() => setCodexDiagramOpen(false)}
+                disabled={codexDiagramStatus.status === 'running'}
+              >
+                x
+              </button>
+            </div>
+            <label className="research-codex-draw-field research-codex-draw-modal-field">
+              <span>Prompt</span>
+              <textarea
+                value={codexDiagramPrompt}
+                onChange={(event) => setCodexDiagramPrompt(event.target.value)}
+                placeholder="Example: draw a YOLO training flow from dataset, preprocessing, model, training, evaluation, and deployment."
+                autoFocus
+              />
+            </label>
+            {codexDiagramStatus.message ? (
+              <div className={`research-codex-draw-modal-status research-analysis-${codexDiagramStatus.status}`}>
+                {codexDiagramStatus.message}
+              </div>
+            ) : null}
+            <div className="form-actions research-codex-draw-modal-actions">
+              <button
+                type="button"
+                className="danger"
+                onClick={() => setCodexDiagramOpen(false)}
+                disabled={codexDiagramStatus.status === 'running'}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={async () => {
+                  const applied = await sendDiagramPromptToCodex();
+                  if (applied) setCodexDiagramOpen(false);
+                }}
+                disabled={!hasAnalysisAgent || codexDiagramStatus.status === 'running'}
+              >
+                {codexDiagramStatus.status === 'running' ? 'Sending...' : `Send to ${analysisAgentLabel}`}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

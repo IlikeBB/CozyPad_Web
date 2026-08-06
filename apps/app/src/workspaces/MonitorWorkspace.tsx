@@ -538,6 +538,7 @@ export function MonitorWorkspace({
   const [availableServers, setAvailableServers] = useState<LegacySshServer[]>([]);
   const [serverLoading, setServerLoading] = useState(false);
   const [serverError, setServerError] = useState('');
+  const [monitorRestartNonce, setMonitorRestartNonce] = useState(0);
   const [selectedServerId, setSelectedServerId] = useState(() => readLastSelectedLegacyServerId());
 
   const loadServers = useCallback(
@@ -690,7 +691,7 @@ export function MonitorWorkspace({
       closedByEffect = true;
       socket.close();
     };
-  }, [enabled, scope, selectedServerId]);
+  }, [enabled, monitorRestartNonce, scope, selectedServerId]);
 
   const servers = useMemo(
     () => (snapshot?.servers ?? []).filter(isDisplayServer),
@@ -749,7 +750,10 @@ export function MonitorWorkspace({
             <button
               type="button"
               className="monitor-action-button"
-              onClick={() => void loadServers(true)}
+              onClick={() => {
+                setMonitorRestartNonce((current) => current + 1);
+                void loadServers(true);
+              }}
               disabled={!active || serverLoading}
             >
               {serverLoading ? 'Refreshing' : 'Refresh'}

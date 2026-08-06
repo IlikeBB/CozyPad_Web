@@ -8,6 +8,7 @@ import {
   openLegacyClaudeSession,
   resetLegacyRemoteAgentCooldown,
   serializeLegacyRemoteAgentStreamPayload,
+  stopLegacyAgentLatestTask,
   type LegacyClaudeStatus,
   type LegacySshServer,
 } from './legacySshApi';
@@ -468,6 +469,7 @@ export function LegacyClaudePanel({
   const [status, setStatus] = useState<LegacyClaudeStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [helperError, setHelperError] = useState('');
+  const [stoppingTaskId, setStoppingTaskId] = useState('');
   const [claudeModelInput, setClaudeModelInput] = useState(() =>
     readStoredAgentModel(CLAUDE_MODEL_STORAGE_KEY),
   );
@@ -852,7 +854,7 @@ export function LegacyClaudePanel({
     options: { title?: string; remotePath?: string; forceNew?: boolean; queuedTraining?: boolean } = {},
   ): Promise<boolean> => {
     const prompt = text.trim();
-    if (!prompt || !legacyServer || activeTask?.running || checking) return false;
+    if (!prompt || !legacyServer || checking) return false;
     if (!connected) {
       setHelperError('Press Connect before running Claude.');
       return false;
@@ -1112,6 +1114,55 @@ export function LegacyClaudePanel({
     }
   };
 
+  const stopActiveTask = async () => {
+    if (!activeTask || !legacyServer?.id || !activeTask.running || stoppingTaskId) return;
+    const taskId = activeTask.id;
+    setStoppingTaskId(taskId);
+    completedSocketTaskIdsRef.current.add(taskId);
+    replaceNextVisibleTextRef.current.delete(taskId);
+    awaitingRunStartRef.current.delete(taskId);
+
+    try {
+      const result = await stopLegacyAgentLatestTask({
+        agent: 'claude',
+        serverId: legacyServer.id,
+        taskId,
+      });
+      const message = result.stopped
+        ? 'Stopped by user.'
+        : result.message || 'No running Claude task was found.';
+      const now = new Date().toISOString();
+      updateTask(taskId, (task) => ({
+        ...task,
+        status: 'failed',
+        running: false,
+        connected: false,
+        output: taskOutput(task.prompt, message),
+        updatedAt: now,
+        items: [
+          ...task.items.map((item) =>
+            item.kind === 'message' && item.role === 'assistant' && item.streaming
+              ? { ...item, streaming: false }
+              : item,
+          ),
+          {
+            kind: 'message',
+            id: `${taskId}:assistant-stop:${Date.now()}`,
+            role: 'assistant',
+            text: `**Remote Claude**\n\n${message}`,
+            timestamp: now,
+          },
+        ],
+      }));
+      socketsRef.current.get(taskId)?.close();
+      socketsRef.current.delete(taskId);
+    } catch (error) {
+      setHelperError(friendlyClaudeMessage(error instanceof Error ? error.message : 'Remote Claude stop failed'));
+    } finally {
+      setStoppingTaskId('');
+    }
+  };
+
   const applyCwdInput = () => {
     const nextPath = normalizeRemotePath(cwdInput);
     setCwdInput(nextPath);
@@ -1245,6 +1296,16 @@ export function LegacyClaudePanel({
                 <button type="button" onClick={() => setActiveTaskId('')}>
                   新工作
                 </button>
+                {activeTask.running ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void stopActiveTask()}
+                    disabled={stoppingTaskId === activeTask.id}
+                  >
+                    {stoppingTaskId === activeTask.id ? 'Stopping...' : 'Stop'}
+                  </button>
+                ) : null}
               </div>
               <ChatTimeline
                 sessionId={activeTask.id}
@@ -1266,7 +1327,7 @@ export function LegacyClaudePanel({
             agentLabel="Claude"
             value={composerText}
             commands={[]}
-            disabled={!connected || !legacyServer || Boolean(activeTask?.running) || checking}
+            disabled={!connected || !legacyServer || checking}
             placeholder="Message Claude...（Enter 送出，會在目前 SSH server 執行）"
             onChange={setComposerText}
             onSend={(text) => void sendPrompt(text)}

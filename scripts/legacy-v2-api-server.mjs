@@ -220,6 +220,14 @@ const DOMIN_UPDATE_SCRIPT = path.join(DOMIN_ROOT, "update-ddns.ps1");
 const DOMIN_TASK_NAME =
   process.env.COZYPAD_DOMIN_TASK_NAME || "Cloudflare DDNS cats.modoubletw.com";
 const MONITOR_INTERVAL_MS = Number(process.env.COZYPAD_MONITOR_INTERVAL_MS || 30000);
+const MONITOR_OPEN_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.COZYPAD_MONITOR_OPEN_TIMEOUT_MS || 20000) || 20000,
+);
+const MONITOR_FIRST_METRIC_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.COZYPAD_MONITOR_FIRST_METRIC_TIMEOUT_MS || 20000) || 20000,
+);
 const MONITOR_SHARED_IDLE_TTL_MS = Math.max(
   0,
   Number(process.env.COZYPAD_MONITOR_SHARED_IDLE_TTL_MS || 0) || 0,
@@ -7369,6 +7377,50 @@ function startLocalMonitorStream(server, onUpdate) {
   };
 }
 
+function openMonitorExecStreamWithTimeout(channelPromise, timeoutMs, message) {
+  let settled = false;
+  let timedOut = false;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      timedOut = true;
+      settled = true;
+      reject(new Error(message));
+    }, Math.max(1000, Number(timeoutMs) || MONITOR_OPEN_TIMEOUT_MS));
+    timer.unref?.();
+
+    channelPromise.then(
+      (channel) => {
+        if (timedOut) {
+          try {
+            channel?.close?.();
+          } catch {
+            // The delayed channel may already be closed.
+          }
+          return;
+        }
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(channel);
+      },
+      (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptions = {}) {
   const startedAt = Date.now();
   const monitorBlockKey = getMonitorBlockKey(server);
@@ -7381,11 +7433,15 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
 
   let channel;
   try {
-    channel = await openSsh2BrokerExecStream(
-      session,
-      server,
-      createUsageStreamCommand(MONITOR_INTERVAL_MS),
-      gateOptions,
+    channel = await openMonitorExecStreamWithTimeout(
+      openSsh2BrokerExecStream(
+        session,
+        server,
+        createUsageStreamCommand(MONITOR_INTERVAL_MS),
+        gateOptions,
+      ),
+      MONITOR_OPEN_TIMEOUT_MS,
+      `SSH monitor stream did not open within ${Math.round(MONITOR_OPEN_TIMEOUT_MS / 1000)}s`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || "SSH2 monitor failed");
@@ -7410,6 +7466,21 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
   let closed = false;
   let firstMetricAt = 0;
   let lastOnline = null;
+  const firstMetricTimer = setTimeout(() => {
+    if (closed || firstMetricAt) {
+      return;
+    }
+    const error = `Remote monitor did not return metrics within ${Math.round(MONITOR_FIRST_METRIC_TIMEOUT_MS / 1000)}s.`;
+    update({
+      ...createMonitorBase(server),
+      online: false,
+      latencyMs: Date.now() - startedAt,
+      error,
+    });
+    closed = true;
+    channel.close();
+  }, MONITOR_FIRST_METRIC_TIMEOUT_MS);
+  firstMetricTimer.unref?.();
 
   function update(nextState) {
     if (!closed) {
@@ -7417,7 +7488,14 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
     }
   }
 
+  function clearFirstMetricTimer() {
+    if (firstMetricTimer) {
+      clearTimeout(firstMetricTimer);
+    }
+  }
+
   function blockAuthFailure(error) {
+    clearFirstMetricTimer();
     const block = {
       blockedAt: new Date().toISOString(),
       error,
@@ -7442,6 +7520,7 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
 
     if (!firstMetricAt) {
       firstMetricAt = checkedAt;
+      clearFirstMetricTimer();
     }
 
     lastOnline = {
@@ -7486,6 +7565,7 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
   });
 
   stream.on("error", (error) => {
+    clearFirstMetricTimer();
     update({
       ...createMonitorBase(server),
       online: false,
@@ -7498,6 +7578,7 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
     if (closed) {
       return;
     }
+    clearFirstMetricTimer();
 
     const error = stderr.trim();
     if (!firstMetricAt && isSshAuthenticationFailure(error)) {
@@ -7523,6 +7604,7 @@ async function startSsh2BrokerMonitorStream(session, server, onUpdate, gateOptio
         return;
       }
       closed = true;
+      clearFirstMetricTimer();
       channel.close();
     },
   };
@@ -10165,6 +10247,243 @@ function terminateBailianRuntimeSession(bailianSession, reason = "page closed") 
   bailianSession.sockets?.clear?.();
   bailianSessions.delete(bailianSession.key);
   return true;
+}
+
+function stopCodexRuntimeSession(codexSession, reason = "stopped by user") {
+  if (!codexSession || codexSession.ended) {
+    return { stopped: false, pendingCleared: 0 };
+  }
+
+  reconcileCodexSessionState(codexSession);
+  const pendingCleared = codexSession.pendingPrompts?.length || 0;
+  const activeChild = codexSession.activeChild;
+  const stopped = Boolean(activeChild || codexSession.running || pendingCleared || codexSession.retryTimer);
+
+  if (codexSession.retryTimer) {
+    clearTimeout(codexSession.retryTimer);
+    codexSession.retryTimer = null;
+  }
+  codexSession.pendingPrompts = [];
+  codexSession.activeChild = null;
+  codexSession.running = false;
+  codexSession.status = stopped ? "failed" : codexSession.status || "completed";
+
+  if (stopped) {
+    appendCodexSessionOutput(codexSession, `\r\n[CozyPad] codex ${reason}\r\n[CozyPad] codex ready\r\n`);
+  }
+
+  try {
+    activeChild?.kill?.();
+  } catch {
+    // The Codex process may already be closed.
+  }
+
+  void persistCodexSessionWorkflow(codexSession, codexSession.selectedServer).catch(() => undefined);
+  scheduleCodexSessionCleanup(codexSession);
+  return { stopped, pendingCleared };
+}
+
+function stopClaudeRuntimeSession(claudeSession, reason = "stopped by user") {
+  if (!claudeSession || claudeSession.ended) {
+    return { stopped: false, pendingCleared: 0 };
+  }
+
+  reconcileClaudeSessionState(claudeSession);
+  const pendingCleared = claudeSession.pendingPrompts?.length || 0;
+  const activeJob = claudeSession.activeJob;
+  const stopped = Boolean(activeJob || claudeSession.running || pendingCleared);
+
+  claudeSession.pendingPrompts = [];
+  claudeSession.activeJob = null;
+  claudeSession.running = false;
+  claudeSession.status = stopped ? "failed" : claudeSession.status || "completed";
+
+  if (stopped) {
+    appendClaudeSessionOutput(
+      claudeSession,
+      `\r\n[CozyPad] remote Claude ${reason}\r\n[CozyPad] remote Claude ready\r\n`,
+    );
+  }
+
+  try {
+    activeJob?.kill?.();
+  } catch {
+    // The agent job may already be closed.
+  }
+
+  scheduleClaudeSessionCleanup(claudeSession);
+  return { stopped, pendingCleared };
+}
+
+function stopAgyRuntimeSession(agySession, reason = "stopped by user") {
+  if (!agySession || agySession.ended) {
+    return { stopped: false, pendingCleared: 0 };
+  }
+
+  reconcileAgySessionState(agySession);
+  const pendingCleared = agySession.pendingPrompts?.length || 0;
+  const activeJob = agySession.activeJob;
+  const stopped = Boolean(activeJob || agySession.running || pendingCleared);
+
+  agySession.pendingPrompts = [];
+  agySession.activeJob = null;
+  agySession.running = false;
+  agySession.status = stopped ? "failed" : agySession.status || "completed";
+
+  if (stopped) {
+    appendAgySessionOutput(
+      agySession,
+      `\r\n[CozyPad] remote agy ${reason}\r\n[CozyPad] remote agy ready\r\n`,
+    );
+  }
+
+  try {
+    activeJob?.kill?.();
+  } catch {
+    // The agent job may already be closed.
+  }
+
+  scheduleAgySessionCleanup(agySession);
+  return { stopped, pendingCleared };
+}
+
+function stopBailianRuntimeSession(bailianSession, reason = "stopped by user") {
+  if (!bailianSession || bailianSession.ended) {
+    return { stopped: false, pendingCleared: 0 };
+  }
+
+  reconcileBailianSessionState(bailianSession);
+  const pendingCleared = bailianSession.pendingPrompts?.length || 0;
+  const activeJob = bailianSession.activeJob;
+  const stopped = Boolean(activeJob || bailianSession.running || pendingCleared);
+
+  bailianSession.pendingPrompts = [];
+  bailianSession.activeJob = null;
+  bailianSession.running = false;
+  bailianSession.status = stopped ? "failed" : bailianSession.status || "completed";
+
+  if (stopped) {
+    appendBailianSessionOutput(
+      bailianSession,
+      `\r\n[CozyPad] remote bailian ${reason}\r\n[CozyPad] remote bailian ready\r\n`,
+    );
+  }
+
+  try {
+    activeJob?.kill?.();
+  } catch {
+    // The agent job may already be closed.
+  }
+
+  scheduleBailianSessionCleanup(bailianSession);
+  return { stopped, pendingCleared };
+}
+
+function getAgentSessionStopHandlers(agent) {
+  if (agent === "codex") {
+    return {
+      sessions: codexSessions,
+      label: "Codex",
+      reconcile: reconcileCodexSessionState,
+      stop: stopCodexRuntimeSession,
+    };
+  }
+  if (agent === "claude") {
+    return {
+      sessions: claudeSessions,
+      label: "Claude",
+      reconcile: reconcileClaudeSessionState,
+      stop: stopClaudeRuntimeSession,
+    };
+  }
+  if (agent === "agy") {
+    return {
+      sessions: agySessions,
+      label: "agy",
+      reconcile: reconcileAgySessionState,
+      stop: stopAgyRuntimeSession,
+    };
+  }
+  if (agent === "bailian") {
+    return {
+      sessions: bailianSessions,
+      label: "bailian",
+      reconcile: reconcileBailianSessionState,
+      stop: stopBailianRuntimeSession,
+    };
+  }
+  return null;
+}
+
+function findLatestAgentSessionToStop(session, agent, serverId, taskId = "") {
+  const handlers = getAgentSessionStopHandlers(agent);
+  if (!handlers) {
+    return { handlers: null, agentSession: null };
+  }
+
+  const owner = getTerminalOwner(session);
+  const cleanTaskId = normalizeCodexSessionTaskId(taskId);
+  const candidates = Array.from(handlers.sessions.values())
+    .filter((agentSession) => {
+      handlers.reconcile(agentSession);
+      return (
+        agentSession &&
+        !agentSession.ended &&
+        agentSession.owner === owner &&
+        (!serverId || agentSession.serverId === serverId) &&
+        (!cleanTaskId || agentSession.taskId === cleanTaskId)
+      );
+    })
+    .sort((left, right) => Number(right.lastOutputAt || right.createdAt || 0) - Number(left.lastOutputAt || left.createdAt || 0));
+
+  const running = candidates.find(
+    (agentSession) =>
+      agentSession.running ||
+      agentSession.activeChild ||
+      agentSession.activeJob ||
+      (agentSession.pendingPrompts?.length || 0) > 0 ||
+      agentSession.retryTimer,
+  );
+  return { handlers, agentSession: running || candidates[0] || null };
+}
+
+async function stopLatestRemoteAgentTaskForSession(session, body) {
+  const agent = normalizeRemoteAgentRunAgent(body?.agent);
+  if (!agent) {
+    throw new Error("Unsupported agent");
+  }
+
+  const serverId = String(body?.serverId || "").trim();
+  if (serverId) {
+    await findServer(serverId, session);
+  }
+
+  const taskId = normalizeCodexSessionTaskId(body?.taskId);
+  const { handlers, agentSession } = findLatestAgentSessionToStop(session, agent, serverId, taskId);
+  if (!handlers || !agentSession) {
+    return {
+      ok: true,
+      stopped: false,
+      agent,
+      serverId,
+      taskId,
+      pendingCleared: 0,
+      message: `No running ${remoteAgentRunLabel(agent)} task was found.`,
+    };
+  }
+
+  const result = handlers.stop(agentSession, "stopped by user");
+  return {
+    ok: true,
+    stopped: result.stopped,
+    agent,
+    serverId: agentSession.serverId || serverId,
+    taskId: agentSession.taskId || taskId,
+    pendingCleared: result.pendingCleared,
+    message: result.stopped
+      ? `${handlers.label} task stopped.`
+      : `No running ${handlers.label} task was found.`,
+  };
 }
 
 function closeRemoteAgentWorker(worker, reason = "page closed") {
@@ -15770,6 +16089,16 @@ async function handleRequest(request, response) {
         ok: false,
         error: error instanceof Error ? error.message : "Remote agent cooldown reset failed",
       });
+    }
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/ssh/agents/stop-latest") {
+    try {
+      const body = await readBody(request, 128 * 1024);
+      sendJson(response, 200, await stopLatestRemoteAgentTaskForSession(session, body));
+    } catch (error) {
+      sendErrorJson(response, 400, error, "Remote agent stop failed");
     }
     return;
   }

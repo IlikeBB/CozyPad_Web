@@ -5207,6 +5207,10 @@ button.danger:hover {
   background: color-mix(in srgb, var(--bg-raised) 72%, var(--bg));
 }
 
+.research-codex-draw-panel-compact {
+  margin-top: 8px;
+}
+
 .research-inspector-analysis .research-codex-draw-panel {
   padding: 0;
   border-bottom: 0;
@@ -5301,6 +5305,50 @@ button.danger:hover {
 
 .research-codex-draw-advanced[open] summary {
   margin-bottom: 2px;
+}
+
+.research-codex-draw-modal {
+  width: min(920px, calc(100vw - 32px));
+  max-height: min(86vh, 820px);
+  gap: 16px;
+}
+
+.research-codex-draw-modal-head {
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.research-codex-draw-modal-head > div {
+  min-width: 0;
+}
+
+.research-codex-draw-modal-head .hint {
+  margin: 6px 0 0;
+}
+
+.research-codex-draw-modal-field textarea {
+  min-height: 340px;
+  max-height: none;
+  resize: vertical;
+  font-size: 13px;
+}
+
+.research-codex-draw-modal-status {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.research-codex-draw-modal-actions {
+  justify-content: flex-end;
+}
+
+.research-codex-draw-modal-actions button {
+  min-width: 112px;
 }
 
 .research-graph-scroll {
@@ -6374,6 +6422,16 @@ section.research-markdown-card:not([hidden]) {
 
   .research-codex-draw-panel {
     grid-template-columns: 1fr;
+  }
+
+  .research-codex-draw-modal {
+    width: calc(100vw - 18px);
+    max-height: calc(100vh - 18px);
+    padding: 14px;
+  }
+
+  .research-codex-draw-modal-field textarea {
+    min-height: 280px;
   }
 
   .research-graph-canvas {

@@ -185,6 +185,16 @@ type LegacyRemoteAgentRunJobResponse = {
   error?: string;
 };
 
+export type LegacyAgentStopResponse = {
+  ok: boolean;
+  stopped: boolean;
+  agent: LegacyRemoteAgentKind;
+  serverId: string;
+  taskId: string;
+  pendingCleared: number;
+  message: string;
+};
+
 export type LegacySshRuntimeTerminal = {
   id: string;
   serverId: string;
@@ -1395,6 +1405,18 @@ export function resetLegacyRemoteAgentCooldown(
       body: JSON.stringify({ agent, serverId }),
     },
   );
+}
+
+export function stopLegacyAgentLatestTask(options: {
+  agent: LegacyRemoteAgentKind;
+  serverId: string;
+  taskId?: string;
+}): Promise<LegacyAgentStopResponse> {
+  assertLegacySshExecutionEnabled();
+  return legacyApiRequest<LegacyAgentStopResponse>(`${AGENT_API_PREFIX}/ssh/agents/stop-latest`, {
+    method: 'POST',
+    body: JSON.stringify(options),
+  });
 }
 
 export function getLegacyPublicWorkflowStatus(): Promise<LegacyPublicWorkflowStatus> {

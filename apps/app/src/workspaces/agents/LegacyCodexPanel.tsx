@@ -17,6 +17,7 @@ import {
   listLegacyCodexWorkflows,
   loadLegacyCodexBinding,
   saveLegacyCodexWorkflow,
+  stopLegacyAgentLatestTask,
 } from './legacySshApi';
 import type {
   LegacyCodexBinding,
@@ -1424,6 +1425,7 @@ export function LegacyCodexPanel({
   const [codexStatus, setCodexStatus] = useState<LegacyCodexStatus | null>(null);
   const [checkingCodex, setCheckingCodex] = useState(false);
   const [codexCheckError, setCodexCheckError] = useState('');
+  const [stoppingTaskId, setStoppingTaskId] = useState('');
   const [codexModelInput, setCodexModelInput] = useState(() => readStoredCodexModel());
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<LegacyCodexReasoningEffort>(
     () => readStoredCodexReasoningEffort(),
@@ -2177,6 +2179,46 @@ export function LegacyCodexPanel({
     }
   };
 
+  const stopActiveTask = async () => {
+    if (!activeTask || !legacyServer?.id || !activeTask.running || stoppingTaskId) return;
+    const taskId = activeTask.id;
+    setStoppingTaskId(taskId);
+    manuallyClosedTaskIdsRef.current.add(taskId);
+    nonReconnectTaskIdsRef.current.add(taskId);
+    const reconnectTimer = reconnectTimersRef.current.get(taskId);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimersRef.current.delete(taskId);
+    }
+    reconnectAttemptsRef.current.delete(taskId);
+    queuedSocketPayloadsRef.current.delete(taskId);
+
+    try {
+      const result = await stopLegacyAgentLatestTask({
+        agent: 'codex',
+        serverId: legacyServer.id,
+        taskId,
+      });
+      const message = result.stopped
+        ? '[CozyPad] codex stopped by user'
+        : `[CozyPad] ${result.message || 'No running Codex task was found.'}`;
+      updateTask(taskId, (task) => ({
+        ...task,
+        status: 'failed',
+        running: false,
+        connected: false,
+        output: trimOutput(`${task.output}\r\n${message}\r\n`),
+        updatedAt: new Date().toISOString(),
+      }));
+      socketsRef.current.get(taskId)?.close();
+      socketsRef.current.delete(taskId);
+    } catch (error) {
+      setHelperError(error instanceof Error ? error.message : 'Codex stop failed.');
+    } finally {
+      setStoppingTaskId('');
+    }
+  };
+
   const cliLabel = legacyServer
     ? `${localMode ? 'Local' : 'Remote'} Codex on ${legacyServer.name}`
     : '請先選擇 SSH server';
@@ -2305,6 +2347,16 @@ export function LegacyCodexPanel({
                 >
                   {activeTask.connected ? 'connected' : activeTask.running ? 'running' : 'saved'}
                 </span>
+                {activeTask.running ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void stopActiveTask()}
+                    disabled={stoppingTaskId === activeTask.id}
+                  >
+                    {stoppingTaskId === activeTask.id ? 'Stopping...' : 'Stop'}
+                  </button>
+                ) : null}
               </div>
               <div className="legacy-codex-dialogue" ref={dialogueScrollRef}>
                 {renderDialogue(activeTask)}
