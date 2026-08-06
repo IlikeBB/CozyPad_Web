@@ -46,11 +46,13 @@ app.*.map.json
 
 # Zip archives
 *.zip
+release/
 
 # Node / pnpm (V4 monorepo)
 node_modules/
 apps/**/dist/
 apps/desktop/release*/
+packages/xterm/
 *.tsbuildinfo
 .env
 .env.local
@@ -74,3 +76,8 @@ id_ed25519
 id_ed25519.pub
 *.sqlite
 *.sqlite3
+
+# Local launch helpers
+CozyPad*-Demo.bat
+CozyPad*.bat
+scripts/start-cozypad*-public.ps1
