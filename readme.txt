@@ -18,6 +18,17 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
 | [youchengchao](https://github.com/youchengchao) | CozyPad 上游原始專案與協作開發 |
 
+## 近期更新
+
+| 日期 | 更新項目 |
+| --- | --- |
+| 2026-08-01 | 此 repository 目前沒有留下可追溯的 commit 紀錄；功能整理以後續提交為準。 |
+| 2026-08-02 | 建立中文 README 與截圖整理；移除公開展示文字；將功能預覽區塊改為安裝教學；日期格式改為單日紀錄。 |
+| 2026-08-03 | 補上 Markdown summary 測試資料與整理範例；清理 README 中不需要的公開展示描述。 |
+| 2026-08-04 | 整理 8/4 CozyPad 更新：Cloudflare / DDNS 相關說明、agent 介面方向、遠端服務串接與 markdown workflow。 |
+| 2026-08-05 | 更新近期變更紀錄與功能截圖，補充 Claude / Codex / agy、Files、Monitor、Research / Markdown workflow 的文件說明。 |
+| 2026-08-06 | 將 CozyPad4 同步到 Web repository；加入 MIT License；移除過時 V3 檔案；調整 README 為安裝導向；修正 Claude / Codex / agy 重新連線時重播舊輸出與忘記上下文的問題；SSH / terminal / agent session 預設保留 24 小時；補上 Cloudflare edge 403 fallback 與 CORS preflight；新增 Contributors 並標註上游協作者。 |
+
 ## 主要功能
 
 | 功能區 | 目前方向 | 重點 |
