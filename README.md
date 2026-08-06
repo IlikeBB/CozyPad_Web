@@ -21,6 +21,7 @@ app、斷線、換裝置，工作都不會中斷。
 | --- | --- |
 | [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
 | [youchengchao](https://github.com/youchengchao) | CozyPad 上游原始專案與協作開發 |
+| [yifanwang](https://github.com/yifanwang) | 專案協作與功能測試 |
 
 ## 近期更新
 

@@ -17,6 +17,7 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | --- | --- |
 | [IlikeBB](https://github.com/IlikeBB) | 專案維護與 CozyPad4 整合 |
 | [youchengchao](https://github.com/youchengchao) | CozyPad 上游原始專案與協作開發 |
+| [yifanwang](https://github.com/yifanwang) | 專案協作與功能測試 |
 
 ## 近期更新
 
