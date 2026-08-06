@@ -87,6 +87,10 @@ const TEXT_EXTENSIONS = new Set([
   'css', 'sql', 'rs', 'go', 'c', 'h', 'cpp', 'hpp', 'java', 'rb', 'dart', 'gitignore',
 ]);
 
+const IMAGE_EXTENSIONS = new Set([
+  'avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'webp',
+]);
+
 function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
@@ -107,6 +111,11 @@ function isMarkdown(item: RemoteFileItem): boolean {
 
 function isPdf(item: RemoteFileItem): boolean {
   return extensionOf(item.name) === 'pdf';
+}
+
+function isLegacyImageItem(item: LegacySshFileItem): boolean {
+  if (item.isDirectory) return false;
+  return IMAGE_EXTENSIONS.has(extensionOf(item.name));
 }
 
 function parentOf(path: string): string {
@@ -280,6 +289,7 @@ function LegacyServerFilesWorkspace({
   const [legacyBusy, setLegacyBusy] = useState(false);
   const [legacyFlash, setLegacyFlash] = useState('');
   const [legacyActionError, setLegacyActionError] = useState('');
+  const [selectedLegacyPath, setSelectedLegacyPath] = useState('');
   const previewObjectUrlRef = useRef('');
 
   const selectedServer = useMemo(
@@ -365,6 +375,7 @@ function LegacyServerFilesWorkspace({
       }));
       try {
         const listing = await listLegacyServerFiles(server.id, nextPath);
+        setSelectedLegacyPath('');
         setBrowser({
           serverId: server.id,
           path: listing.path || nextPath,
@@ -413,6 +424,7 @@ function LegacyServerFilesWorkspace({
 
   const openItem = (item: LegacySshFileItem) => {
     if (!selectedServer) return;
+    setSelectedLegacyPath(item.path);
     if (item.isDirectory) {
       closePreview();
       void loadFiles(selectedServer, item.path);
@@ -431,6 +443,7 @@ function LegacyServerFilesWorkspace({
       path: item.path,
       name: item.name,
       size: item.size,
+      kind: isLegacyImageItem(item) ? 'image' : emptyLegacyFilePreview.kind,
     });
     try {
       const result = await previewLegacyServerFile(selectedServer.id, item.path);
@@ -478,6 +491,7 @@ function LegacyServerFilesWorkspace({
   };
 
   const currentLegacyDir = browser.path || pathInput || selectedServer?.defaultPath || '~';
+  const inlineImagePreview = preview.open && preview.kind === 'image';
 
   const openLegacyBlankMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!selectedServer) return;
@@ -614,7 +628,9 @@ function LegacyServerFilesWorkspace({
               return (
                 <TreeRow
                   item={remoteItem}
-                  className="tree-row legacy-file-row"
+                  className={`tree-row legacy-file-row${
+                    selectedLegacyPath === item.path ? ' tree-row-active' : ''
+                  }`}
                   key={item.path}
                   title={
                     item.error
@@ -668,15 +684,91 @@ function LegacyServerFilesWorkspace({
             </>
           ) : null}
         </div>
-        <div className="placeholder legacy-files-empty">
-          <p>{selectedServer ? '選擇左側檔案進行彈窗預覽。' : '請先選擇要瀏覽的 SSH server。'}</p>
-          <p className="hint">
-            支援文字、Markdown、PDF、圖片、MP3/MP4 等媒體預覽；大型或二進位檔案會顯示不可預覽。
-          </p>
-        </div>
+        {selectedServer ? (
+          <div className="legacy-files-side-content">
+            <div className="legacy-files-side-head">
+              <div>
+                <span className="hint">Current folder</span>
+                <h3>{browser.path || pathInput}</h3>
+              </div>
+              <span className="legacy-files-count">
+                {browser.loading ? 'loading' : `${browser.items.length} items`}
+              </span>
+            </div>
+            {inlineImagePreview ? (
+              <section className="legacy-files-inline-preview" aria-label="image preview">
+                <div className="legacy-files-inline-preview-head">
+                  <div>
+                    <span className="hint">圖片預覽</span>
+                    <strong>{preview.name || 'Image'}</strong>
+                  </div>
+                  <button type="button" onClick={closePreview}>
+                    關閉
+                  </button>
+                </div>
+                <div className="legacy-files-inline-image">
+                  {preview.loading ? (
+                    <p className="hint">圖片載入中</p>
+                  ) : preview.error ? (
+                    <p className="error-text">{preview.error}</p>
+                  ) : preview.objectUrl ? (
+                    <img alt={preview.name || 'Image preview'} src={preview.objectUrl} />
+                  ) : (
+                    <p className="hint">無法顯示圖片</p>
+                  )}
+                </div>
+              </section>
+            ) : null}
+            <div className="legacy-files-side-list" onContextMenu={openLegacyBlankMenu}>
+              {browser.error ? (
+                <div className="placeholder">
+                  <p>{browser.error}</p>
+                </div>
+              ) : browser.items.length > 0 ? (
+                browser.items.map((item) => {
+                  const remoteItem = legacyItemAsRemote(item);
+                  return (
+                    <button
+                      type="button"
+                      className={`legacy-files-side-item${
+                        selectedLegacyPath === item.path ? ' legacy-files-side-item-active' : ''
+                      }${item.isDirectory ? ' legacy-files-side-folder' : ''}`}
+                      key={item.path}
+                      title={item.path}
+                      onClick={() => openItem(item)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setLegacyMenu({ kind: 'item', item, x: event.clientX, y: event.clientY });
+                      }}
+                    >
+                      <FileIcon kind={fileKindOf(remoteItem)} />
+                      <span className="legacy-files-side-name">{item.name}</span>
+                      <span className="legacy-files-side-meta">
+                        {item.isDirectory ? 'folder' : formatLegacyFileSize(item.size)}
+                      </span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="placeholder legacy-files-empty">
+                  <p>{browser.loading ? '載入中' : '這個資料夾沒有項目'}</p>
+                  <p className="hint">右側也可以點資料夾進入更深層位置。</p>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="placeholder legacy-files-empty">
+            <p>請先選擇要瀏覽的 SSH server。</p>
+            <p className="hint">
+              支援文字、Markdown、PDF、圖片、MP3/MP4 等媒體預覽；大型或二進位檔案會顯示不可預覽。
+            </p>
+          </div>
+        )}
       </section>
 
-      {preview.open ? (
+      {preview.open && preview.kind !== 'image' ? (
         <div
           className="modal-overlay"
           role="presentation"
@@ -717,10 +809,6 @@ function LegacyServerFilesWorkspace({
                 </div>
               ) : preview.kind === 'pdf' && preview.objectUrl ? (
                 <iframe title={preview.name || 'PDF preview'} src={preview.objectUrl} />
-              ) : preview.kind === 'image' && preview.objectUrl ? (
-                <div className="legacy-file-image-frame">
-                  <img alt={preview.name || 'Image preview'} src={preview.objectUrl} />
-                </div>
               ) : preview.kind === 'audio' && preview.objectUrl ? (
                 <div className="legacy-file-media-frame legacy-file-audio-frame">
                   <audio controls preload="metadata" src={preview.objectUrl}>

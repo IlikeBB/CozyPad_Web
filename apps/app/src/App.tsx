@@ -91,16 +91,27 @@ function isLocalLegacyServer(server: LegacySshServer): boolean {
 
 function legacyServerToConnectionProfile(server: LegacySshServer): ConnectionProfile {
   const local = isLocalLegacyServer(server);
+  const hasIdentityFile = Boolean(server.identityFileReady ?? server.hasIdentityFile ?? server.identityFile);
   return {
     id: server.id,
     name: server.name || server.alias || server.host || server.id,
     host: local ? '127.0.0.1' : server.host,
     port: local ? 22 : Number(server.port || 22),
     username: server.user || (local ? 'local' : 'ssh'),
-    authMethod: 'password',
-    hasPassword: true,
-    credentialPersisted: false,
+    authMethod: hasIdentityFile ? 'privateKey' : 'password',
+    hasPassword: local,
+    hasPrivateKey: hasIdentityFile,
+    credentialPersisted: local || hasIdentityFile,
   };
+}
+
+function canUseLegacyProfile(profile: ConnectionProfile): boolean {
+  return (
+    profile.id === 'system:localhost' ||
+    profile.host === '127.0.0.1' ||
+    profile.host === 'localhost' ||
+    profile.hasPrivateKey === true
+  );
 }
 
 function mergeProfileOptions(
@@ -216,11 +227,16 @@ export function App() {
         const nextLegacyProfiles = servers.map(legacyServerToConnectionProfile);
         setLegacyProfileOptions(nextLegacyProfiles);
         setSelectedId((current) => {
-          if (current && current !== 'mock-local') return current;
+          const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);
+          if (currentProfile && canUseLegacyProfile(currentProfile)) return currentProfile.id;
           const rememberedId = readLastSelectedLegacyServerId();
-          const remembered = nextLegacyProfiles.find((profile) => profile.id === rememberedId);
+          const remembered = nextLegacyProfiles.find(
+            (profile) => profile.id === rememberedId && canUseLegacyProfile(profile),
+          );
           if (remembered) return remembered.id;
-          const remote = nextLegacyProfiles.find((profile) => profile.id !== 'system:localhost');
+          const remote = nextLegacyProfiles.find(
+            (profile) => profile.id !== 'system:localhost' && canUseLegacyProfile(profile),
+          );
           return remote?.id ?? current ?? nextLegacyProfiles[0]?.id ?? null;
         });
       })
@@ -351,6 +367,8 @@ export function App() {
     [legacyProfileOptions, profiles],
   );
   const selectedProfile = profileOptions.find((profile) => profile.id === selectedId) ?? null;
+  const selectedLegacyProfile = legacyProfileOptions.some((profile) => profile.id === selectedId);
+  const effectiveMockData = mockData && !selectedLegacyProfile;
 
   const handleConnect = () => {
     if (!selectedProfile) return;
@@ -499,8 +517,8 @@ export function App() {
           +
         </button>
         <span className={`status status-${state}`}>{state}</span>
-        <span className={`mode-tag${mockData ? ' mode-mock' : ' mode-ssh'}`}>
-          {mockData ? 'MOCK 資料' : 'SSH'}
+        <span className={`mode-tag${effectiveMockData ? ' mode-mock' : ' mode-ssh'}`}>
+          {effectiveMockData ? 'MOCK 資料' : 'SSH'}
         </span>
         <span className="spacer" />
         {currentUser ? (
@@ -566,7 +584,7 @@ export function App() {
         <main className="workspace">
           <section className="workspace-page" hidden={workspace !== 'agents'}>
             <AgentsWorkspace
-              mockData={mockData}
+              mockData={effectiveMockData}
               selectedProfile={selectedProfile}
               connected={state === 'connected'}
               openTarget={agentTaskOpenTarget}
@@ -601,7 +619,7 @@ export function App() {
           <section className="workspace-page" hidden={workspace !== 'settings'}>
             <SettingsWorkspace
               bridgeKind={bridge.kind}
-              mockData={mockData}
+              mockData={effectiveMockData}
               connected={state === 'connected'}
             />
           </section>

@@ -2055,6 +2055,45 @@ button.danger:hover {
   border: 1px solid var(--border);
 }
 
+.msg-assistant .msg-body:has(.agent-rich-message) {
+  width: min(76vw, 920px);
+  max-width: min(82%, 920px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.agent-rich-message {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  white-space: normal;
+}
+
+.agent-rich-message > .markdown {
+  padding: 9px 13px;
+  border: 1px solid rgba(134, 239, 172, 0.16);
+  border-radius: 12px;
+  background: rgba(13, 26, 22, 0.9);
+  color: #dff8eb;
+}
+
+.agent-rich-message > .markdown p:first-child {
+  margin-top: 0;
+}
+
+.agent-rich-message > .markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.agent-processing-card {
+  max-width: 100%;
+}
+
+.agent-processing-card pre {
+  max-height: 260px;
+}
+
 .caret {
   display: inline-block;
   width: 7px;
@@ -4227,6 +4266,173 @@ button.danger:hover {
 
 .legacy-files-empty {
   flex: 1;
+}
+
+.legacy-files-side-content {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.legacy-files-side-head,
+.legacy-files-inline-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.legacy-files-side-head h3 {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.legacy-files-count {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.legacy-files-inline-preview {
+  min-height: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent),
+    var(--bg-raised);
+  overflow: hidden;
+}
+
+.legacy-files-inline-preview-head {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.legacy-files-inline-preview-head strong {
+  display: block;
+  max-width: min(520px, 58vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.legacy-files-inline-preview-head button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+  padding: 0 10px;
+}
+
+.legacy-files-inline-preview-head button:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.legacy-files-inline-image {
+  display: grid;
+  place-items: center;
+  max-height: 360px;
+  min-height: 180px;
+  padding: 12px;
+  overflow: auto;
+  background:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.018) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.018) 25%, transparent 25%),
+    var(--bg);
+  background-size: 18px 18px;
+}
+
+.legacy-files-inline-image img {
+  max-width: 100%;
+  max-height: 336px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.legacy-files-side-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  align-content: start;
+  gap: 8px;
+  padding: 2px;
+}
+
+.legacy-files-side-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-areas:
+    "icon name"
+    "icon meta";
+  column-gap: 8px;
+  row-gap: 2px;
+  min-height: 52px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  text-align: left;
+}
+
+.legacy-files-side-item:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.legacy-files-side-item svg,
+.legacy-files-side-item .file-icon {
+  grid-area: icon;
+  align-self: center;
+}
+
+.legacy-files-side-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-weight: 650;
+}
+
+.legacy-files-side-meta {
+  grid-area: meta;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.legacy-files-side-folder {
+  border-color: color-mix(in srgb, var(--blue) 28%, var(--border));
+}
+
+.legacy-files-side-item-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .legacy-file-preview-modal {

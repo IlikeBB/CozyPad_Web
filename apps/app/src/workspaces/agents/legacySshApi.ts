@@ -40,6 +40,8 @@ export type LegacySshServer = {
   user?: string;
   port?: number;
   identityFile?: string;
+  hasIdentityFile?: boolean;
+  identityFileReady?: boolean;
   configFile?: string;
   knownHostsFile?: string;
   strictHostKeyChecking?: string;
@@ -556,6 +558,7 @@ export function openLegacyBailianSession(options: {
   serverId: string;
   remotePath?: string;
   taskId?: string;
+  suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -563,6 +566,7 @@ export function openLegacyBailianSession(options: {
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
+  if (options.suppressReplay) url.searchParams.set('suppressReplay', '1');
   return new WebSocket(url.toString());
 }
 

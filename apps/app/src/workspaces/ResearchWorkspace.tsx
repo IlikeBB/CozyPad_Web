@@ -36,6 +36,7 @@ const RESEARCH_AGENT_MODEL_FALLBACKS: Partial<Record<ResearchAnalysisAgent, stri
 };
 const INACCESSIBLE_BAILIAN_MODELS = new Set(['deepseek-v4-pro', 'deepseek-v4-pro-us', 'deepseek-v4-flash', 'deepseek-v4-flash-us']);
 const RESEARCH_MD_ANALYSIS_TIMEOUT_MS = 6 * 60 * 1000;
+const RESEARCH_AGENT_DRAW_TIMEOUT_MS = 4 * 60 * 1000;
 
 interface ResearchWorkspaceProps {
   connected?: boolean;
@@ -1586,16 +1587,34 @@ function runResearchAgentStreamPrompt(options: {
   remotePath?: string;
   allowedDirs?: string[];
   model?: string;
+  signal?: AbortSignal;
 }): Promise<AgentRunOutputResult> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error('Agent Draw cancelled.'));
+      return;
+    }
     const socket = openLegacyRemoteAgentStream();
     let output = '';
     let lastMessage = '';
     let settled = false;
+    const agentLabel = researchStreamAgentLabel(options.agent);
+    const timeout = window.setTimeout(() => {
+      settle(
+        {
+          output,
+          stderr: output || lastMessage || `${agentLabel} diagram drawing timed out.`,
+          status: 'failed',
+        },
+        new Error(`${agentLabel} diagram drawing timed out. Please retry or check the remote agent.`),
+      );
+    }, RESEARCH_AGENT_DRAW_TIMEOUT_MS);
 
     const settle = (result: AgentRunOutputResult, error?: Error) => {
       if (settled) return;
       settled = true;
+      window.clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abort);
       try {
         socket.close();
       } catch {
@@ -1608,8 +1627,26 @@ function runResearchAgentStreamPrompt(options: {
       resolve(result);
     };
 
+    const abort = () => {
+      settle(
+        {
+          output,
+          stderr: output || lastMessage || 'Agent Draw cancelled.',
+          status: 'failed',
+        },
+        new Error('Agent Draw cancelled.'),
+      );
+    };
+
+    options.signal?.addEventListener('abort', abort, { once: true });
+
     socket.addEventListener('open', () => {
-      socket.send(serializeLegacyRemoteAgentStreamPayload(options));
+      if (options.signal?.aborted) {
+        abort();
+        return;
+      }
+      const { signal: _signal, ...payload } = options;
+      socket.send(serializeLegacyRemoteAgentStreamPayload(payload));
     });
 
     socket.addEventListener('message', (event) => {
@@ -1741,9 +1778,17 @@ async function runResearchCodexStreamPrompt(options: {
   prompt: string;
   remotePath?: string;
   model?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
+  if (options.signal?.aborted) {
+    throw new Error('Agent Draw cancelled.');
+  }
   const history = await createLegacyCodexHistory(options.serverId, 'Research diagram draw');
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error('Agent Draw cancelled.'));
+      return;
+    }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL(`${protocol}//${window.location.host}/api/codex/session`);
     url.searchParams.set('serverId', options.serverId);
@@ -1755,10 +1800,15 @@ async function runResearchCodexStreamPrompt(options: {
     let lastMessage = '';
     let promptStarted = false;
     let settled = false;
+    const timeout = window.setTimeout(() => {
+      settle(new Error('Codex diagram drawing timed out. Please retry or check the remote Codex session.'));
+    }, RESEARCH_AGENT_DRAW_TIMEOUT_MS);
 
     const settle = (error?: Error) => {
       if (settled) return;
       settled = true;
+      window.clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abort);
       try {
         socket.close();
       } catch {
@@ -1771,7 +1821,17 @@ async function runResearchCodexStreamPrompt(options: {
       resolve(output.trim());
     };
 
+    const abort = () => {
+      settle(new Error('Agent Draw cancelled.'));
+    };
+
+    options.signal?.addEventListener('abort', abort, { once: true });
+
     socket.addEventListener('open', () => {
+      if (options.signal?.aborted) {
+        abort();
+        return;
+      }
       socket.send(
         JSON.stringify({
           prompt: options.prompt,
@@ -2132,6 +2192,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const graphRef = useRef<HTMLDivElement | null>(null);
   const mixAnalysisInFlightRef = useRef(false);
   const trainingSubmitInFlightRef = useRef(false);
+  const agentDrawAbortRef = useRef<AbortController | null>(null);
   const activeFlowchart =
     flowchartLibrary.flowcharts.find((flowchart) => flowchart.id === flowchartLibrary.activeFlowchartId) ||
     flowchartLibrary.flowcharts[0];
@@ -2384,7 +2445,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   }, [connected]);
 
   const runSelectedTextAnalysisAgent = useCallback(
-    async (prompt: string): Promise<string> => {
+    async (prompt: string, signal?: AbortSignal): Promise<string> => {
       const server = await resolveAnalysisServer();
       const remotePath = server.defaultPath || '~';
       const model = readResearchAgentModel(analysisAgent);
@@ -2396,6 +2457,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           remotePath,
           allowedDirs: analysisAgent === 'claude' ? [remotePath] : undefined,
           model,
+          signal,
         });
         return agentRunOutput(result, analysisAgentLabel);
       }
@@ -2405,6 +2467,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           prompt,
           remotePath,
           model,
+          signal,
         });
       }
       throw new Error(`${analysisAgentLabel} is not available for direct text analysis.`);
@@ -2919,6 +2982,9 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       message: `${analysisAgentLabel} is drawing the diagram...`,
       startedAt: Date.now(),
     });
+    agentDrawAbortRef.current?.abort();
+    const abortController = new AbortController();
+    agentDrawAbortRef.current = abortController;
     try {
       if (analysisAgent === 'codex') {
         const server = await resolveAnalysisServer();
@@ -2927,6 +2993,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           prompt: buildAgentDiagramJsonPrompt(prompt, nodes, edges),
           remotePath: server.defaultPath || '~',
           model: readResearchAgentModel('codex'),
+          signal: abortController.signal,
         });
         setCodexDiagramJson(raw);
         const draft = parseCodexDiagramDraft(raw);
@@ -2934,7 +3001,10 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         return true;
       }
 
-      const raw = await runSelectedTextAnalysisAgent(buildAgentDiagramJsonPrompt(prompt, nodes, edges));
+      const raw = await runSelectedTextAnalysisAgent(
+        buildAgentDiagramJsonPrompt(prompt, nodes, edges),
+        abortController.signal,
+      );
       setCodexDiagramJson(raw);
       const draft = parseCodexDiagramDraft(raw);
       applyDiagramDraft(
@@ -2943,12 +3013,26 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       );
       return true;
     } catch (error) {
+      const aborted = abortController.signal.aborted;
       setCodexDiagramStatus({
-        status: 'error',
-        message: describeDiagramDraftError(error, analysisAgentLabel),
+        status: aborted ? 'idle' : 'error',
+        message: aborted ? 'Agent Draw cancelled.' : describeDiagramDraftError(error, analysisAgentLabel),
       });
       return false;
+    } finally {
+      if (agentDrawAbortRef.current === abortController) {
+        agentDrawAbortRef.current = null;
+      }
     }
+  };
+
+  const cancelAgentDraw = () => {
+    agentDrawAbortRef.current?.abort();
+    agentDrawAbortRef.current = null;
+    setCodexDiagramStatus({
+      status: 'idle',
+      message: 'Agent Draw cancelled.',
+    });
   };
 
   const applyCodexDiagramJson = () => {
@@ -4394,8 +4478,10 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                 type="button"
                 className="modal-close"
                 aria-label="Close agent draw prompt"
-                onClick={() => setCodexDiagramOpen(false)}
-                disabled={codexDiagramStatus.status === 'running'}
+                onClick={() => {
+                  if (codexDiagramStatus.status === 'running') cancelAgentDraw();
+                  setCodexDiagramOpen(false);
+                }}
               >
                 x
               </button>
@@ -4418,8 +4504,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
               <button
                 type="button"
                 className="danger"
-                onClick={() => setCodexDiagramOpen(false)}
-                disabled={codexDiagramStatus.status === 'running'}
+                onClick={() => {
+                  if (codexDiagramStatus.status === 'running') {
+                    cancelAgentDraw();
+                    return;
+                  }
+                  setCodexDiagramOpen(false);
+                }}
               >
                 Cancel
               </button>

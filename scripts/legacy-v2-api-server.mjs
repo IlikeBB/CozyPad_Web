@@ -2536,14 +2536,14 @@ async function getRemoteAgyStatus(session, serverId = "") {
     'if [ -n "$agy_path" ]; then',
     "  printf '__COZYPAD_AGY_AVAILABLE__\\n'",
     '  printf "%s\\n" "$agy_path"',
-    '  agy --dangerously-skip-permissions --version 2>/dev/null | head -n 1 || agy --dangerously-skip-permissions --help 2>/dev/null | head -n 1 || true',
+    '  agy --version 2>/dev/null | head -n 1 || agy --help 2>/dev/null | head -n 1 || printf "agy\\n"',
     "  printf '__COZYPAD_AGY_MODELS_BEGIN__\\n'",
     "  if command -v timeout >/dev/null 2>&1 && command -v script >/dev/null 2>&1; then",
-    "    timeout 20s script -q -c 'agy --dangerously-skip-permissions models' /dev/null 2>/dev/null | head -n 300 || true",
+    "    timeout 20s script -q -c 'agy models' /dev/null 2>/dev/null | head -n 300 || true",
     "  elif command -v timeout >/dev/null 2>&1; then",
-    '    timeout 12s agy --dangerously-skip-permissions models 2>/dev/null | head -n 300 || true',
+    '    timeout 12s agy models 2>/dev/null | head -n 300 || true',
     "  else",
-    '    agy --dangerously-skip-permissions models 2>/dev/null | head -n 300 || true',
+    '    agy models 2>/dev/null | head -n 300 || true',
     "  fi",
     "  printf '__COZYPAD_AGY_MODELS_END__\\n'",
     "  exit 0",
@@ -2551,10 +2551,10 @@ async function getRemoteAgyStatus(session, serverId = "") {
     'probe_file=$(mktemp "${TMPDIR:-/tmp}/cozypad-agy-probe.XXXXXX") || exit 1',
     'trap \'rm -f "$probe_file"\' EXIT',
     "if command -v timeout >/dev/null 2>&1; then",
-    '  timeout 6s agy --dangerously-skip-permissions --help >"$probe_file" 2>&1 </dev/null',
+    '  timeout 6s agy --help >"$probe_file" 2>&1 </dev/null',
     "  probe_status=$?",
     "else",
-    '  agy --dangerously-skip-permissions --help >"$probe_file" 2>&1 </dev/null',
+    '  agy --help >"$probe_file" 2>&1 </dev/null',
     "  probe_status=$?",
     "fi",
     'if [ "$probe_status" -eq 0 ] || [ "$probe_status" -eq 124 ] || { [ "$probe_status" -ne 127 ] && ! grep -Eqi "not found|not recognized" "$probe_file"; }; then',
@@ -2864,7 +2864,7 @@ function buildRemoteClaudeArgs(allowedDirs, model = "") {
 
 function buildRemoteAgyArgs(model = "") {
   const cleanModel = normalizeCodexModelOption(model);
-  return ["--dangerously-skip-permissions", ...(cleanModel ? ["--model", cleanModel] : [])]
+  return [...(cleanModel ? ["--model", cleanModel] : [])]
     .map(shellQuote)
     .join(" ");
 }
@@ -2992,7 +2992,7 @@ async function getLocalAgentModelInfo(cliName, cwd = "~") {
 
   let text = "";
   if (cliName === "agy") {
-    const result = await runLocalCli("agy", ["--dangerously-skip-permissions", "models"], {
+    const result = await runLocalCli("agy", ["models"], {
       cwd,
       timeoutMs: 12000,
       stdoutLimit: 256 * 1024,
@@ -3054,8 +3054,7 @@ async function getLocalAgentStatus(session, server, cliName, label) {
     };
   }
 
-  const unrestrictedArgs =
-    cliName === "claude" || cliName === "agy" ? ["--dangerously-skip-permissions"] : [];
+  const unrestrictedArgs = cliName === "claude" ? ["--dangerously-skip-permissions"] : [];
   const version = await runLocalCli(cliName, [...unrestrictedArgs, "--version"], {
     cwd: server.defaultPath || "~",
     timeoutMs: 8000,
@@ -3173,9 +3172,9 @@ async function runLocalAgyPrompt(session, server, prompt, remotePath, model = ""
   const cleanModel = normalizeCodexModelOption(model);
   const modelArgs = cleanModel ? ["--model", cleanModel] : [];
   const attempts = [
-    ["--dangerously-skip-permissions", ...modelArgs, "-p", prompt],
-    ["--dangerously-skip-permissions", ...modelArgs, "--print", prompt],
-    ["--dangerously-skip-permissions", ...modelArgs],
+    [...modelArgs, "-p", prompt],
+    [...modelArgs, "--print", prompt],
+    [...modelArgs],
   ];
   let result = null;
 
@@ -4667,7 +4666,11 @@ function publicSshServer(server) {
     privateKey,
     ...publicServer
   } = server;
-  return publicServer;
+  return {
+    ...publicServer,
+    hasIdentityFile: Boolean(identityFile),
+    identityFileReady: Boolean(isSystemLocalServer(server) || canUseSsh2Broker(server)),
+  };
 }
 
 function isSystemLocalServer(server) {
@@ -12236,7 +12239,7 @@ function detachBailianSocket(bailianSession, socket) {
   scheduleBailianSessionCleanup(bailianSession);
 }
 
-function attachBailianSocket(bailianSession, socket) {
+function attachBailianSocket(bailianSession, socket, options = {}) {
   if (!bailianSession || bailianSession.ended) {
     return;
   }
@@ -12252,7 +12255,7 @@ function attachBailianSocket(bailianSession, socket) {
   bailianSession.lastAttachedAt = Date.now();
   socket.setKeepAlive?.(true, 30000);
 
-  if (bailianSession.buffer) {
+  if (bailianSession.buffer && !options.suppressReplay) {
     sendWebSocketText(socket, bailianSession.buffer);
   } else {
     sendWebSocketText(socket, `[CozyPad] remote bailian attached to ${bailianSession.serverName}\r\n`);
@@ -13386,7 +13389,7 @@ function remoteAgentWorkerConfig(agent) {
       bootstrapLines: remoteAgyBootstrapLines(),
       missingMarker: "__COZYPAD_AGY_MISSING__",
       runLines: [
-        "    set -- agy --dangerously-skip-permissions",
+        "    set -- agy",
         '    if [ -n "${agent_model:-}" ]; then set -- "$@" --model "$agent_model"; fi',
         '    agy_prompt=$(cat "$prompt_file")',
         '    if "$@" -p "$agy_prompt"; then exit 0; fi',
@@ -15658,8 +15661,9 @@ async function handleBailianUpgrade(request, socket) {
 
   const frameState = { buffer: Buffer.alloc(0) };
   const requestedTaskId = normalizeCodexSessionTaskId(url.searchParams.get("taskId"));
+  const suppressReplay = url.searchParams.get("suppressReplay") === "1";
   const bailianSession = getOrCreateBailianSession(session, selectedServer, requestedTaskId);
-  attachBailianSocket(bailianSession, socket);
+  attachBailianSocket(bailianSession, socket, { suppressReplay });
 
   socket.on("data", (chunk) => {
     readWebSocketFrames(

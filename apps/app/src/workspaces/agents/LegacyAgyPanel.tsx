@@ -10,6 +10,7 @@ import {
   openLegacyAgySession,
   openLegacyBailianSession,
   openLegacyRemoteAgentStream,
+  resetLegacyRemoteAgentCooldown,
   serializeLegacyRemoteAgentStreamPayload,
   stopLegacyAgentLatestTask,
   syncLegacyBailianSessionKey,
@@ -304,6 +305,32 @@ function assistantVisibleTranscript(items: ChatItem[]): string {
     )
     .map((item) => item.text.trim())
     .join('\n');
+}
+
+function buildBailianConversationPrompt(items: ChatItem[], nextPrompt: string): string {
+  const history = items
+    .filter(
+      (item): item is Extract<ChatItem, { kind: 'message' }> =>
+        item.kind === 'message' && Boolean(item.text?.trim()),
+    )
+    .map((item) => {
+      const role = item.role === 'user' ? 'User' : 'bailian';
+      return `${role}:\n${item.text.trim()}`;
+    })
+    .join('\n\n')
+    .slice(-18_000);
+
+  if (!history) return nextPrompt;
+  return [
+    'You are continuing an existing CozyPad Bailian conversation.',
+    'Use the conversation history below as context and answer only the latest user request.',
+    '',
+    'Conversation history:',
+    history,
+    '',
+    'Latest user request:',
+    nextPrompt,
+  ].join('\n');
 }
 
 function nextVisibleDelta(
@@ -618,7 +645,11 @@ export function LegacyAgyPanel({
     const statusPromise =
       agentName === 'bailian'
         ? getLegacyBailianStatus(legacyServer.id, { hasApiKey: Boolean(bailianKey.trim()) })
-        : config.getStatus(legacyServer.id);
+        : agentName === 'agy'
+          ? resetLegacyRemoteAgentCooldown('agy', legacyServer.id)
+              .catch(() => null)
+              .then(() => config.getStatus(legacyServer.id))
+          : config.getStatus(legacyServer.id);
     void statusPromise
       .then(setStatus)
       .catch((error) => {
@@ -960,6 +991,7 @@ export function LegacyAgyPanel({
       serverId: legacyServer.id,
       remotePath: taskRemotePath,
       taskId: task.id,
+      suppressReplay: Boolean(payload),
     });
     socketsRef.current.set(task.id, socket);
     updateTask(task.id, (current) => ({ ...current, connected: false }));
@@ -1176,6 +1208,10 @@ export function LegacyAgyPanel({
           };
     const taskId = task.id;
     const now = new Date().toISOString();
+    const bailianPromptForRun =
+      agentName === 'bailian' && !options.forceNew && activeTask
+        ? buildBailianConversationPrompt(activeTask.items, prompt)
+        : prompt;
     const userItem: ChatItem = {
       kind: 'message',
       id: `${taskId}:user:${Date.now()}`,
@@ -1254,7 +1290,7 @@ export function LegacyAgyPanel({
             running: true,
           },
           {
-            prompt,
+            prompt: bailianPromptForRun,
             remotePath,
             model: agentModel,
             apiKey: bailianKey.trim(),
