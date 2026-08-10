@@ -29,6 +29,7 @@ import {
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
+import { commonAgentSlashCommands } from './slashCommands';
 
 const AGENT_CONFIG = {
   codex: {
@@ -377,6 +378,58 @@ function sanitizeChatItem(item: unknown, agentName: LegacyAgentName): ChatItem |
   return next as ChatItem;
 }
 
+function chatItemTime(item: ChatItem): number {
+  const time = Date.parse(item.timestamp || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function isDuplicateChatItem(left: ChatItem, right: ChatItem): boolean {
+  if (left.id === right.id) return true;
+  if (left.kind !== right.kind) return false;
+  const closeInTime = Math.abs(chatItemTime(left) - chatItemTime(right)) <= 1500;
+  if (!closeInTime) return false;
+
+  if (left.kind === 'message' && right.kind === 'message') {
+    return left.role === right.role && left.text.trim() === right.text.trim();
+  }
+  if (left.kind === 'usage' && right.kind === 'usage') {
+    return left.inputTokens === right.inputTokens && left.outputTokens === right.outputTokens;
+  }
+  if (left.kind === 'tool_call' && right.kind === 'tool_call') {
+    return left.name === right.name && left.summary === right.summary && left.status === right.status;
+  }
+  if (left.kind === 'file_diff' && right.kind === 'file_diff') {
+    return left.path === right.path && left.diff === right.diff;
+  }
+  if (left.kind === 'approval' && right.kind === 'approval') {
+    return left.command === right.command && left.cwd === right.cwd;
+  }
+  if (left.kind === 'question' && right.kind === 'question') {
+    return left.prompt === right.prompt;
+  }
+  return false;
+}
+
+function dedupeChatItems(items: ChatItem[]): ChatItem[] {
+  const byId = new Set<string>();
+  const next: ChatItem[] = [];
+  for (const item of items) {
+    if (byId.has(item.id)) continue;
+    const previous = next[next.length - 1];
+    if (previous && isDuplicateChatItem(previous, item)) continue;
+    byId.add(item.id);
+    next.push(item);
+  }
+  return next;
+}
+
+function normalizeTaskItems(task: AgentTask): AgentTask {
+  return {
+    ...task,
+    items: dedupeChatItems(task.items),
+  };
+}
+
 function agentTaskDedupeKey(task: AgentTask): string {
   return [
     task.title.trim(),
@@ -411,7 +464,7 @@ function readStoredTasks(storageKey: string, agentName: LegacyAgentName): AgentT
         const items = Array.isArray(task.items)
           ? task.items.map((item: unknown) => sanitizeChatItem(item, agentName)).filter(Boolean)
           : [];
-        return {
+        return normalizeTaskItems({
           id: String(task.id),
           title: String(task.title || `${agentName} 工作`),
           prompt: String(task.prompt || ''),
@@ -427,7 +480,7 @@ function readStoredTasks(storageKey: string, agentName: LegacyAgentName): AgentT
           createdAt: String(task.createdAt || new Date().toISOString()),
           updatedAt: String(task.updatedAt || task.createdAt || new Date().toISOString()),
           items: items as ChatItem[],
-        };
+        });
       });
     return dedupeAgentTasks(tasks).slice(0, MAX_TASKS);
   } catch {
@@ -439,6 +492,7 @@ function writeStoredTasks(storageKey: string, tasks: AgentTask[]): void {
   try {
     const serializable = dedupeAgentTasks(tasks).slice(0, MAX_TASKS).map((task) => ({
       ...task,
+      items: dedupeChatItems(task.items),
       connected: false,
       running: task.running,
       status: task.running ? 'running' : task.status,
@@ -532,6 +586,7 @@ export function LegacyAgyPanel({
   const awaitingRunStartRef = useRef(new Set<string>());
   const consumedVisibleTextRef = useRef(new Map<string, string>());
   const drainingTrainingQueueRef = useRef(false);
+  const lastSendRef = useRef<{ key: string; at: number } | null>(null);
 
   const serverTarget = legacyServerTarget(legacyServer);
   const activeTask = tasks.find((task) => task.id === activeTaskId) ?? null;
@@ -697,7 +752,9 @@ export function LegacyAgyPanel({
   }, [focusRequestNonce, focusTaskId, tasks]);
 
   const updateTask = useCallback((taskId: string, updater: (task: AgentTask) => AgentTask) => {
-    setTasks((current) => current.map((task) => (task.id === taskId ? updater(task) : task)));
+    setTasks((current) =>
+      current.map((task) => (task.id === taskId ? normalizeTaskItems(updater(task)) : task)),
+    );
   }, []);
 
   const connectAgyTask = useCallback((
@@ -799,7 +856,7 @@ export function LegacyAgyPanel({
         completedSocketTaskIdsRef.current.add(task.id);
         updateTask(task.id, (current) => {
           const message =
-            'agy session 已不在 CozyPad API 中。可能是 API 重啟或 SSH worker 已被關閉；請手動重新送出這個任務。';
+            'agy session is no longer available in CozyPad API. The API may have restarted or the SSH worker was closed; please send this task again manually.';
           const assistantId =
             [...current.items]
               .reverse()
@@ -1032,6 +1089,49 @@ export function LegacyAgyPanel({
         replaceNextVisibleTextRef.current.delete(task.id);
       }
       if (!visible.trim() && !done && !failed && !runningSignal) return;
+      if (!payload && done && !rawVisible.trim() && replaceNextVisibleTextRef.current.has(task.id)) {
+        replaceNextVisibleTextRef.current.delete(task.id);
+        completedSocketTaskIdsRef.current.add(task.id);
+        updateTask(task.id, (current) => {
+          const message =
+            'bailian session is no longer available in CozyPad API. The API may have restarted or the SSH worker was closed; please send this task again manually.';
+          const assistantId =
+            [...current.items]
+              .reverse()
+              .find(
+                (item): item is Extract<ChatItem, { kind: 'message' }> =>
+                  item.kind === 'message' && item.role === 'assistant',
+              )?.id || `${task.id}:assistant:${Date.now()}`;
+          const hasAssistant = current.items.some((item) => item.kind === 'message' && item.id === assistantId);
+          return {
+            ...current,
+            output: taskOutput(current.prompt || task.prompt, message, 'bailian'),
+            status: 'failed',
+            running: false,
+            connected: false,
+            updatedAt: new Date().toISOString(),
+            items: hasAssistant
+              ? current.items.map((item) =>
+                  item.kind === 'message' && item.id === assistantId
+                    ? { ...item, text: message, streaming: false }
+                    : item,
+                )
+              : [
+                  ...current.items,
+                  {
+                    kind: 'message' as const,
+                    id: assistantId,
+                    role: 'assistant' as const,
+                    text: message,
+                    streaming: false,
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+          };
+        });
+        socket.close();
+        return;
+      }
 
       updateTask(task.id, (current) => {
         let reply = '';
@@ -1188,6 +1288,18 @@ export function LegacyAgyPanel({
       setHelperError(`Press Connect before running ${config.label}.`);
       return false;
     }
+    const sendKey = [
+      agentName,
+      legacyServer.id,
+      activeTask?.id || 'new',
+      options.forceNew ? 'new' : 'continue',
+      prompt,
+    ].join('\u001f');
+    const nowMs = Date.now();
+    if (lastSendRef.current?.key === sendKey && nowMs - lastSendRef.current.at < 1200) {
+      return false;
+    }
+    lastSendRef.current = { key: sendKey, at: nowMs };
     const canUseBailianApi = agentName === 'bailian' && Boolean(bailianKey.trim());
     if (status && !status.available && !canUseBailianApi) {
       setHelperError(
@@ -1682,6 +1794,14 @@ export function LegacyAgyPanel({
               <p className="hint session-empty">尚無 {config.label} 工作。</p>
             ) : null}
           </div>
+          <button
+            className="session-new"
+            type="button"
+            onClick={() => setActiveTaskId('')}
+            disabled={!connected || !legacyServer || checking}
+          >
+            + 新工作
+          </button>
         </aside>
 
         <section className="chat-column legacy-codex-output">
@@ -1706,13 +1826,11 @@ export function LegacyAgyPanel({
                     {stoppingTaskId === activeTask.id ? 'Stopping...' : 'Stop'}
                   </button>
                 ) : null}
-                <button type="button" onClick={() => setActiveTaskId('')}>
-                  新工作
-                </button>
               </div>
               <ChatTimeline
                 sessionId={activeTask.id}
                 items={activeTask.items}
+                assistantLabel={config.label}
                 onResolveApproval={() => undefined}
                 onAnswerQuestion={() => undefined}
               />
@@ -1729,7 +1847,7 @@ export function LegacyAgyPanel({
           <ChatComposer
             agentLabel={config.label}
             value={composerText}
-            commands={[]}
+            commands={commonAgentSlashCommands}
             disabled={!connected || !legacyServer || checking}
             placeholder={`Message ${config.label}...（Enter 送出）`}
             onChange={setComposerText}

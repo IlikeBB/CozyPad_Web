@@ -18,6 +18,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 loadLocalEnv(path.join(ROOT, ".env"));
 
 const PORT = Number(process.env.COZYPAD_SSH_API_PORT || 5174);
+const CLAUDE_SERVICES_ENABLED = process.env.COZYPAD_ENABLE_CLAUDE_SERVICES === "true";
 const ADMIN_USERNAME = process.env.COZYPAD_ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = String(process.env.COZYPAD_ADMIN_PASSWORD || "").trim();
 const EFAN_PASSWORD = String(process.env.COZYPAD_EFAN_PASSWORD || "").trim();
@@ -237,6 +238,10 @@ const TERMINAL_DETACHED_TTL_MS = Number(
 );
 const TERMINAL_BUFFER_LIMIT = Number(process.env.COZYPAD_TERMINAL_BUFFER_LIMIT || 240000);
 const TERMINAL_WS_PING_MS = Number(process.env.COZYPAD_TERMINAL_WS_PING_MS || 25000);
+const TERMINAL_CHANNEL_OPEN_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.COZYPAD_TERMINAL_CHANNEL_OPEN_TIMEOUT_MS || 15000) || 15000,
+);
 const TERMINAL_AGENT_RUN_TIMEOUT_MS = Number(
   process.env.COZYPAD_TERMINAL_AGENT_RUN_TIMEOUT_MS || 5 * 60 * 1000,
 );
@@ -728,7 +733,7 @@ function createResearchFlowchartJob(session, server, payload, options = {}) {
 
 function normalizeRemoteAgentRunAgent(value) {
   const agent = String(value || "").trim().toLowerCase();
-  return agent === "claude" || agent === "agy" || agent === "bailian" || agent === "codex"
+  return agent === "agy" || agent === "bailian" || agent === "codex"
     ? agent
     : "";
 }
@@ -773,7 +778,7 @@ function publicRemoteAgentRunJob(job) {
 }
 
 async function runRemoteAgentRunPromptForJob(session, agent, body) {
-  if (agent === "claude") return runRemoteClaudePrompt(session, body);
+  if (agent === "claude") throw new Error("Claude service is disabled");
   if (agent === "agy") return runRemoteAgyPrompt(session, body);
   if (agent === "bailian") return runRemoteBailianPrompt(session, body);
   if (agent === "codex") return runRemoteCodexPrompt(session, body);
@@ -9537,16 +9542,37 @@ async function createSsh2TerminalChild(owner, server, dimensions = {}, gateOptio
 
   try {
     const channel = await new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(new Error("SSH2 terminal shell timed out"));
+      }, TERMINAL_CHANNEL_OPEN_TIMEOUT_MS);
+      timeout.unref?.();
+      const finish = (error, stream) => {
+        if (settled) {
+          try {
+            stream?.close?.();
+            stream?.end?.();
+          } catch {
+            // Late shell callbacks can arrive after timeout; close best-effort.
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stream);
+      };
       broker.connection.shell(
         ssh2PtyOptions(dimensions),
         { env: { TERM: "xterm-256color" } },
-        (error, stream) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve(stream);
-        },
+        finish,
       );
     });
     return createSsh2TerminalAdapter(channel, broker, releaseOnce, dimensions);
@@ -9570,7 +9596,27 @@ async function createSsh2ExecChild(owner, server, remoteCommand, gateOptions = {
 
   try {
     const channel = await new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(new Error("SSH2 exec channel timed out"));
+      }, TERMINAL_CHANNEL_OPEN_TIMEOUT_MS);
+      timeout.unref?.();
       broker.connection.exec(remoteCommand, {}, (error, stream) => {
+        if (settled) {
+          try {
+            stream?.close?.();
+            stream?.end?.();
+          } catch {
+            // Late exec callbacks can arrive after timeout; close best-effort.
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
         if (error) {
           reject(error);
           return;
@@ -10093,7 +10139,6 @@ function listSshRuntimeSnapshot(session) {
   const terminals = listTerminalSessionsForUser(session);
   const codex = listCodexRuntimeSessionsForUser(session);
   const agentSessions = [
-    ...listClaudeRuntimeSessionsForUser(session),
     ...listAgyRuntimeSessionsForUser(session),
     ...listBailianRuntimeSessionsForUser(session),
   ];
@@ -15445,6 +15490,12 @@ async function handleClaudeUpgrade(request, socket) {
     return;
   }
 
+  if (!CLAUDE_SERVICES_ENABLED) {
+    socket.write("HTTP/1.1 410 Gone\r\n\r\nClaude service is disabled");
+    socket.destroy();
+    return;
+  }
+
   if (!isAllowedWebSocketOrigin(request)) {
     rejectSocket(socket, 403, "Forbidden");
     return;
@@ -16137,6 +16188,28 @@ async function handleRequest(request, response) {
     return;
   }
 
+  const remoteAgentRunJobRpcMatch = pathname.match(
+    /^\/api\/rpc\/ssh\/(claude|agy|bailian|codex)\/run\/jobs\/([^/]+)$/,
+  );
+  if (request.method === "POST" && remoteAgentRunJobRpcMatch) {
+    const agent = remoteAgentRunJobRpcMatch[1] || "";
+    let jobId = decodeURIComponent(remoteAgentRunJobRpcMatch[2] || "");
+    try {
+      const body = await readBase64UrlJsonBody(request, 128 * 1024);
+      jobId = String(body.jobId || jobId || "").trim();
+    } catch {
+      // The job id is already present in the URL. Keep this endpoint tolerant so
+      // status polling can recover from Cloudflare edge failures.
+    }
+    const job = getRemoteAgentRunJobForSession(session, agent, jobId);
+    if (!job) {
+      sendJson(response, 404, { ok: false, error: "Remote agent job not found" });
+      return;
+    }
+    sendJson(response, 200, publicRemoteAgentRunJob(job));
+    return;
+  }
+
   const remoteAgentRunJobsMatch = pathname.match(
     /^\/api\/ssh\/(claude|agy|bailian|codex)\/run\/jobs$/,
   );
@@ -16203,6 +16276,20 @@ async function handleRequest(request, response) {
     } catch (error) {
       sendErrorJson(response, 400, error, "Remote Codex run failed");
     }
+    return;
+  }
+
+  if (
+    !CLAUDE_SERVICES_ENABLED &&
+    (pathname === "/api/ssh/claude/run" ||
+      pathname === "/api/rpc/ssh/claude/run" ||
+      pathname === "/api/rpc/ssh/claude/status" ||
+      /^\/api\/ssh\/servers\/[^/]+\/claude-status$/.test(pathname))
+  ) {
+    sendJson(response, 410, {
+      ok: false,
+      error: "Claude service is disabled",
+    });
     return;
   }
 

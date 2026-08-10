@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { RemoteFileItem } from '@cozypad/contracts';
 import { textToBase64 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
@@ -8,6 +7,11 @@ import { CodeEditor } from '../components/CodeEditor';
 import { ContextMenu, useLongPress } from '../components/ContextMenu';
 import type { MenuAction } from '../components/ContextMenu';
 import { FileIcon, fileKindOf } from '../components/FileIcons';
+import {
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from '../components/markdownPlugins';
 import { PdfViewer } from '../components/PdfViewer';
 import { mimeTypeForFileName, saveWithBrowserDownload } from '../fileDownload';
 import { buildFileBreadcrumbs, directoryItems } from './fileNavigation';
@@ -32,6 +36,7 @@ import {
 } from './sshServerPreference';
 
 interface FilesWorkspaceProps {
+  active?: boolean;
   connected: boolean;
   profileId?: string | null;
 }
@@ -123,6 +128,61 @@ function parentOf(path: string): string {
   return index <= 0 ? '/' : path.slice(0, index);
 }
 
+function isMouseBackButton(event: MouseEvent): boolean {
+  return event.button === 3;
+}
+
+function isKeyboardBackShortcut(event: KeyboardEvent): boolean {
+  return event.key === 'BrowserBack' || (event.altKey && event.key === 'ArrowLeft');
+}
+
+function useFileBackShortcut(
+  active: boolean,
+  canGoParent: boolean,
+  goParent: () => void,
+): void {
+  const goParentRef = useRef(goParent);
+  goParentRef.current = goParent;
+
+  useEffect(() => {
+    if (!active || !canGoParent) return;
+
+    const onMouseNavigation = (event: MouseEvent): void => {
+      if (!isMouseBackButton(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      goParentRef.current();
+    };
+
+    const onKeyNavigation = (event: KeyboardEvent): void => {
+      if (!isKeyboardBackShortcut(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      goParentRef.current();
+    };
+
+    const onPopState = (): void => {
+      goParentRef.current();
+      window.history.pushState({ cozyPadFilesBackGuard: true }, '', window.location.href);
+    };
+
+    window.history.pushState({ cozyPadFilesBackGuard: true }, '', window.location.href);
+    window.addEventListener('mousedown', onMouseNavigation, { capture: true });
+    window.addEventListener('mouseup', onMouseNavigation, { capture: true });
+    window.addEventListener('auxclick', onMouseNavigation, { capture: true });
+    window.addEventListener('keydown', onKeyNavigation, { capture: true });
+    window.addEventListener('popstate', onPopState);
+
+    return () => {
+      window.removeEventListener('mousedown', onMouseNavigation, { capture: true });
+      window.removeEventListener('mouseup', onMouseNavigation, { capture: true });
+      window.removeEventListener('auxclick', onMouseNavigation, { capture: true });
+      window.removeEventListener('keydown', onKeyNavigation, { capture: true });
+      window.removeEventListener('popstate', onPopState);
+    };
+  }, [active, canGoParent]);
+}
+
 const MAX_EDITOR_BYTES = 262144;
 
 const emptyLegacyFileBrowser: LegacyFileBrowserState = {
@@ -149,6 +209,8 @@ const emptyLegacyFilePreview: LegacyFilePreviewState = {
   objectUrl: '',
   error: '',
 };
+
+const FILE_LIST_TIMEOUT_MS = 20000;
 
 function formatLegacyFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -223,6 +285,33 @@ function parentPath(path: string): string {
   return index <= 0 ? '/' : cleanPath.slice(0, index);
 }
 
+function sortLegacyFileItems(items: LegacySshFileItem[]): LegacySshFileItem[] {
+  return [...items].sort((left, right) => {
+    if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+    return left.name.localeCompare(right.name, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    });
+  });
+}
+
+function legacyPathBreadcrumbs(remotePath: string): Array<{ label: string; path: string }> {
+  const path = (remotePath || '~').replace(/\/+$/u, '') || '/';
+  if (path === '/' || path === '~') return [{ label: path, path }];
+
+  const homeLike = path === '~' || path.startsWith('~/');
+  const root = homeLike ? '~' : '/';
+  const rest = homeLike ? path.slice(2) : path.replace(/^\/+/u, '');
+  const parts = rest.split('/').filter(Boolean);
+  const crumbs = [{ label: root, path: root }];
+  let current = root;
+  for (const part of parts) {
+    current = current === '/' ? `/${part}` : `${current}/${part}`;
+    crumbs.push({ label: part, path: current });
+  }
+  return crumbs;
+}
+
 /** 單列檔案項目：右鍵與長按都會開動作選單。 */
 function TreeRow({
   item,
@@ -271,9 +360,11 @@ function resolveFilesServerId(
 }
 
 function LegacyServerFilesWorkspace({
+  active = false,
   bridgeConnected,
   profileId = null,
 }: {
+  active?: boolean;
   bridgeConnected: boolean;
   profileId?: string | null;
 }) {
@@ -291,6 +382,7 @@ function LegacyServerFilesWorkspace({
   const [legacyActionError, setLegacyActionError] = useState('');
   const [selectedLegacyPath, setSelectedLegacyPath] = useState('');
   const previewObjectUrlRef = useRef('');
+  const loadFilesRequestRef = useRef(0);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -364,6 +456,10 @@ function LegacyServerFilesWorkspace({
       }
 
       const nextPath = remotePath.trim() || server.defaultPath || '~';
+      const requestId = loadFilesRequestRef.current + 1;
+      loadFilesRequestRef.current = requestId;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), FILE_LIST_TIMEOUT_MS);
       setPathInput(nextPath);
       setLegacyActionError('');
       setBrowser((current) => ({
@@ -374,7 +470,10 @@ function LegacyServerFilesWorkspace({
         error: '',
       }));
       try {
-        const listing = await listLegacyServerFiles(server.id, nextPath);
+        const listing = await listLegacyServerFiles(server.id, nextPath, {
+          signal: controller.signal,
+        });
+        if (loadFilesRequestRef.current !== requestId) return;
         setSelectedLegacyPath('');
         setBrowser({
           serverId: server.id,
@@ -389,12 +488,21 @@ function LegacyServerFilesWorkspace({
         });
         setPathInput(listing.path || nextPath);
       } catch (error) {
+        if (loadFilesRequestRef.current !== requestId) return;
+        const aborted = controller.signal.aborted;
+        if (aborted) {
+          setLegacyActionError(
+            `File listing timed out after ${Math.round(FILE_LIST_TIMEOUT_MS / 1000)}s.`,
+          );
+        }
         setBrowser((current) => ({
           ...current,
           serverId: server.id,
           loading: false,
           error: error instanceof Error ? error.message : '檔案列表載入失敗',
         }));
+      } finally {
+        window.clearTimeout(timeout);
       }
     },
     [bridgeConnected],
@@ -492,6 +600,27 @@ function LegacyServerFilesWorkspace({
 
   const currentLegacyDir = browser.path || pathInput || selectedServer?.defaultPath || '~';
   const inlineImagePreview = preview.open && preview.kind === 'image';
+  const visibleLegacyItems = useMemo(() => sortLegacyFileItems(browser.items), [browser.items]);
+  const legacyBreadcrumbs = useMemo(
+    () => legacyPathBreadcrumbs(browser.path || pathInput || '~'),
+    [browser.path, pathInput],
+  );
+  const canGoLegacyParent =
+    active &&
+    Boolean(selectedServer) &&
+    !browser.loading &&
+    !legacyBusy &&
+    Boolean(browser.parent) &&
+    browser.path !== '/' &&
+    browser.path !== '~';
+
+  const goLegacyParent = useCallback(() => {
+    if (!selectedServer || !browser.parent || browser.loading || legacyBusy) return;
+    closePreview();
+    void loadFiles(selectedServer, browser.parent);
+  }, [browser.loading, browser.parent, closePreview, legacyBusy, loadFiles, selectedServer]);
+
+  useFileBackShortcut(active, canGoLegacyParent, goLegacyParent);
 
   const openLegacyBlankMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!selectedServer) return;
@@ -575,7 +704,7 @@ function LegacyServerFilesWorkspace({
   };
 
   if (serverError && servers.length === 0 && bridgeConnected) {
-    return <BridgeFilesWorkspace connected={bridgeConnected} />;
+    return <BridgeFilesWorkspace active={active} connected={bridgeConnected} />;
   }
 
   return (
@@ -622,8 +751,8 @@ function LegacyServerFilesWorkspace({
             <div className="placeholder">
               <p>{browser.error}</p>
             </div>
-          ) : browser.items.length > 0 ? (
-            browser.items.map((item) => {
+          ) : visibleLegacyItems.length > 0 ? (
+            visibleLegacyItems.map((item) => {
               const remoteItem = legacyItemAsRemote(item);
               return (
                 <TreeRow
@@ -670,19 +799,38 @@ function LegacyServerFilesWorkspace({
 
       <section className="files-preview legacy-files-preview">
         <div className="breadcrumb-bar">
+          <button
+            className="crumb files-copy-path-crumb"
+            type="button"
+            disabled={!selectedServer}
+            onClick={() => {
+              copyPath(currentLegacyDir);
+              showLegacyFlash('路徑已複製');
+            }}
+            title={currentLegacyDir}
+          >
+            Copy path
+          </button>
           <span className="crumb-wrap">
             <button className="crumb" type="button" disabled={!selectedServer}>
               {selectedServer?.name || 'Files'}
             </button>
           </span>
-          {selectedServer ? (
-            <>
-              <span className="crumb-sep">/</span>
-              <button className="crumb mono" type="button" onClick={() => void loadFiles(selectedServer, browser.path)}>
-                {browser.path || pathInput}
-              </button>
-            </>
-          ) : null}
+          {selectedServer
+            ? legacyBreadcrumbs.map((crumb, index) => (
+                <span className="crumb-wrap" key={`${crumb.path}:${index}`}>
+                  <span className="crumb-sep">/</span>
+                  <button
+                    className="crumb mono"
+                    type="button"
+                    onClick={() => void loadFiles(selectedServer, crumb.path)}
+                    disabled={browser.loading || legacyBusy}
+                  >
+                    {crumb.label}
+                  </button>
+                </span>
+              ))
+            : null}
         </div>
         {selectedServer ? (
           <div className="legacy-files-side-content">
@@ -724,8 +872,8 @@ function LegacyServerFilesWorkspace({
                 <div className="placeholder">
                   <p>{browser.error}</p>
                 </div>
-              ) : browser.items.length > 0 ? (
-                browser.items.map((item) => {
+              ) : visibleLegacyItems.length > 0 ? (
+                visibleLegacyItems.map((item) => {
                   const remoteItem = legacyItemAsRemote(item);
                   return (
                     <button
@@ -823,7 +971,9 @@ function LegacyServerFilesWorkspace({
                 </div>
               ) : preview.kind === 'markdown' ? (
                 <div className="markdown markdown-doc legacy-file-markdown">
-                  <Markdown remarkPlugins={[remarkGfm]}>{preview.content}</Markdown>
+                  <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                    {normalizeMarkdownMath(preview.content)}
+                  </Markdown>
                 </div>
               ) : preview.kind === 'text' ? (
                 <pre className="legacy-file-text-preview">{preview.content}</pre>
@@ -922,7 +1072,7 @@ function LegacyServerFilesWorkspace({
   );
 }
 
-function BridgeFilesWorkspace({ connected }: FilesWorkspaceProps) {
+function BridgeFilesWorkspace({ active = false, connected }: FilesWorkspaceProps) {
   const bridge = useMemo(() => getBridge(), []);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [homePath, setHomePath] = useState<string | null>(null);
@@ -1207,6 +1357,13 @@ function BridgeFilesWorkspace({ connected }: FilesWorkspaceProps) {
 
   const dirty = draft !== null && draft.text !== draft.saved;
   confirmDiscardRef.current = confirmDiscard;
+  const canGoBridgeParent = active && connected && currentPath !== null && currentPath !== '/';
+  const goBridgeParent = useCallback(() => {
+    if (currentPath === null || currentPath === '/') return;
+    void openPath(parentOf(currentPath));
+  }, [currentPath, openPath]);
+
+  useFileBackShortcut(active, canGoBridgeParent, goBridgeParent);
 
   // 有未存檔內容時關閉 app／重新整理要先提醒。
   useEffect(() => {
@@ -1494,6 +1651,14 @@ function BridgeFilesWorkspace({ connected }: FilesWorkspaceProps) {
       </aside>
       <div className="files-preview">
         <div className="breadcrumb-bar">
+          <button
+            className="crumb files-copy-path-crumb"
+            type="button"
+            onClick={() => copyToClipboardText(currentDir, '路徑已複製')}
+            title={currentDir}
+          >
+            Copy path
+          </button>
           {breadcrumbs.map((crumb, index) => (
             <span key={crumb.path} className="crumb-wrap">
               {index > 0 ? <span className="crumb-sep">/</span> : null}
@@ -1587,7 +1752,9 @@ function BridgeFilesWorkspace({ connected }: FilesWorkspaceProps) {
               )
             ) : draft && isMarkdown(selected) && mdPreview ? (
               <div className="md-preview markdown markdown-doc">
-                <Markdown remarkPlugins={[remarkGfm]}>{draft.text}</Markdown>
+                <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                  {normalizeMarkdownMath(draft.text)}
+                </Markdown>
               </div>
             ) : draft ? (
               <CodeEditor
@@ -1728,6 +1895,12 @@ function BridgeFilesWorkspace({ connected }: FilesWorkspaceProps) {
   );
 }
 
-export function FilesWorkspace({ connected, profileId = null }: FilesWorkspaceProps) {
-  return <LegacyServerFilesWorkspace bridgeConnected={connected} profileId={profileId} />;
+export function FilesWorkspace({ active = false, connected, profileId = null }: FilesWorkspaceProps) {
+  return (
+    <LegacyServerFilesWorkspace
+      active={active}
+      bridgeConnected={connected}
+      profileId={profileId}
+    />
+  );
 }

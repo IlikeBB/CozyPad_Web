@@ -1,16 +1,17 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
-  analyzeLegacyResearchFlowchartBatch,
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from '../components/markdownPlugins';
+import {
   createLegacyCodexHistory,
   listLegacyServers,
   openLegacyRemoteAgentStream,
   serializeLegacyRemoteAgentStreamPayload,
   type LegacyRemoteAgentStreamKind,
-  type LegacyResearchFlowchartBatchResult,
-  type LegacyResearchFlowchartMarkdownResponse,
   type LegacySshServer,
 } from './agents/legacySshApi';
 import { queueCodexTrainingTask, type QueuedTrainingAgent } from './agents/codexTaskQueue';
@@ -21,17 +22,13 @@ const PIPELINE_EDGES_STORAGE_KEY = 'cozypad3.researchPipelineEdges.v1';
 const RESEARCH_FLOWCHARTS_STORAGE_KEY = 'cozypad3.researchFlowcharts.v2';
 const RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY = 'cozypad3.researchActiveFlowchart.v1';
 const RESEARCH_MARKDOWN_STORAGE_KEY = 'cozypad3.researchRemoteMarkdown.v1';
-const RESEARCH_MIX_MARKDOWN_STORAGE_KEY = 'cozypad3.researchMixMarkdown.v1';
 const RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = 'cozypad3.researchRemoteMarkdownByFlowchart.v1';
-const RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = 'cozypad3.researchMixMarkdownByFlowchart.v1';
 const RESEARCH_AGENT_MODEL_STORAGE_KEYS: Partial<Record<ResearchAnalysisAgent, string>> = {
-  claude: 'cozypad3.remoteClaude.model.v1',
   codex: 'cozypad3.remoteCodex.model.v1',
   agy: 'cozypad3.remoteAgy.model.v1',
   bailian: 'cozypad3.remoteBailian.model.v1',
 };
 const RESEARCH_AGENT_MODEL_FALLBACKS: Partial<Record<ResearchAnalysisAgent, string>> = {
-  claude: 'opus',
   bailian: 'qwen-plus',
 };
 const INACCESSIBLE_BAILIAN_MODELS = new Set(['deepseek-v4-pro', 'deepseek-v4-pro-us', 'deepseek-v4-flash', 'deepseek-v4-flash-us']);
@@ -53,6 +50,9 @@ type PipelineNode = {
   role: PipelineNodeRole;
   x: number;
   y: number;
+  yaml?: string;
+  agentPrompt?: string;
+  feedbackMarkdown?: string;
 };
 
 type PipelinePortSide = 'top' | 'right' | 'bottom' | 'left';
@@ -78,7 +78,7 @@ type ResearchFlowchartLibrary = {
   activeFlowchartId: string;
 };
 
-type ResearchView = 'flow' | 'markdown' | 'markdownMix';
+type ResearchView = 'flow' | 'markdown';
 
 type ConnectionDraft = {
   from: string;
@@ -116,10 +116,9 @@ type MarkdownAnalysisState = {
   elapsedMs?: number;
 };
 
-type MixAnalysisFile = {
+type NodeFeedbackResult = {
   id: string;
   title: string;
-  fileName: string;
   markdown: string;
   updatedAt: string;
 };
@@ -131,12 +130,10 @@ type FlowchartMarkdownEntry = {
 };
 
 type FlowchartMarkdownStore = Record<string, FlowchartMarkdownEntry>;
-type FlowchartMixMarkdownStore = Record<string, MixAnalysisFile[]>;
 
-type MixAnalysisTopic = {
+type NodeFeedbackTopic = {
   id: string;
   title: string;
-  fileName: string;
   instruction: string;
 };
 
@@ -151,18 +148,16 @@ type TrainingPromptDialogState = {
   modelSource: string;
 };
 
-type TrainingPromptSource = 'markdown' | 'markdownMix';
-type ResearchAnalysisAgent = '' | 'claude' | 'codex' | 'agy' | 'bailian';
+type TrainingPromptSource = 'markdown' | 'nodeFeedback';
+type ResearchAnalysisAgent = '' | 'codex' | 'agy' | 'bailian';
 
 const RESEARCH_ANALYSIS_AGENT_LABELS: Record<Exclude<ResearchAnalysisAgent, ''>, string> = {
-  claude: 'Claude',
   codex: 'Codex',
   agy: 'agy',
   bailian: 'baillian',
 };
 
-const TRAINING_AGENT_LABELS: Record<QueuedTrainingAgent, string> = {
-  claude: 'Claude',
+const TRAINING_AGENT_LABELS: Partial<Record<QueuedTrainingAgent, string>> = {
   codex: 'Codex',
   agy: 'agy',
   bailian: 'baillian',
@@ -238,46 +233,137 @@ const NODE_TEMPLATES: NodeTemplate[] = [
   },
 ];
 
-const MIX_ANALYSIS_TOPICS: MixAnalysisTopic[] = [
+const NODE_RULE_VERSION = 'cozypad-node-rule-v1';
+
+function yamlQuote(value: unknown): string {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function nodeHumanRuleText(node: PipelineNode): string {
+  return [
+    '1. Keep the node single-purpose: one research action, one clear owner, one measurable output.',
+    '2. Declare inputs, outputs, assumptions, constraints, and acceptance criteria before running agents.',
+    '3. Preserve reproducibility: record dataset path, model/checkpoint, seed, environment, command, and metrics.',
+    '4. Avoid hidden side effects: no delete, overwrite, domain update, or long-running training without explicit user approval.',
+    '5. Validate completion with observable evidence: logs, artifacts, metrics, screenshots, or a Markdown result.',
+    `Current node focus: ${node.title} (${node.kind}/${node.role}).`,
+  ].join('\n');
+}
+
+function buildNodeAgentPrompt(node: PipelineNode): string {
+  return [
+    `請根據節點「${node.title}」協助整理此研究步驟。`,
+    `角色：${node.kind}/${node.role}。`,
+    `目標：說明此 node 要做什麼、需要哪些輸入、預期產出、限制條件與完成驗收方式。`,
+    '請優先輸出可執行、可追蹤、可重現的 Markdown，避免直接執行高風險操作。',
+  ].join('\n');
+}
+
+function buildNodeYaml(node: PipelineNode): string {
+  const prompt = (node.agentPrompt || buildNodeAgentPrompt(node)).trim();
+  const feedback = (node.feedbackMarkdown || '').trim();
+  return [
+    `version: ${yamlQuote(NODE_RULE_VERSION)}`,
+    `id: ${yamlQuote(node.id)}`,
+    `title: ${yamlQuote(node.title)}`,
+    `kind: ${yamlQuote(node.kind)}`,
+    `role: ${yamlQuote(node.role)}`,
+    `summary: ${yamlQuote(node.subtitle || node.title)}`,
+    'human_rules:',
+    ...nodeHumanRuleText(node)
+      .split('\n')
+      .map((line) => `  - ${yamlQuote(line.replace(/^\d+\.\s*/u, ''))}`),
+    'agent_prompt: |',
+    ...prompt.split('\n').map((line) => `  ${line}`),
+    'feedback_markdown: |',
+    ...(feedback ? feedback.split('\n').map((line) => `  ${line}`) : ['  ']),
+  ].join('\n');
+}
+
+function normalizeNodeYaml(value: unknown, node: PipelineNode): string {
+  const yaml = typeof value === 'string' ? value.trim() : '';
+  return yaml || buildNodeYaml({ ...node, yaml: '', agentPrompt: node.agentPrompt || '' });
+}
+
+function normalizeNodeAgentPrompt(value: unknown, node: PipelineNode): string {
+  const prompt = typeof value === 'string' ? value.trim() : '';
+  return prompt || buildNodeAgentPrompt(node);
+}
+
+function withNodeStorageDefaults(node: PipelineNode): PipelineNode {
+  const agentPrompt = normalizeNodeAgentPrompt(node.agentPrompt, node);
+  const feedbackMarkdown = typeof node.feedbackMarkdown === 'string' ? node.feedbackMarkdown.trim() : '';
+  const normalizedNode = { ...node, agentPrompt, feedbackMarkdown };
+  return {
+    ...normalizedNode,
+    yaml: normalizeNodeYaml(node.yaml, normalizedNode),
+  };
+}
+
+function nodeMarkdownDocument(node: PipelineNode): string {
+  const normalized = withNodeStorageDefaults(node);
+  return [
+    `# ${normalized.title}`,
+    '',
+    `**Kind:** ${normalized.kind}`,
+    '',
+    `**Role:** ${normalized.role}`,
+    '',
+    `**Summary:** ${normalized.subtitle || normalized.title}`,
+    '',
+    '## Human Rules',
+    '',
+    nodeHumanRuleText(normalized),
+    '',
+    '## Agent Prompt',
+    '',
+    normalized.agentPrompt || buildNodeAgentPrompt(normalized),
+    '',
+    '## Agent Feedback',
+    '',
+    normalized.feedbackMarkdown?.trim() || 'No node feedback yet.',
+    '',
+    '## YAML',
+    '',
+    '```yaml',
+    normalized.yaml || buildNodeYaml(normalized),
+    '```',
+  ].join('\n');
+}
+
+const NODE_FEEDBACK_TOPICS: NodeFeedbackTopic[] = [
   {
     id: 'model',
     title: '\u6a21\u578b\u5efa\u8b70',
-    fileName: 'model-advice.md',
     instruction:
       '請以研究方法角度分析模型選擇：說明推薦架構、base model、checkpoint strategy 與可比較 baseline，指出模型容量、收斂風險、資料適配性，並提出可驗證的 ablation 與 validation checks。',
   },
   {
     id: 'hyperparameter',
     title: '\u8d85\u53c3\u6578\u5efa\u8b70',
-    fileName: 'hyperparameter-advice.md',
     instruction:
       '請針對超參數提出具學術可重現性的建議：涵蓋 batch size、learning rate、optimizer、scheduler、epoch、seed 與 early stopping，說明調整理由、搜尋範圍、風險與建議紀錄的實驗表格欄位。',
   },
   {
     id: 'preprocess',
     title: '\u8cc7\u6599\u524d\u8655\u7406\u5efa\u8b70',
-    fileName: 'preprocess-advice.md',
     instruction:
       '請分析資料前處理流程是否足以支撐可靠訓練：檢查 data cleaning、split policy、augmentation、normalization、label consistency 與 dataloader 設計，補充可能偏差、資料洩漏風險與必要的品質檢查。',
   },
   {
     id: 'evaluation',
     title: '\u6a21\u578b\u8a55\u4f30\u5efa\u8b70',
-    fileName: 'evaluation-advice.md',
     instruction:
       '請規劃模型評估方案：說明 validation/test setup、主要與輔助 metrics、baseline、ablation、error analysis 與 result artifacts，並指出如何避免過度依賴單一指標，讓結果能支撐論文式比較。',
   },
   {
     id: 'overall',
     title: '\u6574\u9ad4\u5efa\u8b70',
-    fileName: 'overall-advice.md',
     instruction:
       '請整合完整流程圖形成研究執行計畫：依序整理訓練流程、相依關係、資源需求、主要風險、檢查點與下一步行動，並用學術實驗觀點說明哪些結果可驗證假設、哪些需要補強。',
   },
 ];
 
-const MIX_ANALYSIS_MIN_CONCURRENCY = 2;
-const MIX_ANALYSIS_MAX_CONCURRENCY = 3;
 const MAX_RESEARCH_FLOWCHARTS = 50;
 
 const PIPELINE_NODES: PipelineNode[] = [
@@ -729,6 +815,19 @@ function parseCodexDiagramDraftPayload(parsed: unknown): CodexDiagramDraft {
       role,
       x: normalizeDiagramPercent(record.x, fallbackPoint.x, NODE_MIN_X, NODE_MAX_X),
       y: normalizeDiagramPercent(record.y, fallbackPoint.y, NODE_MIN_Y, NODE_MAX_Y),
+      yaml: typeof record.yaml === 'string' ? record.yaml : '',
+      agentPrompt:
+        typeof record.agentPrompt === 'string'
+          ? record.agentPrompt
+          : typeof record.prompt === 'string'
+            ? record.prompt
+            : '',
+      feedbackMarkdown:
+        typeof record.feedbackMarkdown === 'string'
+          ? record.feedbackMarkdown
+          : typeof record.feedback === 'string'
+            ? record.feedback
+            : '',
     });
   });
 
@@ -767,7 +866,7 @@ function parseCodexDiagramDraftPayload(parsed: unknown): CodexDiagramDraft {
     });
   }
 
-  return { nodes, edges };
+  return { nodes: nodes.map(withNodeStorageDefaults), edges };
 }
 
 function describeDiagramDraftError(error: unknown, agentLabel = 'Agent'): string {
@@ -851,176 +950,73 @@ function markdownEntryForFlowchart(
   return byFlowchart[flowchartId] || { markdown: '', userDraft: false, updatedAt: new Date().toISOString() };
 }
 
-function readResearchMixMarkdown(): MixAnalysisFile[] {
-  try {
-    const raw = window.localStorage.getItem(RESEARCH_MIX_MARKDOWN_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    return sortMixMarkdownFiles(
-      parsed
-      .map((item): MixAnalysisFile | null => {
-        if (!item || typeof item.id !== 'string' || typeof item.markdown !== 'string') return null;
-        const topic = MIX_ANALYSIS_TOPICS.find((candidate) => candidate.id === item.id);
-        return {
-          id: item.id,
-          title: typeof item.title === 'string' && item.title.trim() ? item.title : topic?.title || item.id,
-          fileName:
-            typeof item.fileName === 'string' && item.fileName.trim()
-              ? item.fileName
-              : topic?.fileName || `${item.id}.md`,
-          markdown: item.markdown,
-          updatedAt:
-            typeof item.updatedAt === 'string' && item.updatedAt.trim()
-              ? item.updatedAt
-              : new Date().toISOString(),
-        };
-      })
-      .filter((item): item is MixAnalysisFile => item !== null),
-    );
-  } catch {
-    return [];
-  }
+function hasNodeFeedback(node: PipelineNode): boolean {
+  return Boolean(node.feedbackMarkdown?.trim());
 }
 
-function normalizeMixMarkdownFiles(value: unknown): MixAnalysisFile[] {
-  if (!Array.isArray(value)) return [];
-  return sortMixMarkdownFiles(
-    value
-      .map((item): MixAnalysisFile | null => {
-        if (!item || typeof item !== 'object') return null;
-        const record = item as Record<string, unknown>;
-        if (typeof record.id !== 'string' || typeof record.markdown !== 'string') return null;
-        const topic = MIX_ANALYSIS_TOPICS.find((candidate) => candidate.id === record.id);
-        return {
-          id: record.id,
-          title:
-            typeof record.title === 'string' && record.title.trim()
-              ? record.title
-              : topic?.title || record.id,
-          fileName:
-            typeof record.fileName === 'string' && record.fileName.trim()
-              ? record.fileName
-              : topic?.fileName || `${record.id}.md`,
-          markdown: record.markdown,
-          updatedAt:
-            typeof record.updatedAt === 'string' && record.updatedAt.trim()
-              ? record.updatedAt
-              : new Date().toISOString(),
-        };
-      })
-      .filter((item): item is MixAnalysisFile => item !== null),
-  );
-}
-
-function readResearchMixMarkdownByFlowchart(activeFlowchartId: string): FlowchartMixMarkdownStore {
-  const byFlowchart: FlowchartMixMarkdownStore = {};
-  try {
-    const raw = window.localStorage.getItem(RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      for (const [flowchartId, value] of Object.entries(parsed)) {
-        if (!flowchartId.trim()) continue;
-        byFlowchart[flowchartId] = normalizeMixMarkdownFiles(value);
-      }
-    }
-  } catch {
-    // Fall through to legacy fallback below.
-  }
-
-  if (activeFlowchartId && !byFlowchart[activeFlowchartId]) {
-    const legacyMix = readResearchMixMarkdown();
-    if (legacyMix.length) byFlowchart[activeFlowchartId] = legacyMix;
-  }
-
-  return byFlowchart;
-}
-
-function sortMixMarkdownFiles(files: MixAnalysisFile[]): MixAnalysisFile[] {
-  const byId = new Map(files.map((file) => [file.id, file]));
-  return MIX_ANALYSIS_TOPICS.map((topic) => byId.get(topic.id)).filter(
-    (file): file is MixAnalysisFile => Boolean(file),
-  );
-}
-
-function hasUsableMixMarkdown(file: MixAnalysisFile | undefined): boolean {
-  return Boolean(file?.markdown.trim());
-}
-
-function upsertMixMarkdownFiles(current: MixAnalysisFile[], incoming: MixAnalysisFile[]): MixAnalysisFile[] {
-  const byId = new Map(current.map((file) => [file.id, file]));
-  for (const file of incoming) {
-    byId.set(file.id, file);
-  }
-  return sortMixMarkdownFiles([...byId.values()]);
-}
-
-function buildMixTrainingMarkdown(files: MixAnalysisFile[]): string {
-  const byId = new Map(files.map((file) => [file.id, file]));
-  return MIX_ANALYSIS_TOPICS.map((topic) => {
-    const file = byId.get(topic.id);
-    const markdown = file?.markdown.trim();
-    if (!markdown) return '';
-    return [
-      `# ${topic.title}`,
-      '',
-      `File: ${file?.fileName || topic.fileName}`,
-      '',
-      markdown,
-    ].join('\n');
-  })
-    .filter(Boolean)
+function buildNodeFeedbackTrainingMarkdown(nodes: PipelineNode[]): string {
+  return nodes
+    .map(withNodeStorageDefaults)
+    .filter(hasNodeFeedback)
+    .map((node) =>
+      [
+        `# ${node.title}`,
+        '',
+        `Kind: ${node.kind}`,
+        '',
+        `Role: ${node.role}`,
+        '',
+        node.feedbackMarkdown?.trim() || '',
+      ].join('\n'),
+    )
     .join('\n\n---\n\n');
 }
 
-function markdownFromAnalysisResult(result: LegacyResearchFlowchartMarkdownResponse): string {
-  if (typeof result.markdown === 'string') return result.markdown;
-  if (typeof result.summary === 'string') return result.summary;
-  if (typeof result.content === 'string') return result.content;
-  if (typeof result.result === 'string') return result.result;
-  return '';
-}
-
-function markdownFromBatchResultItem(result: LegacyResearchFlowchartBatchResult | undefined): string {
-  if (!result) return '';
-  if (typeof result.markdown === 'string') return result.markdown;
-  if (typeof result.summary === 'string') return result.summary;
-  if (typeof result.content === 'string') return result.content;
-  if (typeof result.result === 'string') return result.result;
-  return '';
-}
-
-function batchItemsFromAnalysisResult(
-  result: LegacyResearchFlowchartMarkdownResponse,
-): LegacyResearchFlowchartBatchResult[] {
-  if (Array.isArray(result.items)) return result.items;
-  if (Array.isArray(result.results)) return result.results;
-  return [];
-}
-
-function clampMixAnalysisConcurrency(value: number): number {
-  if (!Number.isFinite(value)) return MIX_ANALYSIS_MIN_CONCURRENCY;
-  return Math.max(
-    MIX_ANALYSIS_MIN_CONCURRENCY,
-    Math.min(MIX_ANALYSIS_MAX_CONCURRENCY, Math.floor(value)),
-  );
-}
-
-function mixConcurrencyFromAnalysisResult(
-  result?: LegacyResearchFlowchartMarkdownResponse,
-): number {
-  if (!result) return MIX_ANALYSIS_MIN_CONCURRENCY;
-  const candidates = [
-    result.concurrency,
-    result.idleGpuCount,
-    result.availableGpuCount,
-    result.freeGpuCount,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-      return clampMixAnalysisConcurrency(candidate);
-    }
+function nodeFeedbackTargetScore(topicId: string, node: PipelineNode): number {
+  const text = `${node.id} ${node.title} ${node.subtitle} ${node.kind} ${node.role}`.toLowerCase();
+  if (topicId === 'model') {
+    return (node.kind === 'model' ? 6 : 0) + (/model|checkpoint|backbone|weight/.test(text) ? 4 : 0);
   }
-  return MIX_ANALYSIS_MIN_CONCURRENCY;
+  if (topicId === 'hyperparameter') {
+    return (node.kind === 'command' ? 4 : 0) + (/train|fit|epoch|batch|learning|optimizer|scheduler/.test(text) ? 6 : 0);
+  }
+  if (topicId === 'preprocess') {
+    return (node.kind === 'source' || node.kind === 'operation' ? 4 : 0) + (/data|dataset|split|preprocess|augment|loader|normalize/.test(text) ? 6 : 0);
+  }
+  if (topicId === 'evaluation') {
+    return (node.kind === 'output' ? 4 : 0) + (/eval|metric|test|validation|result|artifact|auc|accuracy/.test(text) ? 6 : 0);
+  }
+  if (topicId === 'overall') return 1;
+  return 0;
+}
+
+function targetNodeIdForFeedback(topicId: string, nodes: PipelineNode[]): string {
+  const ranked = [...nodes].sort((a, b) => nodeFeedbackTargetScore(topicId, b) - nodeFeedbackTargetScore(topicId, a));
+  return ranked[0]?.id || nodes[0]?.id || '';
+}
+
+function mergeNodeFeedback(nodes: PipelineNode[], feedback: NodeFeedbackResult[]): PipelineNode[] {
+  if (feedback.length === 0) return nodes;
+  const grouped = new Map<string, NodeFeedbackResult[]>();
+  for (const item of feedback) {
+    const targetId = targetNodeIdForFeedback(item.id, nodes);
+    if (!targetId) continue;
+    grouped.set(targetId, [...(grouped.get(targetId) || []), item]);
+  }
+  return nodes.map((node) => {
+    const items = grouped.get(node.id);
+    if (!items?.length) return node;
+    const existing = (node.feedbackMarkdown || '').trim();
+    const incoming = items
+      .map((item) => [`## ${item.title}`, '', item.markdown.trim()].join('\n'))
+      .join('\n\n');
+    const feedbackMarkdown = [existing, incoming].filter(Boolean).join('\n\n---\n\n');
+    return withNodeStorageDefaults({
+      ...node,
+      feedbackMarkdown,
+      yaml: buildNodeYaml({ ...node, feedbackMarkdown, agentPrompt: node.agentPrompt || buildNodeAgentPrompt(node) }),
+    });
+  });
 }
 
 function formatDuration(ms: number): string {
@@ -1303,6 +1299,9 @@ function flowchartJsonForAgentPrompt(nodes: PipelineNode[], edges: PipelineEdge[
         y: node.y,
         inputs: edges.filter((edge) => edge.to === node.id).length,
         outputs: edges.filter((edge) => edge.from === node.id).length,
+        yaml: withNodeStorageDefaults(node).yaml,
+        agentPrompt: withNodeStorageDefaults(node).agentPrompt,
+        feedbackMarkdown: withNodeStorageDefaults(node).feedbackMarkdown,
       })),
       edges: edges.map((edge) => ({
         id: edge.id,
@@ -1341,31 +1340,31 @@ function buildAgentFlowchartMarkdownPrompt(
   ].join('\n');
 }
 
-function buildAgentAllMixFlowchartPrompt(
-  topics: MixAnalysisTopic[],
+function buildAgentNodeFeedbackPrompt(
+  topics: NodeFeedbackTopic[],
   nodes: PipelineNode[],
   edges: PipelineEdge[],
 ): string {
   return [
-    'You are generating MD.mix Markdown files from a CozyPad research flowchart.',
-    'Return only Markdown. Generate exactly the requested files below.',
-    'Wrap every file with the exact HTML markers shown here so CozyPad can import the result automatically.',
+    'You are generating node feedback Markdown from a CozyPad research flowchart.',
+    'Return only Markdown. Generate exactly the requested feedback blocks below.',
+    'Wrap every block with the exact HTML markers shown here so CozyPad can import the result into Diagram nodes.',
     '',
-    'Output format for each file:',
-    '<!-- COZYPAD_MIX_FILE id="topic-id" fileName="topic-file.md" -->',
+    'Output format for each block:',
+    '<!-- COZYPAD_NODE_FEEDBACK id="topic-id" -->',
     '# Topic title',
     '',
     'Markdown content here.',
-    '<!-- /COZYPAD_MIX_FILE -->',
+    '<!-- /COZYPAD_NODE_FEEDBACK -->',
     '',
-    'Requested files:',
+    'Requested feedback blocks:',
     ...topics.flatMap((topic, index) => [
-      `${index + 1}. id="${topic.id}" fileName="${topic.fileName}" title="${topic.title}"`,
+      `${index + 1}. id="${topic.id}" title="${topic.title}"`,
       topic.instruction,
       '',
     ]),
-    'Each file should be about 500 Chinese characters and include concrete research/training recommendations.',
-    'Do not combine files. Do not omit markers. Do not return raw JSON.',
+    'Each block should be about 500 Chinese characters and include concrete research/training recommendations.',
+    'Do not combine blocks. Do not omit markers. Do not return raw JSON.',
     '',
     'Flowchart JSON:',
     '```json',
@@ -1416,35 +1415,34 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function parseMixMarkdownFilesFromAgentOutput(
+function parseNodeFeedbackFromAgentOutput(
   output: string,
-  topics: MixAnalysisTopic[],
-): MixAnalysisFile[] {
+  topics: NodeFeedbackTopic[],
+): NodeFeedbackResult[] {
   const markdown = markdownFromAgentOutput(output);
   const byId = new Map(topics.map((topic) => [topic.id, topic]));
-  const files: MixAnalysisFile[] = [];
+  const feedback: NodeFeedbackResult[] = [];
   const markerPattern =
-    /<!--\s*COZYPAD_MIX_FILE\s+id=["']?([A-Za-z0-9_-]+)["']?(?:\s+fileName=["']?([^"'\s>]+)["']?)?.*?-->\s*([\s\S]*?)<!--\s*\/COZYPAD_MIX_FILE\s*-->/gi;
+    /<!--\s*COZYPAD_NODE_FEEDBACK\s+id=["']?([A-Za-z0-9_-]+)["']?.*?-->\s*([\s\S]*?)<!--\s*\/COZYPAD_NODE_FEEDBACK\s*-->/gi;
   let markerMatch: RegExpExecArray | null;
   while ((markerMatch = markerPattern.exec(markdown)) !== null) {
     const topicId = markerMatch[1] || '';
     const topic = byId.get(topicId);
-    const fileMarkdown = String(markerMatch[3] || '').trim();
-    if (!topic || !fileMarkdown) continue;
-    files.push({
+    const feedbackMarkdown = String(markerMatch[2] || '').trim();
+    if (!topic || !feedbackMarkdown) continue;
+    feedback.push({
       id: topic.id,
       title: topic.title,
-      fileName: topic.fileName,
-      markdown: fileMarkdown,
+      markdown: feedbackMarkdown,
       updatedAt: new Date().toISOString(),
     });
   }
-  if (files.length > 0) return sortMixMarkdownFiles(files);
+  if (feedback.length > 0) return sortNodeFeedback(feedback);
 
-  const headings: Array<{ topic: MixAnalysisTopic; index: number }> = [];
+  const headings: Array<{ topic: NodeFeedbackTopic; index: number }> = [];
   for (const topic of topics) {
     const pattern = new RegExp(
-      `^#{1,6}\\s*(?:\\d+[.)]\\s*)?(?:${escapeRegExp(topic.fileName)}|${escapeRegExp(topic.title)})(?:\\s|$|[:：-])`,
+      `^#{1,6}\\s*(?:\\d+[.)]\\s*)?${escapeRegExp(topic.title)}(?:\\s|$|[:：-])`,
       'gmi',
     );
     const match = pattern.exec(markdown);
@@ -1457,27 +1455,32 @@ function parseMixMarkdownFilesFromAgentOutput(
     return [{
       id: topic.id,
       title: topic.title,
-      fileName: topic.fileName,
       markdown: markdown.trim(),
       updatedAt: new Date().toISOString(),
     }];
   }
 
-  return sortMixMarkdownFiles(
+  return sortNodeFeedback(
     headings
       .map((heading, index) => {
         const next = headings[index + 1];
-        const fileMarkdown = markdown.slice(heading.index, next?.index ?? markdown.length).trim();
-        if (!fileMarkdown) return null;
+        const feedbackMarkdown = markdown.slice(heading.index, next?.index ?? markdown.length).trim();
+        if (!feedbackMarkdown) return null;
         return {
           id: heading.topic.id,
           title: heading.topic.title,
-          fileName: heading.topic.fileName,
-          markdown: fileMarkdown,
+          markdown: feedbackMarkdown,
           updatedAt: new Date().toISOString(),
         };
       })
-      .filter((file): file is MixAnalysisFile => file !== null),
+      .filter((item): item is NodeFeedbackResult => item !== null),
+  );
+}
+
+function sortNodeFeedback(items: NodeFeedbackResult[]): NodeFeedbackResult[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  return NODE_FEEDBACK_TOPICS.map((topic) => byId.get(topic.id)).filter(
+    (item): item is NodeFeedbackResult => Boolean(item),
   );
 }
 
@@ -1896,7 +1899,7 @@ function readPipelineNodes(): PipelineNode[] {
           }
           const baseNode = PIPELINE_NODES.find((node) => node.id === item.id);
           used.add(item.id);
-          return {
+          return withNodeStorageDefaults({
             id: item.id,
             kind: item.kind,
             title: normalizeNodeLabel(item.title, baseNode?.title || item.id),
@@ -1904,7 +1907,15 @@ function readPipelineNodes(): PipelineNode[] {
             role: item.role,
             x: clamp(Number(item.x), NODE_MIN_X, NODE_MAX_X),
             y: clamp(Number(item.y), NODE_MIN_Y, NODE_MAX_Y),
-          };
+            yaml: typeof item.yaml === 'string' ? item.yaml : '',
+            agentPrompt:
+              typeof item.agentPrompt === 'string'
+                ? item.agentPrompt
+                : typeof item.prompt === 'string'
+                  ? item.prompt
+                  : '',
+            feedbackMarkdown: typeof item.feedbackMarkdown === 'string' ? item.feedbackMarkdown : '',
+          });
         })
         .filter((node): node is PipelineNode => node !== null);
       return nodes.length > 0 ? spreadCrowdedBoundaryNodes(nodes) : PIPELINE_NODES;
@@ -1918,7 +1929,7 @@ function readPipelineNodes(): PipelineNode[] {
     const defaultNodes = PIPELINE_NODES.map((node) => {
       const saved = savedById.get(node.id);
       if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return node;
-      return {
+      return withNodeStorageDefaults({
         ...node,
         kind: isPipelineNodeKind(saved.kind) ? saved.kind : node.kind,
         title: normalizeNodeLabel(saved.title, node.title),
@@ -1926,7 +1937,15 @@ function readPipelineNodes(): PipelineNode[] {
         role: isPipelineNodeRole(saved.role) ? saved.role : node.role,
         x: clamp(Number(saved.x), NODE_MIN_X, NODE_MAX_X),
         y: clamp(Number(saved.y), NODE_MIN_Y, NODE_MAX_Y),
-      };
+        yaml: typeof saved.yaml === 'string' ? saved.yaml : '',
+        agentPrompt:
+          typeof saved.agentPrompt === 'string'
+            ? saved.agentPrompt
+            : typeof saved.prompt === 'string'
+              ? saved.prompt
+              : '',
+        feedbackMarkdown: typeof saved.feedbackMarkdown === 'string' ? saved.feedbackMarkdown : '',
+      });
     });
     const customNodes = parsed
       .map((item): PipelineNode | null => {
@@ -1936,7 +1955,7 @@ function readPipelineNodes(): PipelineNode[] {
         const kind = isPipelineNodeKind(item.kind) ? item.kind : null;
         const role = isPipelineNodeRole(item.role) ? item.role : null;
         if (!kind || !role || !Number.isFinite(item.x) || !Number.isFinite(item.y)) return null;
-        return {
+        return withNodeStorageDefaults({
           id: item.id,
           kind,
           title: normalizeNodeLabel(item.title, item.id),
@@ -1944,7 +1963,15 @@ function readPipelineNodes(): PipelineNode[] {
           role,
           x: clamp(Number(item.x), NODE_MIN_X, NODE_MAX_X),
           y: clamp(Number(item.y), NODE_MIN_Y, NODE_MAX_Y),
-        };
+          yaml: typeof item.yaml === 'string' ? item.yaml : '',
+          agentPrompt:
+            typeof item.agentPrompt === 'string'
+              ? item.agentPrompt
+              : typeof item.prompt === 'string'
+                ? item.prompt
+                : '',
+          feedbackMarkdown: typeof item.feedbackMarkdown === 'string' ? item.feedbackMarkdown : '',
+        });
       })
       .filter((node): node is PipelineNode => node !== null);
 
@@ -1999,15 +2026,21 @@ function createResearchFlowchartId(): string {
 }
 
 function serializePipelineNodes(nodes: PipelineNode[]): PipelineNode[] {
-  return nodes.map(({ id, kind, title, subtitle, role, x, y }) => ({
-    id,
-    kind,
-    title,
-    subtitle,
-    role,
-    x,
-    y,
-  }));
+  return nodes.map((node) => {
+    const normalized = withNodeStorageDefaults(node);
+    return {
+      id: normalized.id,
+      kind: normalized.kind,
+      title: normalized.title,
+      subtitle: normalized.subtitle,
+      role: normalized.role,
+      x: normalized.x,
+      y: normalized.y,
+      yaml: normalized.yaml,
+      agentPrompt: normalized.agentPrompt,
+      feedbackMarkdown: normalized.feedbackMarkdown,
+    };
+  });
 }
 
 function serializePipelineEdges(edges: PipelineEdge[]): PipelineEdge[] {
@@ -2032,7 +2065,7 @@ function normalizeStoredPipelineNodes(value: unknown): PipelineNode[] {
         return null;
       }
       used.add(rawId);
-      return {
+      return withNodeStorageDefaults({
         id: rawId,
         kind: record.kind,
         title: normalizeNodeLabel(record.title, rawId),
@@ -2040,7 +2073,20 @@ function normalizeStoredPipelineNodes(value: unknown): PipelineNode[] {
         role: record.role,
         x: clamp(Number(record.x), NODE_MIN_X, NODE_MAX_X),
         y: clamp(Number(record.y), NODE_MIN_Y, NODE_MAX_Y),
-      };
+        yaml: typeof record.yaml === 'string' ? record.yaml : '',
+        agentPrompt:
+          typeof record.agentPrompt === 'string'
+            ? record.agentPrompt
+            : typeof record.prompt === 'string'
+              ? record.prompt
+              : '',
+        feedbackMarkdown:
+          typeof record.feedbackMarkdown === 'string'
+            ? record.feedbackMarkdown
+            : typeof record.feedback === 'string'
+              ? record.feedback
+              : '',
+      });
     })
     .filter((node): node is PipelineNode => node !== null);
 }
@@ -2143,17 +2189,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const [markdownByFlowchart, setMarkdownByFlowchart] = useState<FlowchartMarkdownStore>(() =>
     readResearchMarkdownByFlowchart(initialFlowchartId),
   );
-  const [mixMarkdownByFlowchart, setMixMarkdownByFlowchart] = useState<FlowchartMixMarkdownStore>(() =>
-    readResearchMixMarkdownByFlowchart(initialFlowchartId),
-  );
   const [remoteMarkdown, setRemoteMarkdown] = useState(() =>
     markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).markdown,
   );
   const [remoteMarkdownUserDraft, setRemoteMarkdownUserDraft] = useState(
     () => markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).userDraft,
-  );
-  const [mixMarkdownFiles, setMixMarkdownFiles] = useState<MixAnalysisFile[]>(() =>
-    readResearchMixMarkdownByFlowchart(initialFlowchartId)[initialFlowchartId] || [],
   );
   const [markdownAnalysis, setMarkdownAnalysis] = useState<MarkdownAnalysisState>({
     status: 'idle',
@@ -2173,13 +2213,12 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const [trainingPromptDialog, setTrainingPromptDialog] = useState<TrainingPromptDialogState | null>(null);
   const [trainingDialogSource, setTrainingDialogSource] = useState<TrainingPromptSource | null>(null);
   const [markdownTrainingDraft, setMarkdownTrainingDraft] = useState<TrainingPromptDialogState | null>(null);
-  const [mixTrainingDraft, setMixTrainingDraft] = useState<TrainingPromptDialogState | null>(null);
+  const [nodeFeedbackTrainingDraft, setNodeFeedbackTrainingDraft] = useState<TrainingPromptDialogState | null>(null);
   const [trainingTargetAgent, setTrainingTargetAgent] = useState<QueuedTrainingAgent>('codex');
   const [trainingSubmitting, setTrainingSubmitting] = useState(false);
-  const [selectedMixFileId, setSelectedMixFileId] = useState('');
   const [markdownSourceOpen, setMarkdownSourceOpen] = useState(false);
-  const [mixSourceOpen, setMixSourceOpen] = useState(false);
   const [nodeMenu, setNodeMenu] = useState<NodeMenuState | null>(null);
+  const [nodeDocModalId, setNodeDocModalId] = useState('');
   const [graphSize, setGraphSize] = useState<GraphSize>(GRAPH_FALLBACK_SIZE);
   const [codexDiagramOpen, setCodexDiagramOpen] = useState(false);
   const [codexDiagramPrompt, setCodexDiagramPrompt] = useState('');
@@ -2190,7 +2229,8 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     message: '',
   });
   const graphRef = useRef<HTMLDivElement | null>(null);
-  const mixAnalysisInFlightRef = useRef(false);
+  const nodePointerDownRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const nodeFeedbackAnalysisInFlightRef = useRef(false);
   const trainingSubmitInFlightRef = useRef(false);
   const agentDrawAbortRef = useRef<AbortController | null>(null);
   const activeFlowchart =
@@ -2315,27 +2355,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   }, [flowchartLibrary.activeFlowchartId, remoteMarkdown, remoteMarkdownUserDraft]);
 
   useEffect(() => {
-    const activeFlowchartId = flowchartLibrary.activeFlowchartId;
-    if (!activeFlowchartId) return;
-    setMixMarkdownByFlowchart((current) => {
-      const currentFiles = current[activeFlowchartId] || [];
-      if (JSON.stringify(currentFiles) === JSON.stringify(mixMarkdownFiles)) return current;
-      return {
-        ...current,
-        [activeFlowchartId]: mixMarkdownFiles,
-      };
-    });
-    try {
-      window.localStorage.setItem(
-        RESEARCH_MIX_MARKDOWN_STORAGE_KEY,
-        JSON.stringify(mixMarkdownFiles),
-      );
-    } catch {
-      // Ignore quota or private-mode storage failures.
-    }
-  }, [flowchartLibrary.activeFlowchartId, mixMarkdownFiles]);
-
-  useEffect(() => {
     try {
       window.localStorage.setItem(
         RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
@@ -2346,32 +2365,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     }
   }, [markdownByFlowchart]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        RESEARCH_MIX_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
-        JSON.stringify(mixMarkdownByFlowchart),
-      );
-    } catch {
-      // Ignore quota or private-mode storage failures.
-    }
-  }, [mixMarkdownByFlowchart]);
-
-  useEffect(() => {
-    if (!mixMarkdownFiles.length) {
-      if (selectedMixFileId) setSelectedMixFileId('');
-      return;
-    }
-    if (!mixMarkdownFiles.some((file) => file.id === selectedMixFileId)) {
-      const firstFile = mixMarkdownFiles[0];
-      if (firstFile) setSelectedMixFileId(firstFile.id);
-    }
-  }, [mixMarkdownFiles, selectedMixFileId]);
-
   const selectedNode = nodeById(nodes, selectedNodeId) ?? nodes[0] ?? null;
+  const nodeDocModalNode = nodeDocModalId ? nodeById(nodes, nodeDocModalId) ?? null : null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
-  const selectedMixFile =
-    mixMarkdownFiles.find((file) => file.id === selectedMixFileId) ?? mixMarkdownFiles[0] ?? null;
+  const selectedNodeDocument = useMemo(
+    () => (nodeDocModalNode ? nodeMarkdownDocument(nodeDocModalNode) : ''),
+    [nodeDocModalNode],
+  );
   const localMarkdownDraft = useMemo(
     () => flowchartToLocalMarkdown(nodes, edges, '', ''),
     [edges, nodes],
@@ -2381,26 +2381,24 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     [localMarkdownDraft, remoteMarkdown, remoteMarkdownUserDraft],
   );
   const hasRemoteMarkdown = remoteMarkdown.trim().length > 0;
-  const hasMixMarkdownFiles = mixMarkdownFiles.length > 0;
-  const mixTrainingMarkdown = useMemo(() => buildMixTrainingMarkdown(mixMarkdownFiles), [mixMarkdownFiles]);
+  const nodeFeedbackTrainingMarkdown = useMemo(() => buildNodeFeedbackTrainingMarkdown(nodes), [nodes]);
   const analysisElapsedMs =
     markdownAnalysis.elapsedMs ??
     (markdownAnalysis.status === 'running' && markdownAnalysis.startedAt
       ? analysisNow - markdownAnalysis.startedAt
       : 0);
-  const isMixAnalysisMessage =
-    markdownAnalysis.message.startsWith('mix analysis diagram') ||
-    markdownAnalysis.message.startsWith('MD.mix');
-  const visibleMarkdownAnalysisMessage = shouldSilenceFlowchartFallbackError(markdownAnalysis.message) || isMixAnalysisMessage
+  const isNodeFeedbackAnalysisMessage =
+    markdownAnalysis.message.startsWith('node feedback analysis');
+  const visibleMarkdownAnalysisMessage = shouldSilenceFlowchartFallbackError(markdownAnalysis.message) || isNodeFeedbackAnalysisMessage
     ? ''
     : markdownAnalysis.message;
-  const visibleMixAnalysisMessage =
-    isMixAnalysisMessage && !shouldSilenceFlowchartFallbackError(markdownAnalysis.message)
+  const visibleNodeFeedbackAnalysisMessage =
+    isNodeFeedbackAnalysisMessage && !shouldSilenceFlowchartFallbackError(markdownAnalysis.message)
       ? markdownAnalysis.message
       : '';
-  const mixAnalysisCount = mixMarkdownFiles.filter(hasUsableMixMarkdown).length;
-  const mixAnalysisTotal = MIX_ANALYSIS_TOPICS.length;
-  const hasCompleteMixMarkdown = mixAnalysisCount === mixAnalysisTotal;
+  const nodeFeedbackCount = nodes.filter(hasNodeFeedback).length;
+  const nodeFeedbackTotal = Math.max(nodes.length, 1);
+  const hasNodeFeedbackMarkdown = nodeFeedbackTrainingMarkdown.trim().length > 0;
   const hasAnalysisAgent = analysisAgent.length > 0;
   const analysisAgentLabel = analysisAgent ? RESEARCH_ANALYSIS_AGENT_LABELS[analysisAgent] : 'agent';
   const graphCanvasSize = useMemo(() => graphCanvasPixels(nodes.length), [nodes.length]);
@@ -2439,7 +2437,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const servers = await listLegacyServers();
     const server = findRememberedLegacyServer(servers) ?? servers[0] ?? null;
     if (!server) {
-      throw new Error('Select an SSH server in Agents, Terminal, or File before using Claude, Codex, or agy analysis.');
+      throw new Error('Select an SSH server in Agents, Terminal, or File before using Codex, agy, or baillian analysis.');
     }
     return server;
   }, [connected]);
@@ -2449,13 +2447,12 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       const server = await resolveAnalysisServer();
       const remotePath = server.defaultPath || '~';
       const model = readResearchAgentModel(analysisAgent);
-      if (analysisAgent === 'claude' || analysisAgent === 'agy' || analysisAgent === 'bailian') {
+      if (analysisAgent === 'agy' || analysisAgent === 'bailian') {
         const result = await runResearchAgentStreamPrompt({
           agent: analysisAgent,
           serverId: server.id,
           prompt,
           remotePath,
-          allowedDirs: analysisAgent === 'claude' ? [remotePath] : undefined,
           model,
           signal,
         });
@@ -2727,7 +2724,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     if (customTitle === null) return;
     const title = customTitle.trim() || template.title;
     const id = createNodeId(title, nodes);
-    const node: PipelineNode = {
+    const node: PipelineNode = withNodeStorageDefaults({
       id,
       kind: template.kind,
       title,
@@ -2735,7 +2732,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       role: template.role,
       x: clamp(nodeMenu.x, NODE_MIN_X, NODE_MAX_X),
       y: clamp(nodeMenu.y, NODE_MIN_Y, NODE_MAX_Y),
-    };
+    });
     setNodes((current) => [...current, node]);
     setSelectedNodeId(id);
     setSelectedNodeIds([id]);
@@ -2769,6 +2766,30 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     deleteNodeIds([nodeId]);
   };
 
+  const updateSelectedNodeYaml = (yaml: string) => {
+    const targetNode = nodeDocModalNode || selectedNode;
+    if (!targetNode) return;
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === targetNode.id
+          ? withNodeStorageDefaults({ ...node, yaml, agentPrompt: node.agentPrompt || buildNodeAgentPrompt(node) })
+          : node,
+      ),
+    );
+  };
+
+  const updateSelectedNodeAgentPrompt = (agentPrompt: string) => {
+    const targetNode = nodeDocModalNode || selectedNode;
+    if (!targetNode) return;
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === targetNode.id
+          ? withNodeStorageDefaults({ ...node, agentPrompt, yaml: buildNodeYaml({ ...node, agentPrompt }) })
+          : node,
+      ),
+    );
+  };
+
   const clearFlowchartInteractionState = () => {
     setSelectedNodeId('');
     setSelectedNodeIds([]);
@@ -2791,25 +2812,17 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         updatedAt: new Date().toISOString(),
       },
     }));
-    setMixMarkdownByFlowchart((current) => ({
-      ...current,
-      [activeFlowchartId]: mixMarkdownFiles,
-    }));
   };
 
   const loadFlowchartMarkdownState = (flowchartId: string) => {
     const markdownEntry = markdownEntryForFlowchart(markdownByFlowchart, flowchartId);
-    const mixFiles = mixMarkdownByFlowchart[flowchartId] || [];
     setRemoteMarkdown(markdownEntry.markdown);
     setRemoteMarkdownUserDraft(markdownEntry.userDraft);
-    setMixMarkdownFiles(mixFiles);
-    setSelectedMixFileId(mixFiles[0]?.id || '');
     setMarkdownSourceOpen(false);
-    setMixSourceOpen(false);
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setMarkdownTrainingDraft(null);
-    setMixTrainingDraft(null);
+    setNodeFeedbackTrainingDraft(null);
     setMarkdownAnalysis({ status: 'idle', message: '' });
   };
 
@@ -2858,22 +2871,15 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       setEdges([]);
       setRemoteMarkdown('');
       setRemoteMarkdownUserDraft(false);
-      setMixMarkdownFiles([]);
-      setSelectedMixFileId('');
       setMarkdownSourceOpen(false);
-      setMixSourceOpen(false);
       setTrainingPromptDialog(null);
       setTrainingDialogSource(null);
       setMarkdownTrainingDraft(null);
-      setMixTrainingDraft(null);
+      setNodeFeedbackTrainingDraft(null);
       setMarkdownAnalysis({ status: 'idle', message: '' });
       setMarkdownByFlowchart((current) => ({
         ...current,
         [activeFlowchart.id]: { markdown: '', userDraft: false, updatedAt: new Date().toISOString() },
-      }));
-      setMixMarkdownByFlowchart((current) => ({
-        ...current,
-        [activeFlowchart.id]: [],
       }));
       clearFlowchartInteractionState();
       setFlowchartLibrary((current) => ({
@@ -2892,11 +2898,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const nextActive = nextFlowcharts[Math.min(activeFlowchartIndex, nextFlowcharts.length - 1)] || nextFlowcharts[0];
     if (!nextActive) return;
     setMarkdownByFlowchart((current) => {
-      const next = { ...current };
-      delete next[activeFlowchart.id];
-      return next;
-    });
-    setMixMarkdownByFlowchart((current) => {
       const next = { ...current };
       delete next[activeFlowchart.id];
       return next;
@@ -2944,14 +2945,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setNodeMenu(null);
     setRemoteMarkdown('');
     setRemoteMarkdownUserDraft(false);
-    setMixMarkdownFiles([]);
-    setSelectedMixFileId('');
     setMarkdownSourceOpen(false);
-    setMixSourceOpen(false);
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setMarkdownTrainingDraft(null);
-    setMixTrainingDraft(null);
+    setNodeFeedbackTrainingDraft(null);
     setMarkdownAnalysis({ status: 'idle', message: '' });
     setCodexDiagramStatus({
       status: 'done',
@@ -3071,10 +3069,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       ...current,
       [nextFlowchart.id]: { markdown: '', userDraft: false, updatedAt: new Date().toISOString() },
     }));
-    setMixMarkdownByFlowchart((current) => ({
-      ...current,
-      [nextFlowchart.id]: [],
-    }));
     setFlowchartLibrary((current) => ({
       activeFlowchartId: nextFlowchart.id,
       flowcharts: [
@@ -3090,14 +3084,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setEdges([]);
     setRemoteMarkdown('');
     setRemoteMarkdownUserDraft(false);
-    setMixMarkdownFiles([]);
-    setSelectedMixFileId('');
     setMarkdownSourceOpen(false);
-    setMixSourceOpen(false);
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setMarkdownTrainingDraft(null);
-    setMixTrainingDraft(null);
+    setNodeFeedbackTrainingDraft(null);
     setMarkdownAnalysis({ status: 'idle', message: '' });
     clearFlowchartInteractionState();
     setActiveView('flow');
@@ -3163,246 +3154,77 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     }
   };
 
-  const analyzeMixFlowchartWithBailianInner = async () => {
+  const analyzeNodeFeedbackInner = async () => {
     if (!hasAnalysisAgent) {
       setMarkdownAnalysis({
         status: 'error',
-        message: 'MD.mix needs an analysis agent first.',
+        message: 'Node feedback needs an analysis agent first.',
       });
-      setActiveView('markdownMix');
+      setActiveView('flow');
       return;
     }
     if (nodes.length === 0) {
       setMarkdownAnalysis({
         status: 'error',
-        message: 'mix analysis diagram failed: add at least one node before running analysis.',
+        message: 'node feedback analysis failed: add at least one node before running analysis.',
       });
-      setActiveView('markdownMix');
+      setActiveView('flow');
       return;
     }
 
     const startedAt = Date.now();
-    let nextFiles = sortMixMarkdownFiles(mixMarkdownFiles.filter(hasUsableMixMarkdown));
-    const existingById = new Map(nextFiles.map((file) => [file.id, file]));
-    const missingTopics = MIX_ANALYSIS_TOPICS.filter((topic) => !hasUsableMixMarkdown(existingById.get(topic.id)));
-
-    if (missingTopics.length === 0) {
-      setMixMarkdownFiles(nextFiles);
-      setMarkdownAnalysis({
-        status: 'done',
-        message: `mix analysis diagram completed: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length}`,
-        startedAt,
-        elapsedMs: 0,
-      });
-      setActiveView('markdownMix');
-      return;
-    }
-
-    if (
-      analysisAgent === 'claude' ||
-      analysisAgent === 'codex' ||
-      analysisAgent === 'agy' ||
-      analysisAgent === 'bailian'
-    ) {
-      setMixMarkdownFiles(nextFiles);
-      setTrainingPromptDialog(null);
-      setTrainingDialogSource(null);
-      setMixTrainingDraft(null);
-      setMarkdownAnalysis({
-        status: 'running',
-        message: `mix analysis diagram running: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length}`,
-        startedAt,
-      });
-      setActiveView('markdownMix');
-
-      try {
-        setMarkdownAnalysis({
-          status: 'running',
-          message: `mix analysis diagram running: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length} - ${analysisAgentLabel} single SSH pass`,
-          startedAt,
-        });
-        const output = await runSelectedTextAnalysisAgent(
-          buildAgentAllMixFlowchartPrompt(missingTopics, nodes, edges),
-        );
-        const generatedFiles = parseMixMarkdownFilesFromAgentOutput(output, missingTopics).filter(
-          hasUsableMixMarkdown,
-        );
-        const generatedIds = new Set(generatedFiles.map((file) => file.id));
-        const missingGenerated = missingTopics.filter((topic) => !generatedIds.has(topic.id));
-        if (missingGenerated.length > 0) {
-          throw new Error(
-            `${analysisAgentLabel} returned ${generatedFiles.length} / ${missingTopics.length} MD.mix files. ` +
-              `Missing: ${missingGenerated.map((topic) => topic.fileName).join(', ')}. ` +
-              'No extra SSH retries were attempted to avoid IP lockout.',
-          );
-        }
-        nextFiles = upsertMixMarkdownFiles(nextFiles, generatedFiles);
-        setMixMarkdownFiles(nextFiles);
-        setMarkdownAnalysis({
-          status: 'done',
-          message: `mix analysis diagram completed: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length}`,
-          startedAt,
-          elapsedMs: Date.now() - startedAt,
-        });
-        setActiveView('markdownMix');
-      } catch (error) {
-        const message = describeFlowchartError(error);
-        setMarkdownAnalysis({
-          status: 'error',
-          message: `mix analysis diagram failed: ${message}`,
-          startedAt,
-          elapsedMs: Date.now() - startedAt,
-        });
-        setActiveView('markdownMix');
-      }
-      return;
-    }
-
-    setMixMarkdownFiles(nextFiles);
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
-    setMixTrainingDraft(null);
+    setNodeFeedbackTrainingDraft(null);
     setMarkdownAnalysis({
       status: 'running',
-      message: `mix analysis diagram running: ${nextFiles.length} / 5`,
+      message: `node feedback analysis running: ${nodeFeedbackCount} / ${nodeFeedbackTotal}`,
       startedAt,
     });
-    setActiveView('markdownMix');
+    setActiveView('flow');
 
     try {
-      let cursor = 0;
-      let concurrency = MIX_ANALYSIS_MIN_CONCURRENCY;
-      const flowchartNodes = nodes.map((node) => ({
-        id: node.id,
-        kind: node.kind,
-        title: node.title,
-        subtitle: node.subtitle,
-        role: node.role,
-        x: node.x,
-        y: node.y,
-        inputs: edges.filter((edge) => edge.to === node.id).length,
-        outputs: edges.filter((edge) => edge.from === node.id).length,
-      }));
-      const flowchartEdges = edges.map((edge) => ({
-        id: edge.id,
-        from: edge.from,
-        to: edge.to,
-        fromTitle: nodeById(nodes, edge.from)?.title || edge.from,
-        toTitle: nodeById(nodes, edge.to)?.title || edge.to,
-      }));
-
-      while (cursor < missingTopics.length) {
-        const remaining = missingTopics.length - cursor;
-        const batchSize = remaining === 3 ? 3 : Math.min(concurrency, remaining);
-        const requestedTopics = missingTopics.slice(cursor, cursor + batchSize);
-        const requestedIds = new Set(requestedTopics.map((topic) => topic.id));
-        let batch = requestedTopics;
-        if (batch.length < MIX_ANALYSIS_MIN_CONCURRENCY) {
-          const companion = MIX_ANALYSIS_TOPICS.find((topic) => !requestedIds.has(topic.id));
-          if (companion) batch = [...batch, companion];
-        }
-        if (batch.length < MIX_ANALYSIS_MIN_CONCURRENCY) {
-          throw new Error('mix analysis diagram requires at least 2 files per batch.');
-        }
-        setMarkdownAnalysis({
-          status: 'running',
-          message: `mix analysis diagram running: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length} - ${batch
-            .map((topic) => topic.title)
-            .join(', ')} (${batch.length} batch files)`,
-          startedAt,
-        });
-        const result = await analyzeLegacyResearchFlowchartBatch({
-          model: readResearchAgentModel(analysisAgent),
-          items: batch.map((topic) => ({
-            id: topic.id,
-            title: topic.title,
-            fileName: topic.fileName,
-            nodes: flowchartNodes,
-            edges: flowchartEdges,
-            note: '',
-            instruction: [
-              topic.instruction,
-              'Return only Markdown.',
-              `The output should be one Markdown file named ${topic.fileName}.`,
-              'Each file should be about 500 Chinese characters and include: 模型建議, 超參數建議, 資料前處理建議, 模型評估建議, 整體建議.',
-              'Do not return raw JSON unless it is inside a fenced code block.',
-            ].join('\n'),
-          })),
-        });
-        const resultItems = batchItemsFromAnalysisResult(result);
-        const batchFiles = batch.map((topic, index) => {
-          const item =
-            resultItems.find((candidate) => candidate.id === topic.id || candidate.fileName === topic.fileName) ||
-            resultItems[index];
-          const markdown = markdownFromBatchResultItem(item).trim();
-          if (!markdown) {
-            if (!requestedIds.has(topic.id)) {
-              return (
-                nextFiles.find((file) => file.id === topic.id) || {
-                  id: topic.id,
-                  title: topic.title,
-                  fileName: topic.fileName,
-                  markdown: '',
-                  updatedAt: new Date().toISOString(),
-                }
-              );
-            }
-            throw new Error(`${topic.title} did not return Markdown content.`);
-          }
-          return {
-            id: topic.id,
-            title: topic.title,
-            fileName: topic.fileName,
-            markdown,
-            updatedAt: new Date().toISOString(),
-          };
-        });
-        nextFiles = upsertMixMarkdownFiles(
-          nextFiles,
-          batchFiles.filter((file) => requestedIds.has(file.id)),
-        );
-        setMixMarkdownFiles(nextFiles);
-        concurrency = mixConcurrencyFromAnalysisResult(result);
-        cursor += requestedTopics.length;
+      setMarkdownAnalysis({
+        status: 'running',
+        message: `node feedback analysis running: ${analysisAgentLabel} is updating nodes`,
+        startedAt,
+      });
+      const output = await runSelectedTextAnalysisAgent(
+        buildAgentNodeFeedbackPrompt(NODE_FEEDBACK_TOPICS, nodes, edges),
+      );
+      const feedback = parseNodeFeedbackFromAgentOutput(output, NODE_FEEDBACK_TOPICS);
+      if (feedback.length === 0) {
+        throw new Error(`${analysisAgentLabel} did not return node feedback Markdown.`);
       }
+      const nextNodes = mergeNodeFeedback(nodes, feedback);
+      setNodes(nextNodes);
       setMarkdownAnalysis({
         status: 'done',
-        message: `mix analysis diagram completed: ${nextFiles.length} / ${MIX_ANALYSIS_TOPICS.length}`,
+        message: `node feedback analysis completed: ${nextNodes.filter(hasNodeFeedback).length} / ${Math.max(nextNodes.length, 1)}`,
         startedAt,
         elapsedMs: Date.now() - startedAt,
       });
-      setActiveView('markdownMix');
+      setActiveView('flow');
     } catch (error) {
       const message = describeFlowchartError(error);
       setMarkdownAnalysis({
         status: 'error',
-        message: `mix analysis diagram failed: ${message}`,
+        message: `node feedback analysis failed: ${message}`,
         startedAt,
         elapsedMs: Date.now() - startedAt,
       });
-      setActiveView('markdownMix');
+      setActiveView('flow');
     }
   };
 
-  const analyzeMixFlowchartWithBailian = async () => {
-    if (mixAnalysisInFlightRef.current) return;
-    mixAnalysisInFlightRef.current = true;
+  const analyzeNodeFeedback = async () => {
+    if (nodeFeedbackAnalysisInFlightRef.current) return;
+    nodeFeedbackAnalysisInFlightRef.current = true;
     try {
-      await analyzeMixFlowchartWithBailianInner();
+      await analyzeNodeFeedbackInner();
     } finally {
-      mixAnalysisInFlightRef.current = false;
+      nodeFeedbackAnalysisInFlightRef.current = false;
     }
-  };
-
-  const updateSelectedMixMarkdown = (markdown: string) => {
-    if (!selectedMixFile) return;
-    setMixMarkdownFiles((current) =>
-      current.map((file) =>
-        file.id === selectedMixFile.id
-          ? { ...file, markdown, updatedAt: new Date().toISOString() }
-          : file,
-      ),
-    );
   };
 
   const updateTrainingDialogField = (field: keyof TrainingPromptDialogState, value: string) => {
@@ -3410,7 +3232,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const next = { ...trainingPromptDialog, [field]: value };
     setTrainingPromptDialog(next);
     if (trainingDialogSource === 'markdown') setMarkdownTrainingDraft(next);
-    if (trainingDialogSource === 'markdownMix') setMixTrainingDraft(next);
+    if (trainingDialogSource === 'nodeFeedback') setNodeFeedbackTrainingDraft(next);
   };
 
   const startTrainingFromMarkdown = () => {
@@ -3441,20 +3263,20 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setTrainingPromptDialog(nextDialog);
   };
 
-  const startTrainingFromMixMarkdown = () => {
-    const markdown = mixTrainingMarkdown.trim();
-    if (!hasCompleteMixMarkdown || !markdown) {
+  const startTrainingFromNodeFeedback = () => {
+    const markdown = nodeFeedbackTrainingMarkdown.trim();
+    if (!hasNodeFeedbackMarkdown || !markdown) {
       setMarkdownAnalysis({
         status: 'error',
-        message: 'MD.mix needs all five Markdown files before Start Training.',
+        message: 'Node feedback is empty. Run node feedback analysis or edit node Markdown first.',
       });
       return;
     }
 
-    if (trainingDialogSource === 'markdownMix' && trainingPromptDialog) return;
+    if (trainingDialogSource === 'nodeFeedback' && trainingPromptDialog) return;
 
     const nextDialog =
-      mixTrainingDraft ?? {
+      nodeFeedbackTrainingDraft ?? {
         projectName: '',
         datasetLocation: '',
         fileLocation: '',
@@ -3464,18 +3286,18 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           markdown,
           nodes,
           edges,
-          `MD.mix all ${MIX_ANALYSIS_TOPICS.length} files`,
+          `Diagram node feedback (${nodes.filter(hasNodeFeedback).length} nodes)`,
         ),
         dataSource: inferDataSourceFromMarkdownAndNodes(markdown, nodes),
         modelSource: inferModelSourceFromMarkdownAndNodes(markdown, nodes),
       };
-    if (!mixTrainingDraft) setMixTrainingDraft(nextDialog);
-    setTrainingDialogSource('markdownMix');
+    if (!nodeFeedbackTrainingDraft) setNodeFeedbackTrainingDraft(nextDialog);
+    setTrainingDialogSource('nodeFeedback');
     setTrainingPromptDialog(nextDialog);
   };
 
   const submitTrainingPrompt = async () => {
-    const markdown = (trainingDialogSource === 'markdownMix' ? mixTrainingMarkdown : pipelineMarkdown).trim();
+    const markdown = (trainingDialogSource === 'nodeFeedback' ? nodeFeedbackTrainingMarkdown : pipelineMarkdown).trim();
     if (!markdown || !trainingPromptDialog) return;
     if (trainingSubmitInFlightRef.current) return;
     if (!connected) {
@@ -3498,7 +3320,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         serverId: server?.id,
         remotePath: server?.defaultPath || undefined,
       });
-      const targetLabel = TRAINING_AGENT_LABELS[trainingTargetAgent];
+      const targetLabel = TRAINING_AGENT_LABELS[trainingTargetAgent] || 'Codex';
       setTrainingPromptDialog(null);
       setTrainingDialogSource(null);
       setMarkdownAnalysis({
@@ -3542,15 +3364,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           onClick={() => setActiveView('markdown')}
         >
           MD.md
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeView === 'markdownMix'}
-          className={activeView === 'markdownMix' ? 'research-fixed-tab-active' : ''}
-          onClick={() => setActiveView('markdownMix')}
-        >
-          MD.mix
         </button>
       </div>
 
@@ -3736,6 +3549,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                       event.preventDefault();
                       event.stopPropagation();
                       event.currentTarget.focus();
+                      nodePointerDownRef.current = { id: node.id, x: event.clientX, y: event.clientY };
                       const multiSelect = event.shiftKey || event.ctrlKey || event.metaKey;
                       if (multiSelect) {
                         const nextSelectedIds = selectedNodeIds.includes(node.id)
@@ -3785,6 +3599,15 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     onPointerUp={(event) => {
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                         event.currentTarget.releasePointerCapture(event.pointerId);
+                      }
+                      const started = nodePointerDownRef.current;
+                      nodePointerDownRef.current = null;
+                      if (
+                        started?.id === node.id &&
+                        Math.abs(event.clientX - started.x) < 6 &&
+                        Math.abs(event.clientY - started.y) < 6
+                      ) {
+                        setNodeDocModalId(node.id);
                       }
                       setDraggingNodeId('');
                       setDragGroup(null);
@@ -3964,6 +3787,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                       <dd>{edges.filter((edge) => edge.from === selectedNode.id).length}</dd>
                     </div>
                   </dl>
+                  <button
+                    type="button"
+                    className="research-open-node-doc"
+                    onClick={() => setNodeDocModalId(selectedNode.id)}
+                  >
+                    Markdown note
+                  </button>
                 </>
               ) : (
                 <div className="research-empty-inspector">
@@ -4009,7 +3839,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                       aria-label="Analysis agent"
                     >
                       <option value="">Select agent</option>
-                      <option value="claude">Claude</option>
                       <option value="codex">Codex</option>
                       <option value="agy">agy</option>
                       <option value="bailian">baillian</option>
@@ -4024,10 +3853,10 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                   </button>
                   <button
                     type="button"
-                    onClick={() => void analyzeMixFlowchartWithBailian()}
+                    onClick={() => void analyzeNodeFeedback()}
                     disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
                   >
-                    mix analysis diagram
+                    node feedback
                   </button>
                   <button
                     type="button"
@@ -4065,6 +3894,154 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                         </button>
                       </div>
                     </details>
+                  </div>
+                ) : null}
+              </div>
+              <div className="research-node-feedback-panel">
+                <div className="research-node-feedback-head">
+                  <strong>Node feedback</strong>
+                  <button
+                    type="button"
+                    onClick={() => void analyzeNodeFeedback()}
+                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <div className={`research-node-feedback-counter research-analysis-${markdownAnalysis.status}`}>
+                  <strong>
+                    {nodeFeedbackCount} / {nodeFeedbackTotal}
+                  </strong>
+                  <span>
+                    {markdownAnalysis.status === 'running' && isNodeFeedbackAnalysisMessage
+                      ? 'Analyzing nodes'
+                      : hasNodeFeedbackMarkdown
+                        ? 'Node notes updated'
+                        : 'No node feedback yet'}
+                  </span>
+                  {visibleNodeFeedbackAnalysisMessage ? <small>{visibleNodeFeedbackAnalysisMessage}</small> : null}
+                  {markdownAnalysis.startedAt && isNodeFeedbackAnalysisMessage ? (
+                    <small>Elapsed {formatDuration(analysisElapsedMs)}</small>
+                  ) : null}
+                </div>
+                <div className="research-node-feedback-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!hasNodeFeedbackMarkdown}
+                    onClick={startTrainingFromNodeFeedback}
+                  >
+                    Start Training
+                  </button>
+                </div>
+                {trainingPromptDialog && trainingDialogSource === 'nodeFeedback' ? (
+                  <div className="research-training-panel research-diagram-training-panel" role="region" aria-labelledby="start-training-node-feedback-title">
+                    <div className="research-training-panel-head">
+                      <div>
+                        <h4 id="start-training-node-feedback-title">Start Training</h4>
+                        <p className="hint">This uses node Markdown feedback as the training schedule prompt.</p>
+                      </div>
+                    </div>
+                    <div className="research-training-meta">
+                      <label className="research-training-field">
+                        <span>Project name</span>
+                        <input
+                          type="text"
+                          value={trainingPromptDialog.projectName ?? ''}
+                          onChange={(event) => updateTrainingDialogField('projectName', event.target.value)}
+                          placeholder="Folder name to create or reuse for outputs."
+                        />
+                      </label>
+                      <label className="research-training-field">
+                        <span>Dataset location</span>
+                        <input
+                          type="text"
+                          value={trainingPromptDialog.datasetLocation ?? ''}
+                          onChange={(event) => updateTrainingDialogField('datasetLocation', event.target.value)}
+                          placeholder="Dataset path"
+                        />
+                      </label>
+                      <label className="research-training-field">
+                        <span>File location</span>
+                        <input
+                          type="text"
+                          value={trainingPromptDialog.fileLocation ?? ''}
+                          onChange={(event) => updateTrainingDialogField('fileLocation', event.target.value)}
+                          placeholder="Output/save path"
+                        />
+                      </label>
+                      <label className="research-training-field">
+                        <span>Epoch</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={trainingPromptDialog.epoch ?? ''}
+                          onChange={(event) => updateTrainingDialogField('epoch', event.target.value)}
+                          placeholder="Optional max epoch"
+                        />
+                      </label>
+                    </div>
+                    <label className="research-training-field">
+                      <span>Prompt</span>
+                      <textarea
+                        value={trainingPromptDialog.userPrompt}
+                        onChange={(event) => updateTrainingDialogField('userPrompt', event.target.value)}
+                      />
+                    </label>
+                    <label className="research-training-field">
+                      <span>Other prompt</span>
+                      <textarea
+                        value={trainingPromptDialog.otherPrompt ?? ''}
+                        onChange={(event) => updateTrainingDialogField('otherPrompt', event.target.value)}
+                      />
+                    </label>
+                    <div className="research-training-sources">
+                      <label className="research-training-field">
+                        <span>Data source</span>
+                        <textarea
+                          value={trainingPromptDialog.dataSource}
+                          onChange={(event) => updateTrainingDialogField('dataSource', event.target.value)}
+                        />
+                      </label>
+                      <label className="research-training-field">
+                        <span>Model source</span>
+                        <textarea
+                          value={trainingPromptDialog.modelSource}
+                          onChange={(event) => updateTrainingDialogField('modelSource', event.target.value)}
+                        />
+                      </label>
+                    </div>
+                    <div className="form-actions research-training-actions">
+                      <button
+                        type="button"
+                        className="danger research-training-cancel"
+                        onClick={() => {
+                          setTrainingPromptDialog(null);
+                          setTrainingDialogSource(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <label className="research-agent-send-select">
+                        <span>Send to</span>
+                        <select
+                          value={trainingTargetAgent}
+                          onChange={(event) => setTrainingTargetAgent(event.target.value as QueuedTrainingAgent)}
+                        >
+                          <option value="codex">Codex</option>
+                          <option value="agy">agy</option>
+                          <option value="bailian">baillian</option>
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => void submitTrainingPrompt()}
+                        disabled={trainingSubmitting}
+                      >
+                        {trainingSubmitting ? 'Sending...' : 'Send'}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -4122,7 +4099,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                         value={trainingTargetAgent}
                         onChange={(event) => setTrainingTargetAgent(event.target.value as QueuedTrainingAgent)}
                       >
-                        <option value="claude">Claude</option>
                         <option value="codex">Codex</option>
                         <option value="agy">agy</option>
                         <option value="bailian">baillian</option>
@@ -4244,214 +4220,74 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
               />
             ) : null}
             <div className="research-markdown-preview">
-              <Markdown remarkPlugins={[remarkGfm]}>{pipelineMarkdown}</Markdown>
+              <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                {normalizeMarkdownMath(pipelineMarkdown)}
+              </Markdown>
             </div>
           </section>
 
-          <section className="research-markdown-mix" hidden={activeView !== 'markdownMix'}>
-            <aside className="research-mix-sidebar">
-              <div className="research-mix-sidebar-head">
-                <strong>MD.mix</strong>
-                <button
-                  type="button"
-                  onClick={() => void analyzeMixFlowchartWithBailian()}
-                  disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
-                >
-                  Refresh
-                </button>
-              </div>
-              <div className={`research-mix-counter research-analysis-${markdownAnalysis.status}`}>
-                <strong>
-                  {mixAnalysisCount} / {mixAnalysisTotal}
-                </strong>
-                <span>
-                  {markdownAnalysis.status === 'running' && isMixAnalysisMessage
-                    ? 'Analyzing feedback'
-                    : hasMixMarkdownFiles
-                      ? 'Feedback files'
-                      : 'No feedback yet'}
-                </span>
-                {visibleMixAnalysisMessage ? <small>{visibleMixAnalysisMessage}</small> : null}
-                {markdownAnalysis.startedAt && isMixAnalysisMessage ? (
-                  <small>Elapsed {formatDuration(analysisElapsedMs)}</small>
-                ) : null}
+      {nodeDocModalNode ? (
+        <div
+          className="modal-overlay research-node-doc-modal-overlay"
+          role="presentation"
+          onClick={() => setNodeDocModalId('')}
+        >
+          <section
+            className="modal research-node-doc-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="research-node-doc-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head research-node-doc-modal-head">
+              <div>
+                <h2 id="research-node-doc-modal-title">{nodeDocModalNode.title}</h2>
+                <p className="hint">
+                  YAML-backed node note. This describes what the block does and what an agent should follow.
+                </p>
               </div>
               <button
                 type="button"
-                className="primary"
-                disabled={!hasCompleteMixMarkdown}
-                onClick={startTrainingFromMixMarkdown}
+                className="modal-close"
+                aria-label="Close node markdown"
+                onClick={() => setNodeDocModalId('')}
               >
-                Start Training
+                x
               </button>
-              <button
-                type="button"
-                disabled={!selectedMixFile}
-                onClick={() => setMixSourceOpen((current) => !current)}
-              >
-                {mixSourceOpen ? 'Hide source' : 'Edit source'}
-              </button>
-              <div className="research-mix-file-list">
-                {mixMarkdownFiles.map((file) => (
-                  <button
-                    type="button"
-                    key={file.id}
-                    className={selectedMixFile?.id === file.id ? 'research-mix-file-active' : ''}
-                    onClick={() => setSelectedMixFileId(file.id)}
-                  >
-                    <span>{file.title}</span>
-                    <small>{file.fileName}</small>
-                  </button>
-                ))}
-                {!hasMixMarkdownFiles ? (
-                  <div className="research-empty">
-                    <strong>No flowchart feedback yet</strong>
-                    <span>Run mix analysis diagram. Five Markdown files will appear here.</span>
-                  </div>
-                ) : null}
-              </div>
-            </aside>
-            <main className="research-mix-preview">
-              {trainingPromptDialog && trainingDialogSource === 'markdownMix' ? (
-                <div className="research-training-panel" role="region" aria-labelledby="start-training-mix-title">
-                  <div className="research-training-panel-head">
-                    <div>
-                      <h4 id="start-training-mix-title">Start Training</h4>
-                      <p className="hint">
-                        This uses all five MD.mix files as the training schedule prompt.
-                      </p>
-                    </div>
-                    <div className="form-actions research-training-actions">
-                      <button
-                        type="button"
-                        className="danger research-training-cancel"
-                        onClick={() => {
-                          setTrainingPromptDialog(null);
-                          setTrainingDialogSource(null);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <label className="research-agent-send-select">
-                        <span>Send to</span>
-                        <select
-                          value={trainingTargetAgent}
-                          onChange={(event) => setTrainingTargetAgent(event.target.value as QueuedTrainingAgent)}
-                        >
-                          <option value="claude">Claude</option>
-                          <option value="codex">Codex</option>
-                          <option value="agy">agy</option>
-                          <option value="bailian">baillian</option>
-                        </select>
-                      </label>
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() => void submitTrainingPrompt()}
-                        disabled={trainingSubmitting}
-                      >
-                        {trainingSubmitting ? 'Sending...' : 'Send'}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="research-training-meta">
-                    <label className="research-training-field">
-                      <span>Project name</span>
-                      <input
-                        type="text"
-                        value={trainingPromptDialog.projectName ?? ''}
-                        onChange={(event) => updateTrainingDialogField('projectName', event.target.value)}
-                        placeholder="Folder name to create or reuse for outputs."
-                      />
-                    </label>
-                    <label className="research-training-field">
-                      <span>Dataset location</span>
-                      <input
-                        type="text"
-                        value={trainingPromptDialog.datasetLocation ?? ''}
-                        onChange={(event) => updateTrainingDialogField('datasetLocation', event.target.value)}
-                        placeholder="Dataset path, e.g. /ssd/datasets/Celeb-DF"
-                      />
-                    </label>
-                    <label className="research-training-field">
-                      <span>File location</span>
-                      <input
-                        type="text"
-                        value={trainingPromptDialog.fileLocation ?? ''}
-                        onChange={(event) => updateTrainingDialogField('fileLocation', event.target.value)}
-                        placeholder="Output/save path, e.g. /ssd/results/project"
-                      />
-                    </label>
-                    <label className="research-training-field">
-                      <span>Epoch</span>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={trainingPromptDialog.epoch ?? ''}
-                        onChange={(event) => updateTrainingDialogField('epoch', event.target.value)}
-                        placeholder="Optional max epoch; early stop still applies."
-                      />
-                    </label>
-                  </div>
-                  <label className="research-training-field">
-                    <span>Prompt</span>
-                    <textarea
-                      value={trainingPromptDialog.userPrompt}
-                      onChange={(event) => updateTrainingDialogField('userPrompt', event.target.value)}
-                    />
-                  </label>
-                  <label className="research-training-field">
-                    <span>Other prompt</span>
-                    <textarea
-                      value={trainingPromptDialog.otherPrompt ?? ''}
-                      onChange={(event) => updateTrainingDialogField('otherPrompt', event.target.value)}
-                    />
-                  </label>
-                  <div className="research-training-sources">
-                    <label className="research-training-field">
-                      <span>Data source</span>
-                      <textarea
-                        value={trainingPromptDialog.dataSource}
-                        onChange={(event) => updateTrainingDialogField('dataSource', event.target.value)}
-                      />
-                    </label>
-                    <label className="research-training-field">
-                      <span>Model source</span>
-                      <textarea
-                        value={trainingPromptDialog.modelSource}
-                        onChange={(event) => updateTrainingDialogField('modelSource', event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  <details className="research-training-preview">
-                    <summary>Preview prompt</summary>
-                    <pre>
-                      {buildTrainingPromptFromMarkdown(
-                        mixTrainingMarkdown,
-                        nodes,
-                        edges,
-                        trainingPromptDialog,
-                      )}
-                    </pre>
-                  </details>
-                </div>
-              ) : null}
-              {selectedMixFile && mixSourceOpen ? (
-                <textarea
-                  className="research-markdown-editor research-mix-markdown-editor"
-                  value={selectedMixFile.markdown}
-                  onChange={(event) => updateSelectedMixMarkdown(event.target.value)}
-                  aria-label={`${selectedMixFile.fileName} source`}
-                  spellCheck={false}
-                />
-              ) : null}
-              <div className="research-markdown-preview">
-                <Markdown remarkPlugins={[remarkGfm]}>
-                  {selectedMixFile?.markdown || '# MD.mix\n\nNo Markdown file selected yet.'}
+            </div>
+            <div className="research-node-doc-modal-grid">
+              <div className="research-node-doc-modal-preview markdown">
+                <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                  {normalizeMarkdownMath(selectedNodeDocument)}
                 </Markdown>
               </div>
-            </main>
+              <div className="research-node-doc-modal-editor">
+                <label className="research-node-editor research-node-yaml-editor">
+                  <span>YAML storage</span>
+                  <textarea
+                    value={withNodeStorageDefaults(nodeDocModalNode).yaml || ''}
+                    onChange={(event) => updateSelectedNodeYaml(event.target.value)}
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="research-node-human-rule">
+                  <span className="research-inspector-section-title">人工限制</span>
+                  <pre>{nodeHumanRuleText(nodeDocModalNode)}</pre>
+                </div>
+                <label className="research-node-editor research-node-agent-prompt">
+                  <span>Agent prompt</span>
+                  <textarea
+                    value={withNodeStorageDefaults(nodeDocModalNode).agentPrompt || ''}
+                    onChange={(event) => updateSelectedNodeAgentPrompt(event.target.value)}
+                    placeholder="Agent input prompt for this node"
+                  />
+                </label>
+              </div>
+            </div>
           </section>
+        </div>
+      ) : null}
+
       {codexDiagramOpen ? (
         <div
           className="modal-overlay research-codex-draw-modal-overlay"

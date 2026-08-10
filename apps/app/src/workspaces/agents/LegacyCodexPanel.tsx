@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { ConnectionProfile } from '@cozypad/contracts';
+import {
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from '../../components/markdownPlugins';
+import { linkifyRemotePathLines, markdownComponents } from '../../components/markdownComponents';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
@@ -10,6 +15,7 @@ import {
   subscribeCodexTrainingTasks,
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
+import { commonAgentSlashCommands } from './slashCommands';
 import {
   createLegacyCodexHistory,
   deleteLegacyCodexWorkflow,
@@ -625,9 +631,9 @@ function isCodexEventLine(line: string): boolean {
 function isHiddenCodexEventLine(line: string): boolean {
   const lower = line.trim().toLowerCase();
   return (
-    lower === '[codex] turn started' ||
-    lower === '[codex] turn complete' ||
-    lower === '[codex] turn completed' ||
+    lower.startsWith('[codex] turn started') ||
+    lower.startsWith('[codex] turn complete') ||
+    lower.startsWith('[codex] turn completed') ||
     lower.startsWith('[codex] completed ')
   );
 }
@@ -1019,7 +1025,7 @@ function sectionTitleFromCode(fenceLine: string): string {
 
 function parseCodexContent(text: string): CodexContentSection[] {
   const sections: CodexContentSection[] = [];
-  const lines = normalizeOutput(text).split('\n');
+  const lines = normalizeCodexEventBoundaries(stripHiddenCodexLifecycleText(normalizeOutput(text))).split('\n');
   let index = 0;
   let buffer: string[] = [];
 
@@ -1252,10 +1258,16 @@ function renderPreLines(text: string, codexColors = true) {
     ));
 }
 
-function renderMarkdownText(text: string, className = '', key?: string) {
+function renderMarkdownText(text: string, className = '', key?: string, serverId = '') {
   return (
     <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
-      <Markdown remarkPlugins={[remarkGfm]}>{normalizeOutput(text)}</Markdown>
+      <Markdown
+        components={markdownComponents}
+        remarkPlugins={markdownRemarkPlugins}
+        rehypePlugins={markdownRehypePlugins}
+      >
+        {normalizeMarkdownMath(linkifyRemotePathLines(normalizeOutput(text), serverId))}
+      </Markdown>
     </div>
   );
 }
@@ -1287,11 +1299,11 @@ function parseUserPromptAttachments(text: string): {
   return { prompt, attachments };
 }
 
-function renderUserMessageBody(text: string) {
+function renderUserMessageBody(text: string, serverId = '') {
   const { prompt, attachments } = parseUserPromptAttachments(text);
   return (
     <div className="legacy-codex-message-body legacy-codex-user-body">
-      {prompt ? renderMarkdownText(prompt, 'legacy-codex-user-markdown') : null}
+      {prompt ? renderMarkdownText(prompt, 'legacy-codex-user-markdown', undefined, serverId) : null}
       {attachments.length > 0 ? (
         <div className="legacy-codex-user-attachments" aria-label="attached images">
           {attachments.map((attachment, index) => (
@@ -1352,10 +1364,10 @@ function renderCollapsibleSection(section: CodexContentSection, index: number) {
   );
 }
 
-function renderCodexRichContent(text: string) {
+function renderCodexRichContent(text: string, serverId = '') {
   return parseCodexContent(text).map((section, index) => {
     if (section.kind === 'text' || section.kind === 'code') {
-      return renderMarkdownText(section.text, 'legacy-codex-inline-text', `text-${index}`);
+      return renderMarkdownText(section.text, 'legacy-codex-inline-text', `text-${index}`, serverId);
     }
 
     return renderCollapsibleSection(section, index);
@@ -1367,7 +1379,7 @@ function isPlainCodexText(text: string): boolean {
   return sections.length > 0 && sections.every((section) => section.kind === 'text' || section.kind === 'code');
 }
 
-function renderDialogue(task: CodexTask) {
+function renderDialogue(task: CodexTask, serverId = '') {
   return parseCodexDialogue(task).map((block, index) => {
     const plainCodexText = block.role === 'codex' && isPlainCodexText(block.text);
     return (
@@ -1382,14 +1394,14 @@ function renderDialogue(task: CodexTask) {
         </span>
         {block.role === 'codex' ? (
           plainCodexText ? (
-            renderMarkdownText(block.text)
+            renderMarkdownText(block.text, '', undefined, serverId)
           ) : (
             <div className="legacy-codex-message-body legacy-codex-message-rich">
-              {renderCodexRichContent(block.text)}
+              {renderCodexRichContent(block.text, serverId)}
             </div>
           )
         ) : block.role === 'user' ? (
-          renderUserMessageBody(block.text)
+          renderUserMessageBody(block.text, serverId)
         ) : (
           <pre className="legacy-codex-message-body">{renderDialogueText(block)}</pre>
         )}
@@ -1965,6 +1977,10 @@ export function LegacyCodexPanel({
       setHelperError('請先選擇 SSH server。');
       return false;
     }
+    if (!connected) {
+      setHelperError('Press Connect before checking or running Codex; no SSH starts while disconnected.');
+      return false;
+    }
     const cwdOnlyChange = images.length === 0 ? parseStandaloneCwdChangeRequest(prompt) : '';
     if (cwdOnlyChange) {
       setRemotePath(cwdOnlyChange);
@@ -2022,6 +2038,7 @@ export function LegacyCodexPanel({
     codexRunOptions.model,
     codexRunOptions.reasoningEffort,
     connectTask,
+    connected,
     cwdInput,
     legacyServer,
     remotePath,
@@ -2084,6 +2101,10 @@ export function LegacyCodexPanel({
     if (!prompt || !activeTask || !codexReady) return false;
     if (!legacyServer) {
       setHelperError('請先選擇 SSH server。');
+      return false;
+    }
+    if (!connected) {
+      setHelperError('Press Connect before checking or running Codex; no SSH starts while disconnected.');
       return false;
     }
     const cwdOnlyChange = images.length === 0 ? parseStandaloneCwdChangeRequest(prompt) : '';
@@ -2276,6 +2297,13 @@ export function LegacyCodexPanel({
         </div>
       ) : null}
 
+      {legacyServer && !connected ? (
+        <div className="legacy-codex-alert">
+          <strong>Connect required</strong>
+          <span>Press Connect before checking or running Codex; no SSH starts while disconnected.</span>
+        </div>
+      ) : null}
+
       <div className="agent-panes legacy-codex-panes">
         <aside className="session-sidebar legacy-codex-sidebar">
           <input
@@ -2325,6 +2353,17 @@ export function LegacyCodexPanel({
               <p className="hint session-empty">尚無符合的 Codex 工作。</p>
             ) : null}
           </div>
+          <button
+            className="session-new"
+            type="button"
+            onClick={() => {
+              setCreatingNewTask(true);
+              setActiveTaskId('');
+            }}
+            disabled={!codexReady || loadingWorkflows}
+          >
+            + 新工作
+          </button>
         </aside>
 
         <section className="chat-column legacy-codex-output">
@@ -2359,7 +2398,7 @@ export function LegacyCodexPanel({
                 ) : null}
               </div>
               <div className="legacy-codex-dialogue" ref={dialogueScrollRef}>
-                {renderDialogue(activeTask)}
+                {renderDialogue(activeTask, activeTask.profileId)}
               </div>
             </>
           ) : (
@@ -2370,11 +2409,12 @@ export function LegacyCodexPanel({
           <ChatComposer
             agentLabel="Codex"
             value={composerText}
-            commands={[]}
+            commands={commonAgentSlashCommands}
             attachments={imageAttachments}
             disabled={!codexReady || loadingWorkflows}
             attachDisabled={false}
             attachTitle="新增 Codex 工作"
+            showAttachButton={false}
             placeholder={
               loadingWorkflows
                 ? '正在載入遠端 Codex 工作'

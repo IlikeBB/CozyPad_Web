@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import {
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from '../components/markdownPlugins';
 import {
   isLegacyAuthError,
   listLegacyServers,
@@ -481,7 +485,9 @@ export function MarkdownWorkspace() {
               {summaryResult?.fileCount ? <span>{summaryResult.fileCount} files</span> : null}
             </div>
             <div className="markdown markdown-doc markdown-summary-doc">
-              <Markdown remarkPlugins={[remarkGfm]}>{summaryText}</Markdown>
+              <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                {normalizeMarkdownMath(summaryText)}
+              </Markdown>
             </div>
           </div>
         ) : null}

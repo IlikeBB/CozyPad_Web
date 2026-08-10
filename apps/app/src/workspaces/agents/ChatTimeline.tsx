@@ -1,11 +1,17 @@
 import { useEffect, useRef } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { ChatItem } from '@cozypad/contracts';
+import {
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from '../../components/markdownPlugins';
+import { linkifyRemotePathLines, markdownComponents } from '../../components/markdownComponents';
 
 interface ChatTimelineProps {
   sessionId: string;
   items: ChatItem[];
+  assistantLabel?: string;
   onResolveApproval(itemId: string, resolution: 'allowed' | 'denied'): void;
   onAnswerQuestion(itemId: string, optionIndex: number): void;
 }
@@ -37,7 +43,12 @@ type AssistantSection =
   | { kind: 'meta' | 'tool' | 'status'; title: string; label: string; text: string };
 
 function normalizeAssistantText(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/([^\n])(\s*\[(?:Codex|Claude|agy|bailian|baillian|CozyPad(?: Local [^\]]+)?)\])/gi, '$1\n$2')
+    .replace(/\[(?:Codex|Claude|agy|bailian|baillian)\]\s*turn (?:started|complete|completed)/gi, '')
+    .replace(/[ \t]+\n/g, '\n');
 }
 
 function isAgentEventLine(line: string): boolean {
@@ -47,21 +58,21 @@ function isAgentEventLine(line: string): boolean {
 function isHiddenAgentEventLine(line: string): boolean {
   const lower = line.trim().toLowerCase();
   return (
-    lower === '[codex] turn started' ||
-    lower === '[codex] turn complete' ||
-    lower === '[codex] turn completed' ||
-    lower === '[claude] turn started' ||
-    lower === '[claude] turn complete' ||
-    lower === '[claude] turn completed' ||
-    lower === '[agy] turn started' ||
-    lower === '[agy] turn complete' ||
-    lower === '[agy] turn completed' ||
-    lower === '[bailian] turn started' ||
-    lower === '[bailian] turn complete' ||
-    lower === '[bailian] turn completed' ||
-    lower === '[baillian] turn started' ||
-    lower === '[baillian] turn complete' ||
-    lower === '[baillian] turn completed'
+    lower.startsWith('[codex] turn started') ||
+    lower.startsWith('[codex] turn complete') ||
+    lower.startsWith('[codex] turn completed') ||
+    lower.startsWith('[claude] turn started') ||
+    lower.startsWith('[claude] turn complete') ||
+    lower.startsWith('[claude] turn completed') ||
+    lower.startsWith('[agy] turn started') ||
+    lower.startsWith('[agy] turn complete') ||
+    lower.startsWith('[agy] turn completed') ||
+    lower.startsWith('[bailian] turn started') ||
+    lower.startsWith('[bailian] turn complete') ||
+    lower.startsWith('[bailian] turn completed') ||
+    lower.startsWith('[baillian] turn started') ||
+    lower.startsWith('[baillian] turn complete') ||
+    lower.startsWith('[baillian] turn completed')
   );
 }
 
@@ -131,18 +142,88 @@ function classifyAssistantSection(text: string): 'meta' | 'tool' | 'status' {
   ) {
     return 'status';
   }
-  if (normalizeAssistantText(text).split('\n').some(isToolishLine)) return 'tool';
+  if (
+    lower.includes('started command execution') ||
+    lower.includes('tool call') ||
+    normalizeAssistantText(text).split('\n').some(isToolishLine)
+  ) {
+    return 'tool';
+  }
   return 'meta';
+}
+
+function isMarkdownBlockStart(line: string, afterBlank: boolean): boolean {
+  const trimmed = line.trim();
+  return (
+    /^#{1,6}\s+\S/.test(trimmed) ||
+    /^\*\*[^*]+?\*\*\s*[:：]?$/.test(trimmed) ||
+    (afterBlank && /^\d+\.\s+\S/.test(trimmed)) ||
+    (afterBlank && /^[-*]\s+\*\*[^*]+?\*\*/.test(trimmed)) ||
+    /^-{3,}$/.test(trimmed)
+  );
+}
+
+function splitAssistantTextBlocks(text: string): string[] {
+  const normalized = text.trimEnd();
+  if (!normalized.trim()) return [];
+
+  const lines = normalized.split('\n');
+  const blocks: string[] = [];
+  let buffer: string[] = [];
+  let inCodeFence = false;
+  let blankRun = 0;
+  let previousWasBlank = false;
+
+  const flush = () => {
+    const block = buffer.join('\n').trim();
+    if (block) blocks.push(block);
+    buffer = [];
+    blankRun = 0;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const fence = trimmed.startsWith('```');
+
+    if (!inCodeFence && buffer.some((item) => item.trim()) && isMarkdownBlockStart(line, previousWasBlank)) {
+      flush();
+    }
+
+    buffer.push(line);
+
+    if (fence) {
+      inCodeFence = !inCodeFence;
+      blankRun = 0;
+      continue;
+    }
+
+    if (inCodeFence) continue;
+
+    if (!trimmed) {
+      blankRun += 1;
+      previousWasBlank = true;
+      if (blankRun >= 2) flush();
+      continue;
+    }
+
+    blankRun = 0;
+    previousWasBlank = false;
+  }
+
+  flush();
+  return blocks;
 }
 
 function pushAssistantSection(sections: AssistantSection[], section: AssistantSection): void {
   if (!section.text.trim()) return;
   const previous = sections[sections.length - 1];
-  if (previous?.kind === section.kind && section.kind === 'text') {
-    previous.text = `${previous.text}\n${section.text}`.trimEnd();
+  if (section.kind === 'text') {
+    for (const block of splitAssistantTextBlocks(section.text)) {
+      sections.push({ kind: 'text', text: block });
+    }
     return;
   }
-  if (previous?.kind !== 'text' && section.kind !== 'text' && previous?.kind === section.kind) {
+  if (previous?.kind !== 'text' && previous?.kind === section.kind) {
     previous.text = `${previous.text}\n${section.text}`.trimEnd();
     previous.title = summarizeSection(previous.text, previous.title);
     return;
@@ -209,12 +290,10 @@ function parseAssistantSections(text: string): AssistantSection[] {
 }
 
 function renderAssistantStatusCard(section: Extract<AssistantSection, { kind: 'meta' | 'tool' | 'status' }>, index: number) {
-  const openByDefault = section.kind === 'status';
   return (
     <details
       className={`legacy-codex-card legacy-codex-card-${section.kind} agent-processing-card`}
       key={`${section.kind}-${index}-${section.title}`}
-      open={openByDefault}
     >
       <summary>
         <span className="legacy-codex-card-chevron" aria-hidden="true" />
@@ -233,8 +312,14 @@ function renderAssistantBody(text: string) {
     <div className="agent-rich-message">
       {parseAssistantSections(text).map((section, index) =>
         section.kind === 'text' ? (
-          <div className="markdown" key={`text-${index}`}>
-            <Markdown remarkPlugins={[remarkGfm]}>{section.text}</Markdown>
+          <div className="markdown legacy-codex-markdown agent-text-markdown" key={`text-${index}`}>
+            <Markdown
+              components={markdownComponents}
+              remarkPlugins={markdownRemarkPlugins}
+              rehypePlugins={markdownRehypePlugins}
+            >
+              {normalizeMarkdownMath(linkifyRemotePathLines(section.text))}
+            </Markdown>
           </div>
         ) : (
           renderAssistantStatusCard(section, index)
@@ -247,6 +332,7 @@ function renderAssistantBody(text: string) {
 export function ChatTimeline({
   sessionId,
   items,
+  assistantLabel = 'Agent',
   onResolveApproval,
   onAnswerQuestion,
 }: ChatTimelineProps) {
@@ -279,9 +365,12 @@ export function ChatTimeline({
                 key={item.id}
                 className={`msg msg-${item.role}${item.streaming ? ' msg-streaming' : ''}`}
               >
-                <div className="msg-body">
-                  {item.role === 'assistant' ? renderAssistantBody(item.text) : item.text}
-                  {item.streaming ? <span className="caret" /> : null}
+                <div className="msg-stack">
+                  <div className="msg-label">{item.role === 'assistant' ? assistantLabel : 'User'}</div>
+                  <div className="msg-body">
+                    {item.role === 'assistant' ? renderAssistantBody(item.text) : item.text}
+                    {item.streaming ? <span className="caret" /> : null}
+                  </div>
                 </div>
               </div>
             );

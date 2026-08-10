@@ -15,19 +15,24 @@ import {
 import { ChatComposer } from './ChatComposer';
 import { ChatTimeline } from './ChatTimeline';
 import { LegacyAgyPanel } from './LegacyAgyPanel';
-import { LegacyClaudePanel } from './LegacyClaudePanel';
 import { LegacyCodexPanel } from './LegacyCodexPanel';
+import { applyAcpSessionUpdateToChatItems } from './acpChatAdapter';
 import { subscribeCodexTrainingTasks } from './codexTaskQueue';
 import { listLegacyServers } from './legacySshApi';
 import type { LegacySshServer } from './legacySshApi';
 import { rememberLastSelectedLegacyServerId } from '../sshServerPreference';
 
 const AGENTS: { kind: AgentKind; label: string }[] = [
-  { kind: 'claude', label: 'Claude' },
   { kind: 'codex', label: 'Codex' },
   { kind: 'agy', label: 'agy' },
   { kind: 'bailian', label: 'baillian' },
 ];
+
+const DEFAULT_AGENT: AgentKind = 'codex';
+
+function visibleAgentKind(kind: AgentKind): AgentKind {
+  return kind === 'claude' ? DEFAULT_AGENT : kind;
+}
 
 const STATUS_LABEL: Record<AgentSessionStatus, string> = {
   starting: 'starting',
@@ -151,7 +156,7 @@ export function AgentsWorkspace({
     nonce: number;
   } | null;
 }) {
-  const [agent, setAgent] = useState<AgentKind>('claude');
+  const [agent, setAgent] = useState<AgentKind>(DEFAULT_AGENT);
   const [remoteServer, setRemoteServer] = useState<LegacySshServer | null>(null);
   const [sessions, setSessions] = useState<AgentSessionSummary[]>(
     mockData ? mockAgentSessions : [],
@@ -179,13 +184,13 @@ export function AgentsWorkspace({
       subscribeCodexTrainingTasks((detail) => {
         const queuedAgent = (detail?.task as { agent?: AgentKind } | undefined)?.agent;
         if (!queuedAgent) return;
-        setAgent(queuedAgent);
+        setAgent(visibleAgentKind(queuedAgent));
       }),
     [],
   );
 
   useEffect(() => {
-    if (openTarget) setAgent(openTarget.agent);
+    if (openTarget) setAgent(visibleAgentKind(openTarget.agent));
   }, [openTarget?.nonce]);
 
   useEffect(() => {
@@ -250,25 +255,21 @@ export function AgentsWorkspace({
 
   const streamAssistant = (sessionId: string, reply: string) => {
     const assistantId = `local-a${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    appendItems(sessionId, [
-      {
-        kind: 'message',
-        id: assistantId,
-        role: 'assistant',
-        text: '',
-        streaming: true,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
     let cursor = 0;
     const interval = setInterval(() => {
+      const previous = cursor;
       cursor = Math.min(cursor + 3, reply.length);
       const done = cursor >= reply.length;
       setTimelines((current) => ({
         ...current,
-        [sessionId]: (current[sessionId] ?? []).map((item) =>
-          item.id === assistantId && item.kind === 'message'
-            ? { ...item, text: reply.slice(0, cursor), streaming: !done }
+        [sessionId]: applyAcpSessionUpdateToChatItems(current[sessionId] ?? [], {
+          kind: 'agent_message_chunk',
+          sessionId,
+          messageId: assistantId,
+          content: [{ type: 'text', text: reply.slice(previous, cursor) }],
+        }).map((item) =>
+          done && item.kind === 'message' && item.id === assistantId
+            ? { ...item, streaming: false }
             : item,
         ),
       }));
@@ -443,13 +444,6 @@ export function AgentsWorkspace({
           focusTaskId={openTarget?.agent === 'codex' ? openTarget.taskId : ''}
           focusRequestNonce={openTarget?.agent === 'codex' ? openTarget.nonce : 0}
         />
-      ) : agent === 'claude' ? (
-        <LegacyClaudePanel
-          legacyServer={remoteServer}
-          connected={connected}
-          focusTaskId={openTarget?.agent === 'claude' ? openTarget.taskId : ''}
-          focusRequestNonce={openTarget?.agent === 'claude' ? openTarget.nonce : 0}
-        />
       ) : agent === 'agy' ? (
         <LegacyAgyPanel
           key="legacy-agent-agy"
@@ -532,6 +526,7 @@ export function AgentsWorkspace({
                 <ChatTimeline
                   sessionId={selectedSession.id}
                   items={timeline}
+                  assistantLabel={AGENTS.find((entry) => entry.kind === agent)?.label ?? agent}
                   onResolveApproval={resolveApproval}
                   onAnswerQuestion={answerQuestion}
                 />

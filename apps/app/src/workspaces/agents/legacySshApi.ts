@@ -646,8 +646,18 @@ function isCloudflareEdgeBlock(error: unknown): error is LegacyApiError {
   );
 }
 
+function isRecoverableCloudflareTransportError(error: unknown): error is LegacyApiError {
+  return (
+    error instanceof LegacyApiError &&
+    (error.status === 0 ||
+      error.status === 524 ||
+      error.status === 522 ||
+      isCloudflareEdgeBlock(error))
+  );
+}
+
 function shouldTryLocalLegacyApiFallback(error: unknown): boolean {
-  return isCloudflareEdgeBlock(error) || (error instanceof LegacyApiError && error.status === 0);
+  return isRecoverableCloudflareTransportError(error);
 }
 
 function localLegacyApiUrl(path: string): string | null {
@@ -846,11 +856,15 @@ export function logoutLegacy(): Promise<{ ok: boolean }> {
   });
 }
 
-export async function listLegacyServers(refresh = false): Promise<LegacySshServer[]> {
+export async function listLegacyServers(
+  refresh = false,
+  init?: Pick<RequestInit, 'signal'>,
+): Promise<LegacySshServer[]> {
   const data = await legacyApiRequest<{
     servers: LegacySshServer[];
   }>(refresh ? '/api/ssh/servers/refresh' : '/api/ssh/servers', {
     method: refresh ? 'POST' : 'GET',
+    ...init,
   });
   return Array.isArray(data.servers) ? data.servers : [];
 }
@@ -895,12 +909,14 @@ export function getLegacySshRuntime(): Promise<LegacySshRuntimeSnapshot> {
 export async function listLegacyServerFiles(
   serverId: string,
   remotePath: string,
+  init?: Pick<RequestInit, 'signal'>,
 ): Promise<LegacySshFileListing> {
   assertLegacySshExecutionEnabled();
   const data = await legacyApiRequest<LegacySshFileListing>(
     `/api/ssh/servers/${encodeURIComponent(serverId)}/files?path=${encodeURIComponent(
       remotePath.trim() || '~',
     )}`,
+    init,
   );
   return {
     ...data,
@@ -1000,13 +1016,22 @@ function agentRunResultFromJob<T extends LegacyAgyRunResponse>(
   } as T;
 }
 
-function getLegacyRemoteAgentRunJob(
+async function getLegacyRemoteAgentRunJob(
   agent: LegacyRemoteAgentKind,
   jobId: string,
 ): Promise<LegacyRemoteAgentRunJobResponse> {
-  return legacyApiRequest<LegacyRemoteAgentRunJobResponse>(
-    `${AGENT_API_PREFIX}/ssh/${agent}/run/jobs/${encodeURIComponent(jobId)}`,
-  );
+  const encodedJobId = encodeURIComponent(jobId);
+  try {
+    return await legacyApiRequest<LegacyRemoteAgentRunJobResponse>(
+      `${AGENT_API_PREFIX}/ssh/${agent}/run/jobs/${encodedJobId}`,
+    );
+  } catch (error) {
+    if (!isRecoverableCloudflareTransportError(error)) throw error;
+    return legacyTextRpcRequestWithLocalFallback<LegacyRemoteAgentRunJobResponse>(
+      `${AGENT_RPC_PREFIX}/${agent}/run/jobs/${encodedJobId}`,
+      { jobId },
+    );
+  }
 }
 
 async function runLegacyRemoteAgentPromptJob<T extends LegacyAgyRunResponse>(
@@ -1023,8 +1048,8 @@ async function runLegacyRemoteAgentPromptJob<T extends LegacyAgyRunResponse>(
       },
     );
   } catch (error) {
-    if (!isCloudflareEdgeBlock(error)) throw error;
-    initial = await legacyTextRpcRequest<LegacyRemoteAgentRunJobResponse>(
+    if (!isRecoverableCloudflareTransportError(error)) throw error;
+    initial = await legacyTextRpcRequestWithLocalFallback<LegacyRemoteAgentRunJobResponse>(
       `${AGENT_RPC_PREFIX}/${agent}/run/jobs`,
       options,
     );
@@ -1038,9 +1063,21 @@ async function runLegacyRemoteAgentPromptJob<T extends LegacyAgyRunResponse>(
 
   const deadline = Date.now() + 15 * 60 * 1000;
   let delay = 1000;
+  let transientPollFailures = 0;
   while (Date.now() < deadline) {
     await wait(delay);
-    const job = await getLegacyRemoteAgentRunJob(agent, initial.jobId);
+    let job: LegacyRemoteAgentRunJobResponse;
+    try {
+      job = await getLegacyRemoteAgentRunJob(agent, initial.jobId);
+      transientPollFailures = 0;
+    } catch (error) {
+      if (!isRecoverableCloudflareTransportError(error) || transientPollFailures >= 6) {
+        throw error;
+      }
+      transientPollFailures += 1;
+      delay = Math.min(8000, delay + 1000);
+      continue;
+    }
     const result = agentRunResultFromJob<T>(job);
     if (result) return result;
     if (job.status === 'failed') {
@@ -1215,15 +1252,7 @@ export async function runLegacyCodexPrompt(options: {
   reasoningEffort?: LegacyCodexReasoningEffort;
 }): Promise<LegacyCodexRunResponse> {
   assertLegacySshExecutionEnabled();
-  try {
-    return await legacyApiRequest<LegacyCodexRunResponse>(`${AGENT_API_PREFIX}/ssh/codex/run`, {
-      method: 'POST',
-      body: JSON.stringify(options),
-    });
-  } catch (error) {
-    if (!isCloudflareEdgeBlock(error)) throw error;
-    return legacyTextRpcRequest<LegacyCodexRunResponse>(`${AGENT_RPC_PREFIX}/codex/run`, options);
-  }
+  return runLegacyRemoteAgentPromptJob<LegacyCodexRunResponse>('codex', options);
 }
 
 export async function listLegacyCodexWorkflows(

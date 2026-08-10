@@ -18,6 +18,7 @@ interface ChatComposerProps {
   attachTitle?: string;
   attachments?: ChatComposerAttachment[];
   placeholder?: string;
+  showAttachButton?: boolean;
   onChange(value: string): void;
   onSend(text: string): void;
   onAttach?(): void;
@@ -31,12 +32,13 @@ export function ChatComposer({
   commands,
   disabled = false,
   attachDisabled = true,
-  attachTitle = '附件：Phase 4',
+  attachTitle = 'Attach images',
   attachments = [],
   placeholder,
   onChange,
   onSend,
   onAttach,
+  showAttachButton = Boolean(onAttach),
   onFilesAttached,
   onRemoveAttachment,
 }: ChatComposerProps) {
@@ -123,7 +125,7 @@ export function ChatComposer({
               <span className="slash-desc">{command.description}</span>
             </button>
           ))}
-          <div className="slash-hint hint">↑↓ 選擇 · Tab/Enter 帶入 · Esc 關閉</div>
+          <div className="slash-hint hint">↑/↓ 選擇 · Tab/Enter 套用 · Esc 關閉</div>
         </div>
       ) : null}
       {attachments.length > 0 ? (
@@ -136,7 +138,7 @@ export function ChatComposer({
               <span>{attachment.name}</span>
               <button
                 type="button"
-                title="移除圖片"
+                title="移除附件"
                 onClick={() => onRemoveAttachment?.(attachment.id)}
               >
                 ×
@@ -149,7 +151,7 @@ export function ChatComposer({
         <textarea
           ref={textareaRef}
           rows={Math.min(6, Math.max(1, value.split('\n').length))}
-          placeholder={placeholder || `Message ${agentLabel}…（Enter 送出、Shift+Enter 換行、/ 指令）`}
+          placeholder={placeholder || `Message ${agentLabel}...（Enter 送出 · Shift+Enter 換行 · / 指令）`}
           value={value}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
@@ -189,14 +191,16 @@ export function ChatComposer({
           }}
         />
         <div className="composer-actions">
-          <button
-            className="composer-attach"
-            title={attachTitle}
-            disabled={attachDisabled || disabled}
-            onClick={onAttach}
-          >
-            ＋
-          </button>
+          {showAttachButton ? (
+            <button
+              className="composer-attach"
+              title={attachTitle}
+              disabled={attachDisabled || disabled}
+              onClick={onAttach}
+            >
+              +
+            </button>
+          ) : null}
           <button
             className="composer-send"
             onClick={send}

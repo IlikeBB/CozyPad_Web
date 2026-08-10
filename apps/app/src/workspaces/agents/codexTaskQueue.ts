@@ -32,7 +32,7 @@ function createQueuedTaskId(): string {
 }
 
 function normalizeQueuedTrainingAgent(agent: unknown): QueuedTrainingAgent {
-  if (agent === 'claude' || agent === 'codex' || agent === 'agy' || agent === 'bailian') {
+  if (agent === 'codex' || agent === 'agy' || agent === 'bailian') {
     return agent;
   }
   return 'codex';

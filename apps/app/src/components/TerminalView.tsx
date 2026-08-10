@@ -7,6 +7,7 @@ import { getBridge } from '../platform/bridge';
 
 const LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS = 2;
 const LEGACY_TERMINAL_CONTROL_PREFIX = '\0COZYPAD:';
+const TERMINAL_OPEN_TIMEOUT_MS = 15000;
 
 export interface TerminalModifiers {
   ctrl: boolean;
@@ -223,6 +224,9 @@ export function TerminalView({
         if (disposed) return;
         legacySocket?.close();
         let socketOpened = false;
+        let socketTimedOut = false;
+        let firstMessageReceived = false;
+        let readyTimedOut = false;
         const socket = new WebSocket(
           createLegacyTerminalUrl(
             legacyServerId,
@@ -233,10 +237,38 @@ export function TerminalView({
           ),
         );
         legacySocket = socket;
+        const openTimeout = window.setTimeout(() => {
+          if (disposed || socket.readyState !== WebSocket.CONNECTING) return;
+          socketTimedOut = true;
+          term.write(
+            `\r\n\x1b[31m[CozyPad] terminal open timed out after ${Math.round(
+              TERMINAL_OPEN_TIMEOUT_MS / 1000,
+            )}s. Reopen manually after checking SSH.\x1b[0m\r\n`,
+          );
+          socket.close();
+        }, TERMINAL_OPEN_TIMEOUT_MS);
+        let readyTimeout: number | null = null;
+        const clearReadyTimeout = () => {
+          if (readyTimeout !== null) {
+            window.clearTimeout(readyTimeout);
+            readyTimeout = null;
+          }
+        };
 
         socket.addEventListener('open', () => {
+          window.clearTimeout(openTimeout);
           socketOpened = true;
           reconnectAttempts = 0;
+          readyTimeout = window.setTimeout(() => {
+            if (disposed || legacySocket !== socket || firstMessageReceived) return;
+            readyTimedOut = true;
+            term.write(
+              `\r\n\x1b[31m[CozyPad] terminal did not become ready after ${Math.round(
+                TERMINAL_OPEN_TIMEOUT_MS / 1000,
+              )}s. Reopen manually after checking SSH.\x1b[0m\r\n`,
+            );
+            socket.close();
+          }, TERMINAL_OPEN_TIMEOUT_MS);
           sendLegacyTerminalControl(socket, { type: 'resize', cols: term.cols, rows: term.rows });
           term.focus();
           onHandleRef.current?.({
@@ -252,13 +284,18 @@ export function TerminalView({
         });
 
         socket.addEventListener('message', (event) => {
+          firstMessageReceived = true;
+          clearReadyTimeout();
           void writeWebSocketDataToTerminal(term, event.data);
         });
 
         socket.addEventListener('close', () => {
+          window.clearTimeout(openTimeout);
+          clearReadyTimeout();
           if (disposed) return;
           onHandleRef.current?.(null);
           legacySocket = null;
+          if (socketTimedOut || readyTimedOut) return;
           if (!socketOpened) {
             term.write(
               '\r\n\x1b[31m[CozyPad] terminal could not open; retry manually after checking the SSH server and key.\x1b[0m\r\n',
@@ -279,6 +316,8 @@ export function TerminalView({
         });
 
         socket.addEventListener('error', () => {
+          window.clearTimeout(openTimeout);
+          clearReadyTimeout();
           term.write('\r\n\x1b[31m[CozyPad] terminal connection error\x1b[0m\r\n');
         });
       };
@@ -333,9 +372,26 @@ export function TerminalView({
       if (terminalId) void bridge.resizeTerminal({ terminalId, cols, rows });
     });
 
+    let localOpenDone = false;
+    const localOpenTimeout = window.setTimeout(() => {
+      if (disposed || localOpenDone) return;
+      localOpenDone = true;
+      term.write(
+        `\r\nfailed to open terminal: timed out after ${Math.round(
+          TERMINAL_OPEN_TIMEOUT_MS / 1000,
+        )}s\r\n`,
+      );
+    }, TERMINAL_OPEN_TIMEOUT_MS);
+
     void bridge
       .openTerminal({ profileId, cols: term.cols, rows: term.rows })
       .then((opened) => {
+        if (localOpenDone) {
+          void bridge.closeTerminal({ terminalId: opened.terminalId });
+          return;
+        }
+        localOpenDone = true;
+        window.clearTimeout(localOpenTimeout);
         if (disposed) {
           void bridge.closeTerminal({ terminalId: opened.terminalId });
           return;
@@ -354,6 +410,9 @@ export function TerminalView({
         });
       })
       .catch((error: unknown) => {
+        if (localOpenDone) return;
+        localOpenDone = true;
+        window.clearTimeout(localOpenTimeout);
         term.write(`\r\nfailed to open terminal: ${String(error)}\r\n`);
       });
 
@@ -368,6 +427,7 @@ export function TerminalView({
       dataDisposable.dispose();
       resizeDisposable.dispose();
       unsubscribes.forEach((unsubscribe) => unsubscribe());
+      window.clearTimeout(localOpenTimeout);
       if (terminalId) void bridge.closeTerminal({ terminalId });
       term.dispose();
     };

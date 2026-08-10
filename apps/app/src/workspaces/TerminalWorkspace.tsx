@@ -15,6 +15,7 @@ import {
 } from './sshServerPreference';
 
 interface TerminalWorkspaceProps {
+  active?: boolean;
   connected?: boolean;
   profileId?: string | null;
 }
@@ -41,6 +42,8 @@ const QUICK_COMMANDS: { label: string; command: string }[] = [
   { label: 'Python', command: 'python -V' },
 ];
 
+const TERMINAL_SERVER_LIST_TIMEOUT_MS = 15000;
+
 function createTerminalSessionId(serverId: string): string {
   const random =
     typeof window !== 'undefined' && window.crypto?.randomUUID
@@ -61,7 +64,18 @@ function resolveTerminalServerId(
   return resolveLastSelectedLegacyServerId(servers, currentId);
 }
 
-export function TerminalWorkspace({ connected = false, profileId = null }: TerminalWorkspaceProps) {
+function isLocalTerminalServer(server: LegacySshServer): boolean {
+  if (server.localOnly) return true;
+  if (server.source === 'system' && server.id === 'system:localhost') return true;
+  const host = String(server.host || '').trim().toLowerCase();
+  return host === 'localhost' || host === '::1' || host.startsWith('127.');
+}
+
+export function TerminalWorkspace({
+  active: workspaceActive = false,
+  connected = false,
+  profileId = null,
+}: TerminalWorkspaceProps) {
   const [servers, setServers] = useState<LegacySshServer[]>([]);
   const [selectedServerId, setSelectedServerId] = useState(() => readLastSelectedLegacyServerId());
   const [serverError, setServerError] = useState('');
@@ -80,48 +94,91 @@ export function TerminalWorkspace({ connected = false, profileId = null }: Termi
   );
   const nextId = useRef(1);
   const handles = useRef(new Map<number, TerminalHandle>());
+  const loadServersRequestRef = useRef(0);
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
     [selectedServerId, servers],
   );
+  const localServer = useMemo(
+    () =>
+      servers.find((server) => server.id === 'system:localhost') ??
+      servers.find(isLocalTerminalServer) ??
+      null,
+    [servers],
+  );
 
   const loadServers = useCallback(
     async (refresh = false) => {
+      const requestId = loadServersRequestRef.current + 1;
+      loadServersRequestRef.current = requestId;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        TERMINAL_SERVER_LIST_TIMEOUT_MS,
+      );
       setServerError('');
       try {
-        const nextServers = await listLegacyServers(refresh);
+        const nextServers = await listLegacyServers(refresh, {
+          signal: controller.signal,
+        });
+        if (loadServersRequestRef.current !== requestId) return;
         setServers(nextServers);
-        setSelectedServerId((current) =>
-          resolveTerminalServerId(nextServers, profileId, current),
-        );
+        setSelectedServerId((current) => {
+          if (!connected) {
+            return nextServers.find((server) => server.id === 'system:localhost')?.id ?? '';
+          }
+          return resolveTerminalServerId(nextServers, profileId, current);
+        });
       } catch (error) {
+        if (loadServersRequestRef.current !== requestId) return;
+        const aborted = controller.signal.aborted;
+        if (aborted) {
+          setServerError(
+            `Terminal server list timed out after ${Math.round(
+              TERMINAL_SERVER_LIST_TIMEOUT_MS / 1000,
+            )}s.`,
+          );
+          return;
+        }
         if (isLegacyAuthError(error)) {
           setServerError('請先登入 CozyPad，Terminal 才能載入已匯入 SSH server。');
         } else {
           setServerError(error instanceof Error ? error.message : 'SSH server 載入失敗');
         }
+      } finally {
+        window.clearTimeout(timeout);
       }
     },
-    [profileId],
+    [connected, profileId],
   );
 
   useEffect(() => {
-    if (!connected) {
-      setServers((current) => (current.length ? [] : current));
-      setSelectedServerId((current) => (current ? '' : current));
-      setServerError('Press Connect before opening SSH terminals.');
-      for (const tab of tabs) {
-        void closeLegacyTerminal(tab.terminalId).catch(() => undefined);
-      }
-      handles.current.clear();
-      setTabs((current) => (current.length ? [] : current));
-      setActive((current) => (current === null ? current : null));
-      return;
+    void loadServers(false);
+  }, [loadServers]);
+
+  useEffect(() => {
+    if (connected || servers.length === 0 || tabs.length === 0) return;
+
+    const localServerIds = new Set(servers.filter(isLocalTerminalServer).map((server) => server.id));
+    const remoteTabs = tabs.filter((tab) => !localServerIds.has(tab.serverId));
+    if (remoteTabs.length === 0) return;
+
+    for (const tab of remoteTabs) {
+      void closeLegacyTerminal(tab.terminalId).catch(() => undefined);
+      handles.current.delete(tab.id);
     }
 
-    void loadServers(false);
-  }, [connected, loadServers]);
+    setTabs((current) => {
+      const remaining = current.filter((tab) => localServerIds.has(tab.serverId));
+      setActive((activeId) =>
+        activeId !== null && remaining.some((tab) => tab.id === activeId)
+          ? activeId
+          : (remaining[remaining.length - 1]?.id ?? null),
+      );
+      return remaining;
+    });
+  }, [connected, servers, tabs]);
 
   useEffect(() => {
     if (!profileId || !servers.some((server) => server.id === profileId)) return;
@@ -137,23 +194,24 @@ export function TerminalWorkspace({ connected = false, profileId = null }: Termi
     [servers],
   );
 
-  const addTab = useCallback(() => {
-    if (!connected) {
-      setServerError('Press Connect before opening SSH terminals.');
+  const addTab = useCallback((serverOverride?: LegacySshServer | null) => {
+    const targetServer = serverOverride ?? selectedServer;
+    if (!targetServer) {
+      setServerError('請先選擇已匯入的 SSH server。');
       return;
     }
 
-    if (!selectedServer) {
-      setServerError('請先選擇已匯入的 SSH server。');
+    if (!connected && !isLocalTerminalServer(targetServer)) {
+      setServerError('Press Connect before opening SSH terminals.');
       return;
     }
 
     const id = nextId.current++;
     const tab: TerminalTab = {
       id,
-      terminalId: createTerminalSessionId(selectedServer.id),
-      serverId: selectedServer.id,
-      serverName: selectedServer.name,
+      terminalId: createTerminalSessionId(targetServer.id),
+      serverId: targetServer.id,
+      serverName: targetServer.name,
     };
     setTabs((current) => [...current, tab]);
     setActive(id);
@@ -161,11 +219,15 @@ export function TerminalWorkspace({ connected = false, profileId = null }: Termi
   }, [connected, selectedServer]);
 
   useEffect(() => {
-    if (!connected) return undefined;
-    const handleNewTerminal = () => addTab();
+    const handleNewTerminal = () => addTab(connected ? selectedServer : localServer);
     window.addEventListener('cozypad:terminal:new', handleNewTerminal);
     return () => window.removeEventListener('cozypad:terminal:new', handleNewTerminal);
-  }, [addTab, connected]);
+  }, [addTab, connected, localServer, selectedServer]);
+
+  useEffect(() => {
+    if (!workspaceActive || tabs.length > 0 || servers.length === 0) return;
+    addTab(connected ? selectedServer : localServer);
+  }, [addTab, connected, localServer, selectedServer, servers.length, tabs.length, workspaceActive]);
 
   const closeTab = (id: number) => {
     const tab = tabs.find((item) => item.id === id);
@@ -215,6 +277,16 @@ export function TerminalWorkspace({ connected = false, profileId = null }: Termi
             </button>
           </div>
         ))}
+        <button
+          className="tab-add"
+          type="button"
+          title="New terminal"
+          aria-label="New terminal"
+          onClick={() => addTab(connected ? selectedServer : localServer)}
+          disabled={!(connected ? selectedServer : localServer)}
+        >
+          +
+        </button>
         <span className="spacer" />
         <span className="hint terminal-hint">右鍵：有選取＝複製，無選取＝貼上</span>
         <button

@@ -416,13 +416,6 @@ export function App() {
     setWorkspace('agents');
   }, []);
 
-  const handleNewTerminal = useCallback(() => {
-    setWorkspace('terminal');
-    window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('cozypad:terminal:new'));
-    }, 0);
-  }, []);
-
   const submitCredential = async (credential: CredentialSubmission) => {
     const profile = credentialPrompt;
     if (!profile) return;
@@ -507,15 +500,6 @@ export function App() {
         >
           ⚙
         </button>
-        <button
-          className="ghost topbar-terminal-add"
-          title="新增終端"
-          aria-label="新增終端"
-          onClick={handleNewTerminal}
-          disabled={state !== 'connected' || !selectedId}
-        >
-          +
-        </button>
         <span className={`status status-${state}`}>{state}</span>
         <span className={`mode-tag${effectiveMockData ? ' mode-mock' : ' mode-ssh'}`}>
           {effectiveMockData ? 'MOCK 資料' : 'SSH'}
@@ -598,12 +582,17 @@ export function App() {
           </section>
           <section className="workspace-page" hidden={workspace !== 'terminal'}>
             <TerminalWorkspace
+              active={workspace === 'terminal'}
               connected={state === 'connected'}
               profileId={selectedId}
             />
           </section>
           <section className="workspace-page" hidden={workspace !== 'files'}>
-            <FilesWorkspace connected={state === 'connected'} profileId={selectedId} />
+            <FilesWorkspace
+              active={workspace === 'files'}
+              connected={state === 'connected'}
+              profileId={selectedId}
+            />
           </section>
           <section className="workspace-page" hidden={workspace !== 'monitor'}>
             <MonitorWorkspace
