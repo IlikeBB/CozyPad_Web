@@ -57,6 +57,7 @@ const WORK_REFRESH_EVENT = 'cozypad-research-runs-updated';
 const MAX_TASKS = 24;
 const MAX_OUTPUT_LENGTH = 120_000;
 const MAX_KEY_TEXT_LENGTH = 24_000;
+const AGENT_WS_STALE_RECONNECT_MS = 90_000;
 const AGY_MODEL_STORAGE_KEY = 'cozypad3.remoteAgy.model.v1';
 const BAILIAN_MODEL_STORAGE_KEY = 'cozypad3.remoteBailian.model.v1';
 const AGY_MODEL_FALLBACKS = [
@@ -589,6 +590,7 @@ export function LegacyAgyPanel({
   const keyInputRef = useRef<HTMLInputElement | null>(null);
   const tasksRef = useRef<AgentTask[]>(tasks);
   const socketsRef = useRef(new Map<string, WebSocket>());
+  const socketActivityRef = useRef(new Map<string, number>());
   const completedSocketTaskIdsRef = useRef(new Set<string>());
   const replaceNextVisibleTextRef = useRef(new Set<string>());
   const awaitingRunStartRef = useRef(new Set<string>());
@@ -635,6 +637,7 @@ export function LegacyAgyPanel({
       socket.close();
     }
     socketsRef.current.clear();
+    socketActivityRef.current.clear();
     completedSocketTaskIdsRef.current.clear();
     replaceNextVisibleTextRef.current.clear();
     awaitingRunStartRef.current.clear();
@@ -671,6 +674,7 @@ export function LegacyAgyPanel({
         socket.close();
       }
       socketsRef.current.clear();
+      socketActivityRef.current.clear();
       completedSocketTaskIdsRef.current.clear();
       replaceNextVisibleTextRef.current.clear();
       awaitingRunStartRef.current.clear();
@@ -814,9 +818,11 @@ export function LegacyAgyPanel({
       suppressReplay: Boolean(payload),
     });
     socketsRef.current.set(task.id, socket);
+    socketActivityRef.current.set(task.id, Date.now());
     updateTask(task.id, (current) => ({ ...current, connected: false }));
 
     socket.addEventListener('open', () => {
+      socketActivityRef.current.set(task.id, Date.now());
       updateTask(task.id, (current) => ({ ...current, connected: true }));
       if (!payload) return;
       socket.send(
@@ -830,6 +836,7 @@ export function LegacyAgyPanel({
       );
     });
     socket.addEventListener('message', (event) => {
+      socketActivityRef.current.set(task.id, Date.now());
       const text = String(event.data || '');
       const lower = text.toLowerCase();
       const startSignal = lower.includes('[cozypad] remote agy starting');
@@ -977,9 +984,9 @@ export function LegacyAgyPanel({
       }
     });
     socket.addEventListener('close', () => {
-      if (socketsRef.current.get(task.id) === socket) {
-        socketsRef.current.delete(task.id);
-      }
+      if (socketsRef.current.get(task.id) !== socket) return;
+      socketsRef.current.delete(task.id);
+      socketActivityRef.current.delete(task.id);
       updateTask(task.id, (current) =>
         current.running && !completedSocketTaskIdsRef.current.has(task.id)
           ? {
@@ -1059,15 +1066,18 @@ export function LegacyAgyPanel({
       suppressReplay: Boolean(payload),
     });
     socketsRef.current.set(task.id, socket);
+    socketActivityRef.current.set(task.id, Date.now());
     updateTask(task.id, (current) => ({ ...current, connected: false }));
 
     socket.addEventListener('open', () => {
+      socketActivityRef.current.set(task.id, Date.now());
       updateTask(task.id, (current) => ({ ...current, connected: true }));
       if (!payload) return;
       socket.send(serializedPayload);
     });
 
     socket.addEventListener('message', (event) => {
+      socketActivityRef.current.set(task.id, Date.now());
       const text = String(event.data || '');
       const lower = text.toLowerCase();
       const startSignal = lower.includes('[cozypad] remote bailian starting');
@@ -1217,9 +1227,9 @@ export function LegacyAgyPanel({
     });
 
     socket.addEventListener('close', () => {
-      if (socketsRef.current.get(task.id) === socket) {
-        socketsRef.current.delete(task.id);
-      }
+      if (socketsRef.current.get(task.id) !== socket) return;
+      socketsRef.current.delete(task.id);
+      socketActivityRef.current.delete(task.id);
       updateTask(task.id, (current) =>
         current.running && !completedSocketTaskIdsRef.current.has(task.id)
           ? {
@@ -1239,6 +1249,49 @@ export function LegacyAgyPanel({
       }
     });
   }, [connected, legacyServer, updateTask]);
+
+  useEffect(() => {
+    if ((agentName !== 'agy' && agentName !== 'bailian') || !connected || !legacyServer?.id) return;
+
+    const refreshStaleStreams = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      for (const task of tasksRef.current) {
+        if (task.profileId !== legacyServer.id || task.status !== 'running' || !task.running) continue;
+        const socket = socketsRef.current.get(task.id);
+        const lastActivity = socketActivityRef.current.get(task.id) ?? 0;
+        const socketIsStale =
+          socket &&
+          (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) &&
+          now - lastActivity > AGENT_WS_STALE_RECONNECT_MS;
+        if (socketIsStale) {
+          try {
+            socket.close();
+          } catch {
+            // Browser WebSocket close can fail if the socket is already closed.
+          }
+          socketsRef.current.delete(task.id);
+          socketActivityRef.current.delete(task.id);
+        }
+        if (!socket || socketIsStale) {
+          if (agentName === 'agy') {
+            connectAgyTask(task);
+          } else {
+            connectBailianTask(task);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('focus', refreshStaleStreams);
+    window.addEventListener('pageshow', refreshStaleStreams);
+    document.addEventListener('visibilitychange', refreshStaleStreams);
+    return () => {
+      window.removeEventListener('focus', refreshStaleStreams);
+      window.removeEventListener('pageshow', refreshStaleStreams);
+      document.removeEventListener('visibilitychange', refreshStaleStreams);
+    };
+  }, [agentName, connectAgyTask, connectBailianTask, connected, legacyServer?.id]);
 
   useEffect(() => {
     if ((agentName !== 'agy' && agentName !== 'bailian') || !connected || !legacyServer?.id) return;

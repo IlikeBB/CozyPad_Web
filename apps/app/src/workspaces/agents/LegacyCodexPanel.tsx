@@ -54,6 +54,7 @@ const MAX_IMAGE_DIMENSION = 1800;
 const CODEX_WS_RECONNECT_BASE_MS = 1_500;
 const CODEX_WS_RECONNECT_MAX_MS = 15_000;
 const CODEX_WS_RECONNECT_MAX_ATTEMPTS = 2;
+const CODEX_WS_STALE_RECONNECT_MS = 90_000;
 const CODEX_MODEL_FALLBACKS = [
   'gpt-5.6-sol',
   'gpt-5.6-terra',
@@ -1594,6 +1595,7 @@ export function LegacyCodexPanel({
     () => readStoredCodexReasoningEffort(),
   );
   const socketsRef = useRef(new Map<string, WebSocket>());
+  const socketActivityRef = useRef(new Map<string, number>());
   const queuedSocketPayloadsRef = useRef(new Map<string, SendPayload[]>());
   const reconnectTimersRef = useRef(new Map<string, number>());
   const reconnectAttemptsRef = useRef(new Map<string, number>());
@@ -1807,6 +1809,7 @@ export function LegacyCodexPanel({
         socket.close();
       }
       socketsRef.current.clear();
+      socketActivityRef.current.clear();
       for (const timer of reconnectTimersRef.current.values()) {
         clearTimeout(timer);
       }
@@ -1851,6 +1854,7 @@ export function LegacyCodexPanel({
       socket.close();
     }
     socketsRef.current.clear();
+    socketActivityRef.current.clear();
     for (const timer of reconnectTimersRef.current.values()) {
       clearTimeout(timer);
     }
@@ -1973,6 +1977,7 @@ export function LegacyCodexPanel({
       const socket = new WebSocket(url.toString());
       let pendingPayload = payload;
       socketsRef.current.set(task.id, socket);
+      socketActivityRef.current.set(task.id, Date.now());
       updateTask(task.id, (current) => ({ ...current, connected: false }));
 
       const scheduleReconnect = () => {
@@ -2032,6 +2037,7 @@ export function LegacyCodexPanel({
       };
 
       socket.addEventListener('open', () => {
+        socketActivityRef.current.set(task.id, Date.now());
         reconnectAttemptsRef.current.delete(task.id);
         updateTask(task.id, (current) => ({ ...current, connected: true }));
         setHelperError((current) =>
@@ -2046,6 +2052,7 @@ export function LegacyCodexPanel({
         }
       });
       socket.addEventListener('message', (event) => {
+        socketActivityRef.current.set(task.id, Date.now());
         const text = String(event.data || '');
         const rawNormalized = normalizeOutput(text);
         const cwdUpdate = extractCodexCwdUpdate(text);
@@ -2081,6 +2088,7 @@ export function LegacyCodexPanel({
       socket.addEventListener('close', () => {
         if (socketsRef.current.get(task.id) !== socket) return;
         socketsRef.current.delete(task.id);
+        socketActivityRef.current.delete(task.id);
         updateTask(task.id, (current) => ({ ...current, connected: false }));
         scheduleReconnect();
       });
@@ -2100,6 +2108,47 @@ export function LegacyCodexPanel({
     },
     [connected, legacyServer, updateTask],
   );
+
+  useEffect(() => {
+    if (!connected || !legacyServer?.id) return;
+
+    const refreshStaleStreams = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      for (const task of tasksRef.current) {
+        if (task.profileId !== legacyServer.id || task.status !== 'running' || !task.running || !task.historyId) {
+          continue;
+        }
+        const socket = socketsRef.current.get(task.id);
+        const lastActivity = socketActivityRef.current.get(task.id) ?? 0;
+        const socketIsStale =
+          socket &&
+          (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) &&
+          now - lastActivity > CODEX_WS_STALE_RECONNECT_MS;
+        if (socketIsStale) {
+          try {
+            socket.close();
+          } catch {
+            // Browser WebSocket close can fail if the socket is already closed.
+          }
+          socketsRef.current.delete(task.id);
+          socketActivityRef.current.delete(task.id);
+        }
+        if (!socket || socketIsStale) {
+          connectTask(task);
+        }
+      }
+    };
+
+    window.addEventListener('focus', refreshStaleStreams);
+    window.addEventListener('pageshow', refreshStaleStreams);
+    document.addEventListener('visibilitychange', refreshStaleStreams);
+    return () => {
+      window.removeEventListener('focus', refreshStaleStreams);
+      window.removeEventListener('pageshow', refreshStaleStreams);
+      document.removeEventListener('visibilitychange', refreshStaleStreams);
+    };
+  }, [connectTask, connected, legacyServer?.id]);
 
   const connectExistingTask = async (task: CodexTask) => {
     if (task.status !== 'running') {

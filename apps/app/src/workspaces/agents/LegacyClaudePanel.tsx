@@ -24,6 +24,7 @@ const CLAUDE_MODEL_STORAGE_KEY = 'cozypad3.remoteClaude.model.v1';
 const WORK_REFRESH_EVENT = 'cozypad-research-runs-updated';
 const MAX_TASKS = 24;
 const MAX_OUTPUT_LENGTH = 120_000;
+const CLAUDE_WS_STALE_RECONNECT_MS = 90_000;
 const CLAUDE_MODEL_FALLBACKS = [
   'opus',
   'sonnet',
@@ -477,6 +478,7 @@ export function LegacyClaudePanel({
   );
   const tasksRef = useRef<ClaudeTask[]>(tasks);
   const socketsRef = useRef(new Map<string, WebSocket>());
+  const socketActivityRef = useRef(new Map<string, number>());
   const completedSocketTaskIdsRef = useRef(new Set<string>());
   const replaceNextVisibleTextRef = useRef(new Set<string>());
   const awaitingRunStartRef = useRef(new Set<string>());
@@ -519,6 +521,7 @@ export function LegacyClaudePanel({
         socket.close();
       }
       socketsRef.current.clear();
+      socketActivityRef.current.clear();
       completedSocketTaskIdsRef.current.clear();
       replaceNextVisibleTextRef.current.clear();
       awaitingRunStartRef.current.clear();
@@ -658,9 +661,11 @@ export function LegacyClaudePanel({
       suppressReplay: Boolean(payload),
     });
     socketsRef.current.set(task.id, socket);
+    socketActivityRef.current.set(task.id, Date.now());
     updateTask(task.id, (current) => ({ ...current, connected: false }));
 
     socket.addEventListener('open', () => {
+      socketActivityRef.current.set(task.id, Date.now());
       updateTask(task.id, (current) => ({ ...current, connected: true }));
       if (!payload) return;
       socket.send(
@@ -675,6 +680,7 @@ export function LegacyClaudePanel({
       );
     });
     socket.addEventListener('message', (event) => {
+      socketActivityRef.current.set(task.id, Date.now());
       const text = String(event.data || '');
       const lower = text.toLowerCase();
       const startSignal = lower.includes('[cozypad] remote claude starting');
@@ -815,9 +821,9 @@ export function LegacyClaudePanel({
       }
     });
     socket.addEventListener('close', () => {
-      if (socketsRef.current.get(task.id) === socket) {
-        socketsRef.current.delete(task.id);
-      }
+      if (socketsRef.current.get(task.id) !== socket) return;
+      socketsRef.current.delete(task.id);
+      socketActivityRef.current.delete(task.id);
       updateTask(task.id, (current) =>
         current.running && !completedSocketTaskIdsRef.current.has(task.id)
           ? {
@@ -837,6 +843,45 @@ export function LegacyClaudePanel({
       }
     });
   }, [connected, legacyServer, updateTask]);
+
+  useEffect(() => {
+    if (!connected || !legacyServer?.id) return;
+
+    const refreshStaleStreams = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      for (const task of tasksRef.current) {
+        if (task.profileId !== legacyServer.id || task.status !== 'running' || !task.running) continue;
+        const socket = socketsRef.current.get(task.id);
+        const lastActivity = socketActivityRef.current.get(task.id) ?? 0;
+        const socketIsStale =
+          socket &&
+          (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) &&
+          now - lastActivity > CLAUDE_WS_STALE_RECONNECT_MS;
+        if (socketIsStale) {
+          try {
+            socket.close();
+          } catch {
+            // Browser WebSocket close can fail if the socket is already closed.
+          }
+          socketsRef.current.delete(task.id);
+          socketActivityRef.current.delete(task.id);
+        }
+        if (!socket || socketIsStale) {
+          connectTask(task);
+        }
+      }
+    };
+
+    window.addEventListener('focus', refreshStaleStreams);
+    window.addEventListener('pageshow', refreshStaleStreams);
+    document.addEventListener('visibilitychange', refreshStaleStreams);
+    return () => {
+      window.removeEventListener('focus', refreshStaleStreams);
+      window.removeEventListener('pageshow', refreshStaleStreams);
+      document.removeEventListener('visibilitychange', refreshStaleStreams);
+    };
+  }, [connectTask, connected, legacyServer?.id]);
 
   useEffect(() => {
     if (!connected || !legacyServer?.id) return;

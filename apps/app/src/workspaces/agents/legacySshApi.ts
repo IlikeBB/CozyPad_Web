@@ -30,6 +30,8 @@ const RESEARCH_RPC_PREFIX = '/cozypad-rpc/research';
 const AGENT_API_PREFIX = '/cozypad-agent';
 const AGENT_RPC_PREFIX = '/cozypad-rpc/ssh';
 const LEGACY_API_SAFE_RETRY_DELAYS_MS = [600, 1600, 3200];
+const LEGACY_API_DEFAULT_TIMEOUT_MS = 45_000;
+const LEGACY_API_SAFE_TIMEOUT_MS = 30_000;
 
 export type LegacySshServer = {
   id: string;
@@ -676,6 +678,13 @@ function localLegacyApiUrl(path: string): string | null {
 
 function createLegacyNetworkError(error: unknown): LegacyApiError {
   const detail = error instanceof Error && error.message ? error.message : String(error || '');
+  const name = error instanceof Error ? error.name : '';
+  if (/AbortError|TimeoutError/i.test(name) || /timed out|timeout/i.test(detail)) {
+    return new LegacyApiError(
+      0,
+      'CozyPad API request timed out. Please retry; if the page was idle, CozyPad will refresh stale connections automatically.',
+    );
+  }
   return new LegacyApiError(
     0,
     detail === 'Failed to fetch'
@@ -687,6 +696,32 @@ function createLegacyNetworkError(error: unknown): LegacyApiError {
 function isSafeLegacyApiMethod(init?: RequestInit): boolean {
   const method = String(init?.method || 'GET').trim().toUpperCase();
   return method === 'GET' || method === 'HEAD';
+}
+
+function legacyApiTimeoutMs(init?: RequestInit): number {
+  if (init?.signal) return 0;
+  return isSafeLegacyApiMethod(init) ? LEGACY_API_SAFE_TIMEOUT_MS : LEGACY_API_DEFAULT_TIMEOUT_MS;
+}
+
+function withLegacyApiTimeout(init?: RequestInit): {
+  init?: RequestInit;
+  cleanup: () => void;
+} {
+  const timeoutMs = legacyApiTimeoutMs(init);
+  if (timeoutMs <= 0) {
+    return { init, cleanup: () => undefined };
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(
+    () => controller.abort(new DOMException(`CozyPad API request timed out after ${timeoutMs}ms`, 'TimeoutError')),
+    timeoutMs,
+  );
+
+  return {
+    init: { ...init, signal: controller.signal },
+    cleanup: () => window.clearTimeout(timer),
+  };
 }
 
 function isRetryableLegacyApiError(error: unknown): boolean {
@@ -745,21 +780,24 @@ async function readLegacyApiResponse<T>(response: Response): Promise<T> {
 
 async function fetchLegacyApi(path: string, init?: RequestInit, extraHeaders: Record<string, string> = {}) {
   let response: Response;
+  const request = withLegacyApiTimeout(init);
   try {
     response = await fetch(path, {
-      ...init,
+      ...request.init,
       credentials: 'include',
       headers: {
         'x-cozypad-request': 'app',
-        ...(init?.body && !(init.body instanceof FormData)
+        ...(request.init?.body && !(request.init.body instanceof FormData)
           ? { 'content-type': 'application/json' }
           : {}),
-        ...init?.headers,
+        ...request.init?.headers,
         ...extraHeaders,
       },
     });
   } catch (error) {
     throw createLegacyNetworkError(error);
+  } finally {
+    request.cleanup();
   }
 
   return response;

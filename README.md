@@ -1,19 +1,31 @@
-# CozyPad Web
+<h1 align="center">CozyPad Web</h1>
 
-CozyPad Web is a remote research workspace for SSH terminals, agent conversations,
-file browsing, experiment diagrams, device monitoring, and public service checks.
+<p align="center">
+  Remote research workspace for SSH terminals, agent conversations, file browsing,
+  experiment diagrams, device monitoring, and public service checks.
+</p>
 
-CozyPad Web 是一套面向遠端研究與開發工作的管理介面，整合 SSH 終端、
-Agent 對話、檔案瀏覽、實驗流程圖、裝置監控與公開服務狀態檢查。
+<p align="center">
+  遠端研究與開發工作介面，整合 SSH 終端、Agent 對話、檔案瀏覽、實驗流程圖、
+  裝置監控與公開服務狀態檢查。
+</p>
 
-![CozyPad Agents](docs/screenshots/feature-agents.png)
+<p align="center">
+  <a href="#中文說明"><kbd>繁體中文</kbd></a>
+  &nbsp;
+  <a href="#english-guide"><kbd>English</kbd></a>
+</p>
 
-| Area | Status |
-| --- | --- |
-| Remote agents | Codex / agy / baillian |
-| Remote files | Folder browsing, file preview, path deep-link |
-| Research workflow | Diagram, node feedback, MD.md, Start Training |
-| Runtime target | SSH server first, localhost when selected |
+<p align="center">
+  <img alt="CozyPad Agents" src="docs/screenshots/feature-agents.png">
+</p>
+
+<p align="center">
+  <strong>Remote agents</strong> · Codex / agy / baillian<br>
+  <strong>Remote files</strong> · folder browsing / preview / path deep-link<br>
+  <strong>Research workflow</strong> · Diagram / node feedback / MD.md / Start Training<br>
+  <strong>Runtime target</strong> · SSH server first, localhost when selected
+</p>
 
 ---
 
@@ -211,6 +223,7 @@ pnpm --filter @cozypad/desktop package
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-13 | 修正 Web 閒置或切換分頁後失去響應的問題：API request 增加 timeout，Codex、agy、baillian、Claude running task 會在頁面重新聚焦時偵測 stale WebSocket 並接回同一個任務。 |
 | 2026-08-13 | Agent 回覆中的遠端路徑全面支援 File 超連結，涵蓋 Markdown、inline code、一般文字與工具/status 泡泡。 |
 | 2026-08-13 | 對話框新增 agent 產生圖片路徑預覽；點選圖片路徑會切到 File 並預覽該檔案。 |
 | 2026-08-13 | Files 修正從 agent 深層連結開啟檔案時誤當資料夾瀏覽造成 502 的問題，現在會開父資料夾並預覽檔案。 |
@@ -408,6 +421,7 @@ pnpm --filter @cozypad/desktop package
 
 | Date | Update |
 | --- | --- |
+| 2026-08-13 | Fixed idle/page-switch stalls: API requests now have timeout guards, and Codex, agy, baillian, and Claude running tasks detect stale WebSockets on focus and reattach to the same task. |
 | 2026-08-13 | Remote paths in agent replies now open File links across Markdown, inline code, plain text, and tool/status bubbles. |
 | 2026-08-13 | Chat now previews agent-generated image paths and can jump from the preview to the File workspace. |
 | 2026-08-13 | Fixed File deep-link behavior for file paths from agents: files now open through their parent folder and preview pane instead of being browsed as folders. |
