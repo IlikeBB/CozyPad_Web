@@ -17,16 +17,11 @@ Agent 對話、檔案瀏覽、實驗流程圖、裝置監控與公開服務狀�
 
 ---
 
-## Language
-
-| Version | Link |
-| --- | --- |
-| 繁體中文 | [中文說明](#中文說明) |
-| English | [English Guide](#english-guide) |
-
----
-
 # 中文說明
+
+<p align="right">
+  <a href="#english-guide"><kbd>English Guide →</kbd></a>
+</p>
 
 ## 專案定位
 
@@ -237,6 +232,10 @@ pnpm --filter @cozypad/desktop package
 ---
 
 # English Guide
+
+<p align="right">
+  <a href="#中文說明"><kbd>← 繁體中文</kbd></a>
+</p>
 
 ## Overview
 
