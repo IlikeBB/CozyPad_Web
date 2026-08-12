@@ -33,15 +33,21 @@ CozyPad4 是基於 CozyPad-0.2.9-alpha 持續演進的遠端工作站介面，�
 | 2026-08-11 | 準備 CozyPad beta release：清理不必要的大型檔案與 log，保留公開文件、安裝說明與核心 Web 應用程式；將新版內容整理到 main 分支。 |
 | 2026-08-12 | 穩定化 workspace 互動：Research 重置流程圖改為清空目前 tab；Terminal 避免未連線時自動啟動遠端 SSH；Codex / agy / Bailian 新增右鍵編輯已送出訊息，採用「停止目前 CLI 任務後重新執行」的安全流程。 |
 
-## 主要功能
+## 現在能用的功能
 
-| 功能區 | 目前方向 | 重點 |
+| 功能區 | 目前狀態 | 重點 |
 | --- | --- | --- |
-| SSH workspace | 遠端終端與 server 管理 | 支援多台 SSH server、server 下拉選擇、連線狀態顯示與常用指令。 |
-| Files | 遠端檔案瀏覽 | 參考 v1 file viewer，可瀏覽 server 檔案，並用彈出式視窗預覽文字、Markdown、PDF、圖片。 |
-| Monitor | 系統管理預覽 | 顯示可連線伺服器的 CPU、RAM、Disk、GPU 等狀態，避免無限制重複 SSH 嘗試。 |
-| Agents | Claude / Codex / agy 對話 | 採用類似 Claude 的 session list、對話 timeline、工具卡片、diff 區塊與底部輸入列。 |
-| Security | 帳號密碼與 2FA | CozyPad 自己保留帳密與 TOTP 2FA，並建議前層搭配 Cloudflare Access。 |
+| SSH server 管理 | 可用 | 新增、刪除、下拉選擇 server；支援 localhost 與遠端 SSH profile；已連線 server 可供 Agents / Terminal / Files / Monitor 共用。 |
+| Terminal | 可用 | xterm.js 多分頁終端、常用指令面板、右鍵複製貼上、手機 Termux 式按鍵列；未按 Connect 時不會自動啟動遠端 SSH。 |
+| Files | 可用 | 遠端資料夾瀏覽、上一層導覽、右鍵刪除／重新命名、空白處新增資料夾、複製路徑；支援文字、Markdown、PDF、圖片與影音檔案預覽。 |
+| Agents | 可用 | Codex、agy、Bailian 遠端任務介面；支援工作清單、Markdown 對話、工具／狀態泡泡、Stop、右鍵編輯已送出訊息並停止後重新執行。 |
+| Research Lab | 可用 | 多 flowchart tab、可拖曳 node、綠色方向連線、右鍵新增 node、點 node 查看 Markdown；支援 agent draw、節點回饋、分析 Diagram、Start Training 與 Work 任務串接。 |
+| Work | 可用 | 顯示 Research / Agents 建立的任務狀態，可從 run 連回對應任務，刪除後會清掉舊紀錄。 |
+| device Monitor | 可用 | 以 SSH live monitor 讀取 server CPU、RAM、Disk、GPU / GPU process 狀態，支援 pause、refresh、real time 與 online server drawer。 |
+| Public / domain 工具 | 可用 | Cloudflare / DDNS 狀態檢查、API / tunnel / public URL health 顯示，輔助判斷 403、502、1033 等對外連線問題。 |
+| 安全流程 | 可用 | CozyPad 帳密 + TOTP 2FA、Cloudflare edge/security fallback、危險操作二次確認、避免 SSH 失敗後自動狂重試。 |
+
+> Claude 相關服務目前已隱藏／暫停，不列入目前可用功能清單。
 
 ## 安裝教學
 

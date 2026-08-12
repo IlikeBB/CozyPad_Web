@@ -41,14 +41,17 @@ app、斷線、換裝置，工作都不會中斷。
 
 | 功能 | 狀態 |
 | --- | --- |
-| SSH 連線管理（密碼／SSH Key、OS 安全儲存、host key 驗證、斷線自動重連） | ✅ |
-| 多分頁終端機（xterm.js、右鍵複製貼上、常用指令面板、手機 Termux 式按鍵列） | ✅ |
-| 遠端檔案：類型圖示、symlink 跳轉、任意路徑導覽、下載保留原始檔名、右鍵／長按選單、兩段式複製搬移 | ✅ |
-| 檔案編輯：Monaco（VS Code 引擎）語法高亮、Ctrl+S 直接存回遠端；Markdown 預覽；PDF 內嵌檢視 | ✅ |
-| 監控：CPU／記憶體／GPU 與 GPU processes，每 5 秒更新 | ✅ |
-| 遠端設定：tmux 滑鼠模式開關；tmux 缺失時一鍵使用者層級安裝 | ✅ |
-| Agents 對話（Claude / Codex / agy） | 🚧 架構與 parser 完成，接線中 |
-| Research Lab（實驗管理） | 🚧 UI 雛形 |
+| SSH server 管理：新增、刪除、下拉選擇 server；支援 localhost 與遠端 SSH profile；已連線 server 可供 Agents / Terminal / Files / Monitor 共用。 | ✅ |
+| Terminal：xterm.js 多分頁終端、常用指令面板、右鍵複製貼上、手機 Termux 式按鍵列；未按 Connect 時不會自動啟動遠端 SSH。 | ✅ |
+| Files：遠端資料夾瀏覽、上一層導覽、右鍵刪除／重新命名、空白處新增資料夾、複製路徑；支援文字、Markdown、PDF、圖片與影音檔案預覽。 | ✅ |
+| Agents：Codex、agy、Bailian 遠端任務介面；支援工作清單、Markdown 對話、工具／狀態泡泡、Stop、右鍵編輯已送出訊息並停止後重新執行。 | ✅ |
+| Research Lab：多 flowchart tab、可拖曳 node、綠色方向連線、右鍵新增 node、點 node 查看 Markdown；支援 agent draw、節點回饋、分析 Diagram、Start Training 與 Work 任務串接。 | ✅ |
+| Work：顯示 Research / Agents 建立的任務狀態，可從 run 連回對應任務，刪除後會清掉舊紀錄。 | ✅ |
+| device Monitor：以 SSH live monitor 讀取 server CPU、RAM、Disk、GPU / GPU process 狀態，支援 pause、refresh、real time 與 online server drawer。 | ✅ |
+| Public / domain 工具：Cloudflare / DDNS 狀態檢查、API / tunnel / public URL health 顯示，輔助判斷 403、502、1033 等對外連線問題。 | ✅ |
+| 安全流程：CozyPad 帳密 + TOTP 2FA、Cloudflare edge/security fallback、危險操作二次確認、避免 SSH 失敗後自動狂重試。 | ✅ |
+
+> Claude 相關服務目前已隱藏／暫停，不列入目前可用功能清單。
 
 ## 安裝教學
 
