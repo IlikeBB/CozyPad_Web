@@ -7912,6 +7912,8 @@ items = []
 try:
     with os.scandir(root) as iterator:
         for entry in iterator:
+            if len(items) > max_items:
+                break
             try:
                 info = entry.stat(follow_symlinks=False)
                 mode = info.st_mode

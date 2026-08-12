@@ -8,9 +8,10 @@ import {
   normalizeMarkdownMath,
 } from '../../components/markdownPlugins';
 import {
+  AgentImagePreviewStrip,
   createMarkdownComponents,
+  renderInlineRemotePathLinks,
   linkifyRemotePathLines,
-  markdownComponents,
 } from '../../components/markdownComponents';
 
 interface ChatTimelineProps {
@@ -297,7 +298,12 @@ function parseAssistantSections(text: string): AssistantSection[] {
   return sections;
 }
 
-function renderAssistantStatusCard(section: Extract<AssistantSection, { kind: 'meta' | 'tool' | 'status' }>, index: number) {
+function renderAssistantStatusCard(
+  section: Extract<AssistantSection, { kind: 'meta' | 'tool' | 'status' }>,
+  index: number,
+  serverId: string,
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void,
+) {
   return (
     <details
       className={`legacy-codex-card legacy-codex-card-${section.kind} agent-processing-card`}
@@ -310,7 +316,19 @@ function renderAssistantStatusCard(section: Extract<AssistantSection, { kind: 'm
         <span className="legacy-codex-card-title">{section.title}</span>
         <span className="legacy-codex-card-lines">{lineCount(section.text)} lines</span>
       </summary>
-      <pre>{section.text}</pre>
+      <pre>
+        {section.text.split('\n').map((line, lineIndex) => (
+          <span className="legacy-codex-line" key={`${lineIndex}-${line.slice(0, 20)}`}>
+            {renderInlineRemotePathLinks(line, serverId, onOpenFilesPath)}
+          </span>
+        ))}
+      </pre>
+      <AgentImagePreviewStrip
+        maxImages={8}
+        onOpenFilesPath={onOpenFilesPath}
+        serverId={serverId}
+        text={section.text}
+      />
     </details>
   );
 }
@@ -324,12 +342,21 @@ function renderMarkdownMessage(
   return (
     <div className={`markdown legacy-codex-markdown ${className}`}>
       <Markdown
-        components={onOpenFilesPath ? createMarkdownComponents(onOpenFilesPath) : markdownComponents}
+        components={
+          onOpenFilesPath
+            ? createMarkdownComponents(onOpenFilesPath, { serverId })
+            : createMarkdownComponents(undefined, { serverId })
+        }
         remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={markdownRehypePlugins}
       >
         {normalizeMarkdownMath(linkifyRemotePathLines(text, serverId))}
       </Markdown>
+      <AgentImagePreviewStrip
+        onOpenFilesPath={onOpenFilesPath}
+        serverId={serverId}
+        text={text}
+      />
     </div>
   );
 }
@@ -347,7 +374,7 @@ function renderAssistantBody(
             {renderMarkdownMessage(section.text, serverId, 'agent-text-markdown', onOpenFilesPath)}
           </div>
         ) : (
-          renderAssistantStatusCard(section, index)
+          renderAssistantStatusCard(section, index, serverId, onOpenFilesPath)
         ),
       )}
     </div>

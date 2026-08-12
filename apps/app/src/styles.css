@@ -1661,6 +1661,83 @@ button.danger:hover {
   color: #d1fae5;
 }
 
+.agent-inline-image-path {
+  display: block;
+  margin: 8px 0 10px;
+}
+
+.agent-inline-image-path > a[href^='#cozypad-file'] {
+  margin-bottom: 7px;
+}
+
+.agent-image-preview-strip {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.agent-image-preview {
+  display: block;
+  max-width: min(720px, 100%);
+  margin: 10px 0;
+  padding: 8px;
+  border: 1px solid rgba(134, 239, 172, 0.2);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(8, 20, 16, 0.92), rgba(3, 10, 8, 0.96)),
+    repeating-linear-gradient(45deg, rgba(134, 239, 172, 0.04) 0 8px, transparent 8px 16px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+}
+
+.agent-image-preview-open {
+  display: grid;
+  width: 100%;
+  min-height: 120px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(134, 239, 172, 0.16);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.agent-image-preview a {
+  display: block;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.agent-image-preview img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: min(520px, 58vh);
+  margin: 0 auto;
+  object-fit: contain;
+}
+
+.agent-image-preview-caption {
+  display: block;
+  margin-top: 7px;
+  color: rgba(209, 250, 229, 0.72);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.agent-image-preview-placeholder,
+.agent-image-preview-error {
+  padding: 18px;
+  color: rgba(209, 250, 229, 0.68);
+  font-size: 12px;
+}
+
+.agent-image-preview-error {
+  color: #fecaca;
+}
+
 .legacy-codex-path-link {
   display: inline-flex;
   align-items: center;

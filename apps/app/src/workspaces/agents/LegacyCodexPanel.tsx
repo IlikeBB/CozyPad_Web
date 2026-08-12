@@ -7,11 +7,11 @@ import {
   normalizeMarkdownMath,
 } from '../../components/markdownPlugins';
 import {
+  AgentImagePreviewStrip,
   createMarkdownComponents,
   dispatchOpenFilePath,
   filePathLinkDataset,
   linkifyRemotePathLines,
-  markdownComponents,
 } from '../../components/markdownComponents';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
@@ -1004,13 +1004,6 @@ function renderFilePathAnchor(
   );
 }
 
-function extractExactRemotePath(text: string): string {
-  const trimmed = normalizeOutput(text).trim();
-  if (!trimmed || trimmed.includes('\n')) return '';
-  const match = trimmed.match(INLINE_REMOTE_PATH_PATTERN);
-  return match?.[0] === trimmed ? trimmed : '';
-}
-
 function renderDialogueText(
   block: CodexDialogueBlock,
   serverId = '',
@@ -1358,24 +1351,24 @@ function renderMarkdownText(
   serverId = '',
   onOpenFilesPath?: OpenFilesPathHandler,
 ) {
-  const exactPath = serverId.trim() ? extractExactRemotePath(text) : '';
-  if (exactPath) {
-    return (
-      <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
-        {renderFilePathAnchor(exactPath, serverId, undefined, onOpenFilesPath)}
-      </div>
-    );
-  }
-
   return (
     <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
       <Markdown
-        components={onOpenFilesPath ? createMarkdownComponents(onOpenFilesPath) : markdownComponents}
+        components={
+          onOpenFilesPath
+            ? createMarkdownComponents(onOpenFilesPath, { serverId })
+            : createMarkdownComponents(undefined, { serverId })
+        }
         remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={markdownRehypePlugins}
       >
         {normalizeMarkdownMath(linkifyRemotePathLines(normalizeOutput(text), serverId))}
       </Markdown>
+      <AgentImagePreviewStrip
+        onOpenFilesPath={onOpenFilesPath}
+        serverId={serverId}
+        text={normalizeOutput(text)}
+      />
     </div>
   );
 }
@@ -1479,6 +1472,12 @@ function renderCollapsibleSection(
         <span className="legacy-codex-card-lines">{lines} lines</span>
       </summary>
       <pre>{renderPreLines(section.text, true, serverId, onOpenFilesPath)}</pre>
+      <AgentImagePreviewStrip
+        maxImages={8}
+        onOpenFilesPath={onOpenFilesPath}
+        serverId={serverId}
+        text={section.text}
+      />
     </details>
   );
 }

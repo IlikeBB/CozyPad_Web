@@ -134,6 +134,33 @@ function parentOf(path: string): string {
   return index <= 0 ? '/' : path.slice(0, index);
 }
 
+function nameOfPath(path: string): string {
+  const clean = path.split(/[?#]/, 1)[0]?.replace(/\/+$/, '') || '';
+  if (!clean || clean === '/') return clean || '/';
+  const index = clean.lastIndexOf('/');
+  return index >= 0 ? clean.slice(index + 1) : clean;
+}
+
+function isLikelyRemoteFilePath(path: string): boolean {
+  const name = nameOfPath(path);
+  if (!name || name === '/' || name === '~') return false;
+  if (path.trim().endsWith('/')) return false;
+  if (name.startsWith('.') && !name.includes('.', 1)) return false;
+  return name.includes('.');
+}
+
+function legacyFileItemFromPath(path: string): LegacySshFileItem {
+  return {
+    name: nameOfPath(path),
+    path,
+    type: 'file',
+    isDirectory: false,
+    size: 0,
+    mtime: 0,
+    mode: '',
+  };
+}
+
 function isMouseBackButton(event: MouseEvent): boolean {
   return event.button === 3;
 }
@@ -216,7 +243,7 @@ const emptyLegacyFilePreview: LegacyFilePreviewState = {
   error: '',
 };
 
-const FILE_LIST_TIMEOUT_MS = 20000;
+const FILE_LIST_TIMEOUT_MS = 35000;
 
 function formatLegacyFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -519,22 +546,75 @@ function LegacyServerFilesWorkspace({
       } catch (error) {
         if (loadFilesRequestRef.current !== requestId) return;
         const aborted = controller.signal.aborted;
+        const message = aborted
+          ? `File listing timed out after ${Math.round(FILE_LIST_TIMEOUT_MS / 1000)}s.`
+          : error instanceof Error
+            ? error.message
+            : '檔案列表載入失敗';
         if (aborted) {
-          setLegacyActionError(
-            `File listing timed out after ${Math.round(FILE_LIST_TIMEOUT_MS / 1000)}s.`,
-          );
+          setLegacyActionError(message);
         }
         setBrowser((current) => ({
           ...current,
           serverId: server.id,
           loading: false,
-          error: error instanceof Error ? error.message : '檔案列表載入失敗',
+          error: message,
         }));
       } finally {
         window.clearTimeout(timeout);
       }
     },
     [canBrowseLegacyFiles],
+  );
+
+  const openPreviewForServer = useCallback(
+    async (server: LegacySshServer, item: LegacySshFileItem) => {
+      clearPreviewObjectUrl();
+      setPreview({
+        ...emptyLegacyFilePreview,
+        open: true,
+        loading: true,
+        path: item.path,
+        name: item.name,
+        size: item.size,
+        kind: isLegacyImageItem(item) ? 'image' : emptyLegacyFilePreview.kind,
+      });
+      try {
+        const result = await previewLegacyServerFile(server.id, item.path);
+        const content =
+          result.kind === 'text' || result.kind === 'markdown'
+            ? textFromBase64(result.contentBase64)
+            : '';
+        const objectUrl =
+          result.kind === 'pdf' ||
+          result.kind === 'image' ||
+          result.kind === 'audio' ||
+          result.kind === 'video'
+            ? objectUrlFromPreview(result)
+            : '';
+        previewObjectUrlRef.current = objectUrl;
+        setPreview({
+          open: true,
+          loading: false,
+          path: result.path,
+          name: result.name,
+          kind: result.kind,
+          mime: result.mime,
+          size: result.size,
+          content,
+          objectUrl,
+          error: result.error || '',
+        });
+      } catch (error) {
+        setPreview((current) => ({
+          ...current,
+          loading: false,
+          kind: 'error',
+          error: error instanceof Error ? error.message : '檔案預覽失敗',
+        }));
+      }
+    },
+    [clearPreviewObjectUrl],
   );
 
   useEffect(() => {
@@ -554,10 +634,30 @@ function LegacyServerFilesWorkspace({
     skipDefaultLoadNonceRef.current = openTarget.nonce;
     rememberLastSelectedLegacyServerId(targetServer.id);
     setSelectedServerId(targetServer.id);
+    if (isLikelyRemoteFilePath(nextPath)) {
+      const targetItem = legacyFileItemFromPath(nextPath);
+      const targetParent = parentOf(nextPath);
+      setSelectedLegacyPath(nextPath);
+      void loadFiles(targetServer, targetParent).then(() => {
+        setSelectedLegacyPath(nextPath);
+        void openPreviewForServer(targetServer, targetItem);
+      });
+      return;
+    }
+
     setSelectedLegacyPath('');
     closePreview();
     void loadFiles(targetServer, nextPath);
-  }, [active, canBrowseLegacyFiles, closePreview, loadFiles, openTarget, selectedServerId, servers]);
+  }, [
+    active,
+    canBrowseLegacyFiles,
+    closePreview,
+    loadFiles,
+    openPreviewForServer,
+    openTarget,
+    selectedServerId,
+    servers,
+  ]);
 
   useEffect(() => {
     if (!canBrowseLegacyFiles || !selectedServer) return;
