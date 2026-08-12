@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatItem } from '@cozypad/contracts';
 import { ChatComposer } from './ChatComposer';
 import { ChatTimeline } from './ChatTimeline';
+import { EditSentMessageDialog } from './EditSentMessageDialog';
 import {
   getLegacyAgyStatus,
   getLegacyBailianStatus,
@@ -576,6 +577,11 @@ export function LegacyAgyPanel({
   const [checking, setChecking] = useState(false);
   const [helperError, setHelperError] = useState('');
   const [stoppingTaskId, setStoppingTaskId] = useState('');
+  const [editingUserMessage, setEditingUserMessage] = useState<{
+    taskId: string;
+    messageId: string;
+    text: string;
+  } | null>(null);
   const [bailianKey, setBailianKey] = useState(() => getBailianRuntimeKey());
   const [agentModelInput, setAgentModelInput] = useState(() =>
     readStoredAgentModel(agentModelStorageKey),
@@ -1659,6 +1665,38 @@ export function LegacyAgyPanel({
     }
   };
 
+  const submitEditedUserMessage = async (nextText: string) => {
+    const edit = editingUserMessage;
+    const task = activeTask;
+    if (!edit || !task || edit.taskId !== task.id) {
+      setEditingUserMessage(null);
+      return;
+    }
+
+    const rerunTitle = task.title || titleFromPrompt(nextText, agentName);
+    const rerunPath = task.remotePath || cwdInput || '~';
+    if (task.running) {
+      await stopActiveTask();
+    }
+
+    updateTask(task.id, (current) => ({
+      ...current,
+      prompt: nextText,
+      items: current.items.map((item) =>
+        item.kind === 'message' && item.id === edit.messageId && item.role === 'user'
+          ? { ...item, text: nextText }
+          : item,
+      ),
+      updatedAt: new Date().toISOString(),
+    }));
+    setEditingUserMessage(null);
+    await sendPrompt(nextText, {
+      title: rerunTitle,
+      remotePath: rerunPath,
+      forceNew: true,
+    });
+  };
+
   const applyCwdInput = () => {
     const nextPath = normalizeRemotePath(cwdInput);
     setCwdInput(nextPath);
@@ -1835,6 +1873,13 @@ export function LegacyAgyPanel({
                 assistantLabel={config.label}
                 serverId={activeTask.profileId || legacyServer?.id || ''}
                 onOpenFilesPath={onOpenFilesPath}
+                onEditUserMessage={(message) =>
+                  setEditingUserMessage({
+                    taskId: activeTask.id,
+                    messageId: message.id,
+                    text: message.text,
+                  })
+                }
                 onResolveApproval={() => undefined}
                 onAnswerQuestion={() => undefined}
               />
@@ -1937,6 +1982,15 @@ export function LegacyAgyPanel({
           </p>
         </aside>
       </div>
+      {editingUserMessage ? (
+        <EditSentMessageDialog
+          agentLabel={config.label}
+          initialText={editingUserMessage.text}
+          running={Boolean(activeTask?.running)}
+          onCancel={() => setEditingUserMessage(null)}
+          onSubmit={submitEditedUserMessage}
+        />
+      ) : null}
     </div>
   );
 }

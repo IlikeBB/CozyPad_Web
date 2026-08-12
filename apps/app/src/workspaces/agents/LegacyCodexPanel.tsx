@@ -15,6 +15,7 @@ import {
 } from '../../components/markdownComponents';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
+import { EditSentMessageDialog } from './EditSentMessageDialog';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
 import {
   isQueuedStartTrainingTask,
@@ -1514,7 +1515,12 @@ function hasCodexFeedbackAfterLatestPrompt(output: string): boolean {
   return normalized.slice(index + CODEX_TRANSCRIPT_MARKER.length).trim().length > 0;
 }
 
-function renderDialogue(task: CodexTask, serverId = '', onOpenFilesPath?: OpenFilesPathHandler) {
+function renderDialogue(
+  task: CodexTask,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+  onEditUserPrompt?: (text: string) => void,
+) {
   return parseCodexDialogue(task).map((block, index) => {
     const plainCodexText = block.role === 'codex' && isPlainCodexText(block.text);
     return (
@@ -1523,6 +1529,12 @@ function renderDialogue(task: CodexTask, serverId = '', onOpenFilesPath?: OpenFi
           plainCodexText ? ' legacy-codex-message-plain' : ''
         }`}
         key={`${block.role}-${index}-${block.text.slice(0, 16)}`}
+        onContextMenu={(event) => {
+          if (block.role !== 'user' || !onEditUserPrompt) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onEditUserPrompt(block.text);
+        }}
       >
         <span className="legacy-codex-message-label">
           {block.role === 'user' ? 'User' : block.role === 'codex' ? 'Codex' : 'System'}
@@ -1577,6 +1589,7 @@ export function LegacyCodexPanel({
   const [checkingCodex, setCheckingCodex] = useState(false);
   const [codexCheckError, setCodexCheckError] = useState('');
   const [stoppingTaskId, setStoppingTaskId] = useState('');
+  const [editingUserPrompt, setEditingUserPrompt] = useState('');
   const [codexModelInput, setCodexModelInput] = useState(() => readStoredCodexModel());
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<LegacyCodexReasoningEffort>(
     () => readStoredCodexReasoningEffort(),
@@ -2400,6 +2413,26 @@ export function LegacyCodexPanel({
     }
   };
 
+  const submitEditedUserPrompt = async (nextText: string) => {
+    const task = activeTask;
+    if (!task) {
+      setEditingUserPrompt('');
+      return;
+    }
+
+    const rerunTitle = task.title || titleFromPrompt(nextText);
+    const rerunPath = task.remotePath || cwdInput || '~';
+    if (task.running) {
+      await stopActiveTask();
+    }
+
+    setEditingUserPrompt('');
+    await startTask(nextText, [], {
+      title: rerunTitle,
+      remotePath: rerunPath,
+    });
+  };
+
   const cliLabel = legacyServer
     ? `${localMode ? 'Local' : 'Remote'} Codex on ${legacyServer.name}`
     : '請先選擇 SSH server';
@@ -2562,6 +2595,7 @@ export function LegacyCodexPanel({
                   activeTask,
                   activeTask.profileId || legacyServer?.id || '',
                   onOpenFilesPath,
+                  setEditingUserPrompt,
                 )}
               </div>
             </>
@@ -2692,6 +2726,15 @@ export function LegacyCodexPanel({
           <p className="hint">Codex CLI 輸出會保留在工作分頁中。</p>
         </aside>
       </div>
+      {editingUserPrompt ? (
+        <EditSentMessageDialog
+          agentLabel="Codex"
+          initialText={editingUserPrompt}
+          running={Boolean(activeTask?.running)}
+          onCancel={() => setEditingUserPrompt('')}
+          onSubmit={submitEditedUserPrompt}
+        />
+      ) : null}
     </div>
   );
 }

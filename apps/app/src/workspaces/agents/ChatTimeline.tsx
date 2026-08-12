@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import type { ChatItem } from '@cozypad/contracts';
+import { ContextMenu } from '../../components/ContextMenu';
 import {
   markdownRehypePlugins,
   markdownRemarkPlugins,
@@ -18,6 +19,7 @@ interface ChatTimelineProps {
   assistantLabel?: string;
   serverId?: string;
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
+  onEditUserMessage?: (message: { id: string; text: string }) => void;
   onResolveApproval(itemId: string, resolution: 'allowed' | 'denied'): void;
   onAnswerQuestion(itemId: string, optionIndex: number): void;
 }
@@ -358,12 +360,19 @@ export function ChatTimeline({
   assistantLabel = 'Agent',
   serverId = '',
   onOpenFilesPath,
+  onEditUserMessage,
   onResolveApproval,
   onAnswerQuestion,
 }: ChatTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const positions = useRef(new Map<string, number>());
   const lastSession = useRef<string | null>(null);
+  const [messageMenu, setMessageMenu] = useState<{
+    x: number;
+    y: number;
+    id: string;
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -389,6 +398,17 @@ export function ChatTimeline({
               <div
                 key={item.id}
                 className={`msg msg-${item.role}${item.streaming ? ' msg-streaming' : ''}`}
+                onContextMenu={(event) => {
+                  if (item.role !== 'user' || !onEditUserMessage) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setMessageMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    id: item.id,
+                    text: item.text,
+                  });
+                }}
               >
                 <div className="msg-stack">
                   <div className="msg-label">{item.role === 'assistant' ? assistantLabel : 'User'}</div>
@@ -494,6 +514,21 @@ export function ChatTimeline({
             );
         }
       })}
+      {messageMenu ? (
+        <ContextMenu
+          x={messageMenu.x}
+          y={messageMenu.y}
+          title="User message"
+          subtitle="Right click action"
+          actions={[{ id: 'edit', label: 'Edit', hint: 'Stop and rerun' }]}
+          onSelect={(id) => {
+            if (id === 'edit') {
+              onEditUserMessage?.({ id: messageMenu.id, text: messageMenu.text });
+            }
+          }}
+          onClose={() => setMessageMenu(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -33,6 +33,9 @@ app、斷線、換裝置，工作都不會中斷。
 | 2026-08-04 | 整理 8/4 CozyPad 更新：Cloudflare / DDNS 相關說明、agent 介面方向、遠端服務串接與 markdown workflow。 |
 | 2026-08-05 | 更新近期變更紀錄與功能截圖，補充 Claude / Codex / agy、Files、Monitor、Research / Markdown workflow 的文件說明。 |
 | 2026-08-06 | 將 CozyPad4 同步到 Web repository；加入 MIT License；移除過時 V3 檔案；調整 README 為安裝導向；修正 Claude / Codex / agy 重新連線時重播舊輸出與忘記上下文的問題；SSH / terminal / agent session 預設保留 24 小時；補上 Cloudflare edge 403 fallback 與 CORS preflight；新增 Contributors 並標註上游協作者。 |
+| 2026-08-07 | 同步 CozyPad V4 Web 功能，整理 Agents、Research、Terminal、Files、Monitor 的主介面；隱藏暫停使用的 Claude 服務入口，保留 Codex、agy、Bailian 的遠端工作流方向。 |
+| 2026-08-11 | 準備 CozyPad beta release：清理不必要的大型檔案與 log，保留公開文件、安裝說明與核心 Web 應用程式；將新版內容整理到 main 分支。 |
+| 2026-08-12 | 穩定化 workspace 互動：Research 重置流程圖改為清空目前 tab；Terminal 避免未連線時自動啟動遠端 SSH；Codex / agy / Bailian 新增右鍵編輯已送出訊息，採用「停止目前 CLI 任務後重新執行」的安全流程。 |
 
 ## 現在能用的功能
 
