@@ -455,11 +455,13 @@ export function LegacyClaudePanel({
   connected = false,
   focusTaskId = '',
   focusRequestNonce = 0,
+  onOpenFilesPath,
 }: {
   legacyServer: LegacySshServer | null;
   connected?: boolean;
   focusTaskId?: string;
   focusRequestNonce?: number;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const [tasks, setTasks] = useState<ClaudeTask[]>(() => readStoredTasks());
   const [activeTaskId, setActiveTaskId] = useState(() => readStoredTasks()[0]?.id ?? '');
@@ -847,7 +849,7 @@ export function LegacyClaudePanel({
           !socketsRef.current.has(task.id),
       )
       .forEach((task) => connectTask(task));
-  }, [connectTask, connected, legacyServer?.id]);
+  }, [connectTask, connected, legacyServer?.id, tasks]);
 
   const sendPrompt = useCallback(async (
     text: string,
@@ -1310,6 +1312,8 @@ export function LegacyClaudePanel({
               <ChatTimeline
                 sessionId={activeTask.id}
                 items={activeTask.items}
+                serverId={activeTask.profileId || legacyServer?.id || ''}
+                onOpenFilesPath={onOpenFilesPath}
                 onResolveApproval={resolveApproval}
                 onAnswerQuestion={() => undefined}
               />

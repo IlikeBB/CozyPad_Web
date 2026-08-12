@@ -24,6 +24,10 @@ import {
   WorkIcon,
 } from './components/icons';
 import { TmuxSetupDialog } from './components/TmuxSetupDialog';
+import {
+  OPEN_FILE_PATH_EVENT,
+  type OpenFilePathEventDetail,
+} from './components/markdownComponents';
 import { AgentsWorkspace } from './workspaces/agents/AgentsWorkspace';
 import { FilesWorkspace } from './workspaces/FilesWorkspace';
 import { MonitorWorkspace } from './workspaces/MonitorWorkspace';
@@ -74,6 +78,12 @@ type AgentTaskOpenTarget = {
   agent: 'codex' | 'claude' | 'agy' | 'bailian';
   taskId: string;
   profileId: string;
+  nonce: number;
+};
+
+type FilesOpenTarget = {
+  serverId: string;
+  path: string;
   nonce: number;
 };
 
@@ -136,6 +146,7 @@ export function App() {
   const [currentUser, setCurrentUser] = useState<LegacyAuthUser | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceId>('agents');
   const [agentTaskOpenTarget, setAgentTaskOpenTarget] = useState<AgentTaskOpenTarget | null>(null);
+  const [filesOpenTarget, setFilesOpenTarget] = useState<FilesOpenTarget | null>(null);
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [legacyProfileOptions, setLegacyProfileOptions] = useState<ConnectionProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -416,6 +427,47 @@ export function App() {
     setWorkspace('agents');
   }, []);
 
+  const handleOpenFilesPath = useCallback((target: { serverId: string; path: string }) => {
+    const serverId = target.serverId.trim();
+    const path = target.path.trim();
+    if (!serverId || !path) return;
+    rememberLastSelectedLegacyServerId(serverId);
+    setFilesOpenTarget({ serverId, path, nonce: Date.now() });
+    setWorkspace('files');
+  }, []);
+
+  useEffect(() => {
+    const openFromElement = (element: Element): boolean => {
+      const target = element.closest<HTMLElement>('[data-cozypad-file-path]');
+      if (!target) return false;
+      const serverId = target.dataset.cozypadFileServerId || '';
+      const path = target.dataset.cozypadFilePath || '';
+      if (!serverId || !path) return false;
+      handleOpenFilesPath({ serverId, path });
+      return true;
+    };
+
+    const handleOpenFilePathEvent = (event: Event) => {
+      const detail = (event as CustomEvent<OpenFilePathEventDetail>).detail;
+      if (!detail?.serverId || !detail.path) return;
+      handleOpenFilesPath(detail);
+    };
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (!openFromElement(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener(OPEN_FILE_PATH_EVENT, handleOpenFilePathEvent);
+    document.addEventListener('click', handleDocumentClick, true);
+    return () => {
+      window.removeEventListener(OPEN_FILE_PATH_EVENT, handleOpenFilePathEvent);
+      document.removeEventListener('click', handleDocumentClick, true);
+    };
+  }, [handleOpenFilesPath]);
+
   const submitCredential = async (credential: CredentialSubmission) => {
     const profile = credentialPrompt;
     if (!profile) return;
@@ -572,6 +624,7 @@ export function App() {
               selectedProfile={selectedProfile}
               connected={state === 'connected'}
               openTarget={agentTaskOpenTarget}
+              onOpenFilesPath={handleOpenFilesPath}
             />
           </section>
           <section className="workspace-page" hidden={workspace !== 'research'}>
@@ -592,6 +645,7 @@ export function App() {
               active={workspace === 'files'}
               connected={state === 'connected'}
               profileId={selectedId}
+              openTarget={filesOpenTarget}
             />
           </section>
           <section className="workspace-page" hidden={workspace !== 'monitor'}>

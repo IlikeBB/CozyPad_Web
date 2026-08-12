@@ -8,9 +8,11 @@ import {
 } from '../components/markdownPlugins';
 import {
   createLegacyCodexHistory,
+  listLegacyCondaEnvs,
   listLegacyServers,
   openLegacyRemoteAgentStream,
   serializeLegacyRemoteAgentStreamPayload,
+  type LegacyCondaEnv,
   type LegacyRemoteAgentStreamKind,
   type LegacySshServer,
 } from './agents/legacySshApi';
@@ -146,6 +148,8 @@ type TrainingPromptDialogState = {
   otherPrompt: string;
   dataSource: string;
   modelSource: string;
+  modelWeightPath: string;
+  condaEnv: string;
 };
 
 type TrainingPromptSource = 'markdown' | 'nodeFeedback';
@@ -218,57 +222,123 @@ const GRAPH_FALLBACK_SIZE: GraphSize = { width: 100, height: 100 };
 const NODE_PORT_SIDES: PipelinePortSide[] = ['top', 'right', 'bottom', 'left'];
 
 const NODE_TEMPLATES: NodeTemplate[] = [
-  { label: 'Input', kind: 'source', title: 'Input', subtitle: 'Input', role: 'input' },
-  { label: 'Output', kind: 'output', title: 'Output', subtitle: 'Output', role: 'outcome' },
-  { label: 'Dataset', kind: 'source', title: 'Dataset', subtitle: 'Data source', role: 'input' },
-  { label: 'Model', kind: 'model', title: 'Model', subtitle: 'Model', role: 'runner' },
-  { label: 'Train', kind: 'command', title: 'Train', subtitle: 'Training step', role: 'runner' },
-  { label: 'Evaluate', kind: 'command', title: 'Evaluate', subtitle: 'Evaluation', role: 'outcome' },
+  { label: '輸入', kind: 'source', title: '輸入', subtitle: '輸入來源', role: 'input' },
+  { label: '輸出', kind: 'output', title: '輸出', subtitle: '輸出結果', role: 'outcome' },
+  { label: '資料集', kind: 'source', title: '資料集', subtitle: '資料來源', role: 'input' },
+  { label: '模型', kind: 'model', title: '模型', subtitle: '模型設定', role: 'runner' },
+  { label: '訓練', kind: 'command', title: '訓練', subtitle: '訓練步驟', role: 'runner' },
+  { label: '評估', kind: 'command', title: '評估', subtitle: '評估流程', role: 'outcome' },
   {
-    label: 'Application',
+    label: '應用',
     kind: 'application',
-    title: 'Application',
-    subtitle: 'Application',
+    title: '應用',
+    subtitle: '應用部署',
     role: 'application',
   },
 ];
 
 const NODE_RULE_VERSION = 'cozypad-node-rule-v1';
 
+const PIPELINE_KIND_LABELS: Record<PipelineNodeKind, string> = {
+  source: '來源',
+  operation: '處理',
+  model: '模型',
+  command: '指令',
+  output: '輸出',
+  application: '應用',
+};
+
+const PIPELINE_ROLE_LABELS: Record<PipelineNodeRole, string> = {
+  factor: '變因',
+  control: '控制',
+  runner: '執行',
+  outcome: '結果',
+  input: '輸入',
+  application: '應用',
+};
+
+const RESEARCH_TEXT_ZH_TW: Record<string, string> = {
+  Input: '輸入',
+  Output: '輸出',
+  Dataset: '資料集',
+  'Data source': '資料來源',
+  Model: '模型',
+  Train: '訓練',
+  'Training step': '訓練步驟',
+  Evaluate: '評估',
+  Evaluation: '評估流程',
+  Application: '應用',
+  'Dataset snapshot': '資料集快照',
+  'Split dataset': '資料集切分',
+  'Locked control': '固定控制',
+  'Select subset': '選擇子集',
+  Factor: '變因',
+  Transform: '資料轉換',
+  'Build model': '建立模型',
+  Runner: '執行',
+  'Validation / test': '驗證 / 測試',
+  Outcome: '結果',
+  'Metrics + artifacts': '指標與產物',
+};
+
+function localizeResearchText(value: string): string {
+  return RESEARCH_TEXT_ZH_TW[value.trim()] || value;
+}
+
+function localizeNodeForDisplay(node: PipelineNode): PipelineNode {
+  return {
+    ...node,
+    title: localizeResearchText(node.title),
+    subtitle: localizeResearchText(node.subtitle),
+  };
+}
+
+function nodeDisplayTitle(node: PipelineNode | undefined, fallback = ''): string {
+  return node ? localizeResearchText(node.title) : fallback;
+}
+
+function nodeDisplaySubtitle(node: PipelineNode | undefined, fallback = ''): string {
+  return node ? localizeResearchText(node.subtitle) : fallback;
+}
+
 function yamlQuote(value: unknown): string {
   return JSON.stringify(String(value ?? ''));
 }
 
 function nodeHumanRuleText(node: PipelineNode): string {
+  const displayNode = localizeNodeForDisplay(node);
   return [
-    '1. Keep the node single-purpose: one research action, one clear owner, one measurable output.',
-    '2. Declare inputs, outputs, assumptions, constraints, and acceptance criteria before running agents.',
-    '3. Preserve reproducibility: record dataset path, model/checkpoint, seed, environment, command, and metrics.',
-    '4. Avoid hidden side effects: no delete, overwrite, domain update, or long-running training without explicit user approval.',
-    '5. Validate completion with observable evidence: logs, artifacts, metrics, screenshots, or a Markdown result.',
-    `Current node focus: ${node.title} (${node.kind}/${node.role}).`,
+    '1. 節點必須保持單一目的：一個研究動作、一個明確負責對象、一個可衡量產出。',
+    '2. 執行 agent 前，必須先明確寫出輸入、輸出、假設、限制條件與驗收標準。',
+    '3. 必須保留可重現性資訊：資料路徑、模型或 checkpoint、seed、環境、執行指令與評估指標。',
+    '4. 不可隱含高風險副作用：刪除、覆寫、網域更新或長時間訓練都需要使用者明確同意。',
+    '5. 完成判定必須有可觀察證據：log、產物、metric、截圖或 Markdown 結果。',
+    `目前節點焦點：${displayNode.title}（${PIPELINE_KIND_LABELS[node.kind]} / ${PIPELINE_ROLE_LABELS[node.role]}）。`,
   ].join('\n');
 }
 
 function buildNodeAgentPrompt(node: PipelineNode): string {
+  const displayNode = localizeNodeForDisplay(node);
   return [
-    `請根據節點「${node.title}」協助整理此研究步驟。`,
-    `角色：${node.kind}/${node.role}。`,
-    `目標：說明此 node 要做什麼、需要哪些輸入、預期產出、限制條件與完成驗收方式。`,
+    `請根據節點「${displayNode.title}」協助整理此研究步驟。`,
+    `類型：${PIPELINE_KIND_LABELS[node.kind]}；角色：${PIPELINE_ROLE_LABELS[node.role]}。`,
+    `目標：說明此節點要做什麼、需要哪些輸入、預期產出、限制條件與完成驗收方式。`,
     '請優先輸出可執行、可追蹤、可重現的 Markdown，避免直接執行高風險操作。',
+    '所有回覆與節點說明都請使用繁體中文。',
   ].join('\n');
 }
 
 function buildNodeYaml(node: PipelineNode): string {
+  const displayNode = localizeNodeForDisplay(node);
   const prompt = (node.agentPrompt || buildNodeAgentPrompt(node)).trim();
   const feedback = (node.feedbackMarkdown || '').trim();
   return [
     `version: ${yamlQuote(NODE_RULE_VERSION)}`,
     `id: ${yamlQuote(node.id)}`,
-    `title: ${yamlQuote(node.title)}`,
-    `kind: ${yamlQuote(node.kind)}`,
-    `role: ${yamlQuote(node.role)}`,
-    `summary: ${yamlQuote(node.subtitle || node.title)}`,
+    `title: ${yamlQuote(displayNode.title)}`,
+    `kind: ${yamlQuote(PIPELINE_KIND_LABELS[node.kind])}`,
+    `role: ${yamlQuote(PIPELINE_ROLE_LABELS[node.role])}`,
+    `summary: ${yamlQuote(displayNode.subtitle || displayNode.title)}`,
     'human_rules:',
     ...nodeHumanRuleText(node)
       .split('\n')
@@ -291,9 +361,10 @@ function normalizeNodeAgentPrompt(value: unknown, node: PipelineNode): string {
 }
 
 function withNodeStorageDefaults(node: PipelineNode): PipelineNode {
+  const displayNode = localizeNodeForDisplay(node);
   const agentPrompt = normalizeNodeAgentPrompt(node.agentPrompt, node);
   const feedbackMarkdown = typeof node.feedbackMarkdown === 'string' ? node.feedbackMarkdown.trim() : '';
-  const normalizedNode = { ...node, agentPrompt, feedbackMarkdown };
+  const normalizedNode = { ...displayNode, agentPrompt, feedbackMarkdown };
   return {
     ...normalizedNode,
     yaml: normalizeNodeYaml(node.yaml, normalizedNode),
@@ -305,23 +376,23 @@ function nodeMarkdownDocument(node: PipelineNode): string {
   return [
     `# ${normalized.title}`,
     '',
-    `**Kind:** ${normalized.kind}`,
+    `**類型：** ${PIPELINE_KIND_LABELS[normalized.kind]}`,
     '',
-    `**Role:** ${normalized.role}`,
+    `**角色：** ${PIPELINE_ROLE_LABELS[normalized.role]}`,
     '',
-    `**Summary:** ${normalized.subtitle || normalized.title}`,
+    `**摘要：** ${normalized.subtitle || normalized.title}`,
     '',
-    '## Human Rules',
+    '## 人工限制',
     '',
     nodeHumanRuleText(normalized),
     '',
-    '## Agent Prompt',
+    '## Agent 輸入 Prompt',
     '',
     normalized.agentPrompt || buildNodeAgentPrompt(normalized),
     '',
-    '## Agent Feedback',
+    '## Agent 回饋',
     '',
-    normalized.feedbackMarkdown?.trim() || 'No node feedback yet.',
+    normalized.feedbackMarkdown?.trim() || '尚未有節點回饋。',
     '',
     '## YAML',
     '',
@@ -370,8 +441,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'dataset',
     kind: 'source',
-    title: 'Dataset snapshot',
-    subtitle: 'Input',
+    title: '資料集快照',
+    subtitle: '輸入',
     role: 'input',
     x: 4,
     y: 38,
@@ -379,8 +450,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'split',
     kind: 'operation',
-    title: 'Split dataset',
-    subtitle: 'Locked control',
+    title: '資料集切分',
+    subtitle: '固定控制',
     role: 'control',
     x: 20,
     y: 38,
@@ -388,8 +459,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'subset',
     kind: 'operation',
-    title: 'Select subset',
-    subtitle: 'Factor',
+    title: '選擇子集',
+    subtitle: '變因',
     role: 'factor',
     x: 36,
     y: 16,
@@ -397,8 +468,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'transform',
     kind: 'operation',
-    title: 'Transform',
-    subtitle: 'Factor',
+    title: '資料轉換',
+    subtitle: '變因',
     role: 'factor',
     x: 52,
     y: 16,
@@ -406,8 +477,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'model',
     kind: 'model',
-    title: 'Build model',
-    subtitle: 'Runner',
+    title: '建立模型',
+    subtitle: '執行',
     role: 'runner',
     x: 68,
     y: 16,
@@ -415,8 +486,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'train',
     kind: 'command',
-    title: 'Train',
-    subtitle: 'Runner',
+    title: '訓練',
+    subtitle: '執行',
     role: 'runner',
     x: 84,
     y: 16,
@@ -424,8 +495,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'validation',
     kind: 'operation',
-    title: 'Validation / test',
-    subtitle: 'Locked control',
+    title: '驗證 / 測試',
+    subtitle: '固定控制',
     role: 'control',
     x: 36,
     y: 58,
@@ -433,8 +504,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'evaluate',
     kind: 'command',
-    title: 'Evaluate',
-    subtitle: 'Outcome',
+    title: '評估',
+    subtitle: '結果',
     role: 'outcome',
     x: 68,
     y: 58,
@@ -442,8 +513,8 @@ const PIPELINE_NODES: PipelineNode[] = [
   {
     id: 'metrics',
     kind: 'output',
-    title: 'Metrics + artifacts',
-    subtitle: 'Outcome',
+    title: '指標與產物',
+    subtitle: '結果',
     role: 'outcome',
     x: 84,
     y: 58,
@@ -762,6 +833,15 @@ function parseCodexDiagramDraft(value: string): CodexDiagramDraft {
   throw lastError || new Error('Diagram output is not valid JSON.');
 }
 
+function canParseDiagramDraft(value: string): boolean {
+  try {
+    parseCodexDiagramDraft(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseCodexDiagramDraftPayload(parsed: unknown): CodexDiagramDraft {
   const payload = parsed as {
     diagram?: unknown;
@@ -954,6 +1034,24 @@ function hasNodeFeedback(node: PipelineNode): boolean {
   return Boolean(node.feedbackMarkdown?.trim());
 }
 
+function buildNodeFeedbackRequests(nodes: PipelineNode[]): NodeFeedbackTopic[] {
+  return nodes.map((node) => {
+    const normalized = withNodeStorageDefaults(node);
+    const title = nodeDisplayTitle(normalized);
+    return {
+      id: normalized.id,
+      title: `節點回饋：${title}`,
+      instruction: [
+        `請針對流程圖節點「${title}」提供繁體中文研究建議。`,
+        `節點類型是「${PIPELINE_KIND_LABELS[normalized.kind]}」，角色是「${PIPELINE_ROLE_LABELS[normalized.role]}」，摘要是「${nodeDisplaySubtitle(normalized)}」。`,
+        '請不要因為資訊不足而省略此節點；若資料不足，請明確列出合理假設、缺少欄位、潛在風險與需要補充的實驗證據。',
+        '請依此節點性質挑選適合面向，例如資料來源、前處理、模型設定、訓練超參數、評估指標、輸出 artifact、可重現性、失敗條件與下一步行動。',
+        '內容約 250 到 500 字，需具體可執行，避免只寫泛用描述。',
+      ].join(' '),
+    };
+  });
+}
+
 function buildNodeFeedbackTrainingMarkdown(nodes: PipelineNode[]): string {
   return nodes
     .map(withNodeStorageDefaults)
@@ -962,9 +1060,9 @@ function buildNodeFeedbackTrainingMarkdown(nodes: PipelineNode[]): string {
       [
         `# ${node.title}`,
         '',
-        `Kind: ${node.kind}`,
+        `類型：${PIPELINE_KIND_LABELS[node.kind]}`,
         '',
-        `Role: ${node.role}`,
+        `角色：${PIPELINE_ROLE_LABELS[node.role]}`,
         '',
         node.feedbackMarkdown?.trim() || '',
       ].join('\n'),
@@ -991,6 +1089,7 @@ function nodeFeedbackTargetScore(topicId: string, node: PipelineNode): number {
 }
 
 function targetNodeIdForFeedback(topicId: string, nodes: PipelineNode[]): string {
+  if (nodes.some((node) => node.id === topicId)) return topicId;
   const ranked = [...nodes].sort((a, b) => nodeFeedbackTargetScore(topicId, b) - nodeFeedbackTargetScore(topicId, a));
   return ranked[0]?.id || nodes[0]?.id || '';
 }
@@ -1150,6 +1249,8 @@ function buildTrainingPromptFromMarkdown(
   const otherPrompt = options.otherPrompt?.trim();
   const dataSource = options.dataSource?.trim();
   const modelSource = options.modelSource?.trim();
+  const modelWeightPath = options.modelWeightPath?.trim();
+  const condaEnv = options.condaEnv?.trim();
   const nodeSummary = nodes
     .slice(0, 20)
     .map((node, index) =>
@@ -1159,7 +1260,7 @@ function buildTrainingPromptFromMarkdown(
   return [
     'Start Training',
     '',
-    'Use the Markdown below as the primary training schedule. Follow the project name, dataset location, file location, user prompt, data source, and model source. Work on the selected remote server.',
+    'Use the Markdown below as the primary training schedule. Follow the project name, dataset location, file location, user prompt, data source, model source, optional model weight path, and optional conda environment. Work on the selected remote server.',
     '',
     '## Project Name',
     '',
@@ -1190,6 +1291,14 @@ function buildTrainingPromptFromMarkdown(
     '',
     modelSource || 'Infer from MD.md and the flowchart. Check model config, checkpoint, and training script before running.',
     '',
+    '## Model Weight Path',
+    '',
+    modelWeightPath || 'No explicit model weight path was provided. Inspect the project config and existing checkpoints before selecting weights.',
+    '',
+    '## Conda Environment',
+    '',
+    condaEnv || 'No explicit conda environment was provided. Inspect the project README, scripts, and available environments before running.',
+    '',
     '## Execution Rules',
     '',
     '1. Work only on the selected SSH server.',
@@ -1197,13 +1306,15 @@ function buildTrainingPromptFromMarkdown(
     '3. If File Location or Project Name contains unsafe filesystem characters, normalize them and report the final output folder path.',
     '4. Use Dataset Location as the primary dataset path. If it points to a file, inspect the parent folder too.',
     '5. Inspect README, config, dataset notes, and existing logs/results before training.',
-    '6. Use early stopping as the stopping strategy. If Epoch is provided, treat it as the maximum epoch budget, not as a short dry-run request.',
-    '7. Reuse existing monitor metric, patience, min_delta, and checkpoint settings when present; if missing, report the needed early-stop parameters before running.',
-    '8. Run the actual training command inside a GNU screen session. Use a deterministic screen name derived from Project Name, and record the screen name plus log path.',
-    '9. If screen is not available, stop and report the blocker; do not run training directly outside screen.',
-    '10. After training completes, or if any error stops the run, always close/terminate the screen session before finishing the task. Do not leave detached screen sessions alive.',
-    '11. Save stdout/stderr, screen logs, and result metrics to the project output directory before closing the screen session.',
-    '12. Report changed files, commands, screen session name, metrics, and next actions.',
+    '6. If Conda Environment is provided, activate that environment before checks and training. If it is missing or cannot be activated, stop and report the blocker. If it is not provided, inspect available environments and choose the project-appropriate one.',
+    '7. If Model Weight Path is provided, verify that the file or directory exists before training and use it as the primary checkpoint/model weight source. If missing, stop and report the blocker.',
+    '8. Use early stopping as the stopping strategy. If Epoch is provided, treat it as the maximum epoch budget, not as a short dry-run request.',
+    '9. Reuse existing monitor metric, patience, min_delta, and checkpoint settings when present; if missing, report the needed early-stop parameters before running.',
+    '10. Run the actual training command inside a GNU screen session. Use a deterministic screen name derived from Project Name, and record the screen name plus log path.',
+    '11. If screen is not available, stop and report the blocker; do not run training directly outside screen.',
+    '12. After training completes, or if any error stops the run, always close/terminate the screen session before finishing the task. Do not leave detached screen sessions alive.',
+    '13. Save stdout/stderr, screen logs, and result metrics to the project output directory before closing the screen session.',
+    '14. Report changed files, commands, selected conda environment, model weight path, screen session name, metrics, and next actions.',
     '',
     '## Markdown Plan',
     '',
@@ -1316,6 +1427,36 @@ function flowchartJsonForAgentPrompt(nodes: PipelineNode[], edges: PipelineEdge[
   );
 }
 
+function flowchartNodeFeedbackContext(nodes: PipelineNode[], edges: PipelineEdge[]): string {
+  if (nodes.length === 0) return '尚未建立節點。';
+  return nodes
+    .map((node, index) => {
+      const normalized = withNodeStorageDefaults(node);
+      const inputs = edges.filter((edge) => edge.to === node.id).length;
+      const outputs = edges.filter((edge) => edge.from === node.id).length;
+      const feedback = normalized.feedbackMarkdown?.trim() || '尚未有節點回饋。';
+      const agentPrompt = normalized.agentPrompt?.trim() || buildNodeAgentPrompt(normalized);
+      return [
+        `## ${index + 1}. ${nodeDisplayTitle(normalized)}`,
+        '',
+        `- id: ${normalized.id}`,
+        `- 類型: ${PIPELINE_KIND_LABELS[normalized.kind]}`,
+        `- 角色: ${PIPELINE_ROLE_LABELS[normalized.role]}`,
+        `- 輸入連線: ${inputs}`,
+        `- 輸出連線: ${outputs}`,
+        '',
+        '### Agent 輸入 Prompt',
+        '',
+        agentPrompt,
+        '',
+        '### 節點回饋',
+        '',
+        feedback,
+      ].join('\n');
+    })
+    .join('\n\n---\n\n');
+}
+
 function buildAgentFlowchartMarkdownPrompt(
   nodes: PipelineNode[],
   edges: PipelineEdge[],
@@ -1324,6 +1465,8 @@ function buildAgentFlowchartMarkdownPrompt(
   return [
     'You are analyzing a CozyPad research flowchart.',
     'Return only Markdown for MD.md. Do not include JSON unless it is inside a fenced code block.',
+    'Use the node feedback context as required evidence for the overall analysis. If a node has feedback, integrate its suggestions into the training plan, risks, checkpoints, and next actions.',
+    'Write the final Markdown in Traditional Chinese.',
     '',
     'Required content: training schedule, checkpoints, required logs, metrics, risk notes, and concrete next actions.',
     '',
@@ -1332,6 +1475,9 @@ function buildAgentFlowchartMarkdownPrompt(
     '',
     'Local draft context:',
     flowchartToLocalMarkdown(nodes, edges, '', ''),
+    '',
+    'Node feedback context:',
+    flowchartNodeFeedbackContext(nodes, edges),
     '',
     'Flowchart JSON:',
     '```json',
@@ -1346,13 +1492,14 @@ function buildAgentNodeFeedbackPrompt(
   edges: PipelineEdge[],
 ): string {
   return [
-    'You are generating node feedback Markdown from a CozyPad research flowchart.',
-    'Return only Markdown. Generate exactly the requested feedback blocks below.',
+    'You are generating per-node feedback Markdown from a CozyPad research flowchart.',
+    'Return only Markdown. Generate exactly one feedback block for every requested node below.',
     'Wrap every block with the exact HTML markers shown here so CozyPad can import the result into Diagram nodes.',
+    'Do not skip a node. If a node has weak context, still provide useful assumptions, risks, missing information, and next actions.',
     '',
     'Output format for each block:',
-    '<!-- COZYPAD_NODE_FEEDBACK id="topic-id" -->',
-    '# Topic title',
+    '<!-- COZYPAD_NODE_FEEDBACK id="node-id" -->',
+    '# Node feedback title',
     '',
     'Markdown content here.',
     '<!-- /COZYPAD_NODE_FEEDBACK -->',
@@ -1363,7 +1510,7 @@ function buildAgentNodeFeedbackPrompt(
       topic.instruction,
       '',
     ]),
-    'Each block should be about 500 Chinese characters and include concrete research/training recommendations.',
+    'Each block should be about 250-500 Chinese characters and include concrete research/training recommendations.',
     'Do not combine blocks. Do not omit markers. Do not return raw JSON.',
     '',
     'Flowchart JSON:',
@@ -1387,13 +1534,14 @@ function buildAgentDiagramJsonPrompt(
     'Each node must include id, title, kind, role, x, y. x/y are percentages from 0 to 100.',
     'Allowed kinds: source, operation, model, command, output, application.',
     'Allowed roles: factor, control, runner, outcome, input, application.',
+    'Node title and subtitle must be written in Traditional Chinese. Keep only id/kind/role as the required English enum values.',
     'Each edge must include from and to, referencing node ids.',
     'Use short lowercase ASCII node ids.',
     'Prefer a readable left-to-right workflow. Keep x/y between 8 and 92.',
     'If the request is ambiguous, still return a reasonable diagram JSON object.',
     '',
     'Example response shape:',
-    '{"nodes":[{"id":"dataset","title":"Dataset","kind":"source","role":"input","x":12,"y":35}],"edges":[]}',
+    '{"nodes":[{"id":"dataset","title":"資料集","subtitle":"資料來源","kind":"source","role":"input","x":12,"y":35}],"edges":[]}',
     '',
     'User request:',
     prompt,
@@ -1437,7 +1585,7 @@ function parseNodeFeedbackFromAgentOutput(
       updatedAt: new Date().toISOString(),
     });
   }
-  if (feedback.length > 0) return sortNodeFeedback(feedback);
+  if (feedback.length > 0) return sortNodeFeedback(feedback, topics);
 
   const headings: Array<{ topic: NodeFeedbackTopic; index: number }> = [];
   for (const topic of topics) {
@@ -1474,14 +1622,30 @@ function parseNodeFeedbackFromAgentOutput(
         };
       })
       .filter((item): item is NodeFeedbackResult => item !== null),
+    topics,
   );
 }
 
-function sortNodeFeedback(items: NodeFeedbackResult[]): NodeFeedbackResult[] {
+function canParseNodeFeedbackDraft(value: string, topics: NodeFeedbackTopic[]): boolean {
+  if (topics.length === 0) return false;
+  try {
+    return parseNodeFeedbackFromAgentOutput(value, topics).length >= topics.length;
+  } catch {
+    return false;
+  }
+}
+
+function sortNodeFeedback(
+  items: NodeFeedbackResult[],
+  order: NodeFeedbackTopic[] = NODE_FEEDBACK_TOPICS,
+): NodeFeedbackResult[] {
   const byId = new Map(items.map((item) => [item.id, item]));
-  return NODE_FEEDBACK_TOPICS.map((topic) => byId.get(topic.id)).filter(
+  const orderedIds = new Set(order.map((topic) => topic.id));
+  const ordered = order.map((topic) => byId.get(topic.id)).filter(
     (item): item is NodeFeedbackResult => Boolean(item),
   );
+  const remaining = items.filter((item) => !orderedIds.has(item.id));
+  return [...ordered, ...remaining];
 }
 
 function describeAgentModelIssue(output: string, label: string): string {
@@ -1591,18 +1755,23 @@ function runResearchAgentStreamPrompt(options: {
   allowedDirs?: string[];
   model?: string;
   signal?: AbortSignal;
+  settleWhenOutput?: (output: string) => boolean;
 }): Promise<AgentRunOutputResult> {
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
       reject(new Error('Agent Draw cancelled.'));
       return;
     }
-    const socket = openLegacyRemoteAgentStream();
+    const socket = openLegacyRemoteAgentStream({ allowWithoutConnect: true });
     let output = '';
     let lastMessage = '';
     let settled = false;
     const agentLabel = researchStreamAgentLabel(options.agent);
     const timeout = window.setTimeout(() => {
+      if (options.settleWhenOutput?.(output)) {
+        settle({ output, status: 'completed' });
+        return;
+      }
       settle(
         {
           output,
@@ -1659,6 +1828,10 @@ function runResearchAgentStreamPrompt(options: {
       const visible = visibleResearchAgentStreamText(text, options.agent);
       if (visible) {
         output += visible;
+        if (options.settleWhenOutput?.(output)) {
+          settle({ output, status: 'completed' });
+          return;
+        }
       }
       if (isResearchAgentStreamFailed(text, options.agent)) {
         settle({ output, stderr: output || text, status: 'failed' });
@@ -1678,6 +1851,10 @@ function runResearchAgentStreamPrompt(options: {
 
     socket.addEventListener('close', () => {
       if (settled) return;
+      if (options.settleWhenOutput?.(output)) {
+        settle({ output, status: 'completed' });
+        return;
+      }
       settle({
         output,
         stderr: output || lastMessage || 'Remote agent WebSocket closed before completion.',
@@ -1782,11 +1959,16 @@ async function runResearchCodexStreamPrompt(options: {
   remotePath?: string;
   model?: string;
   signal?: AbortSignal;
+  settleWhenOutput?: (output: string) => boolean;
+  historyTitle?: string;
+  timeoutMessage?: string;
 }): Promise<string> {
   if (options.signal?.aborted) {
     throw new Error('Agent Draw cancelled.');
   }
-  const history = await createLegacyCodexHistory(options.serverId, 'Research diagram draw');
+  const history = await createLegacyCodexHistory(options.serverId, options.historyTitle || 'Research agent task', {
+    allowWithoutConnect: true,
+  });
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
       reject(new Error('Agent Draw cancelled.'));
@@ -1804,7 +1986,11 @@ async function runResearchCodexStreamPrompt(options: {
     let promptStarted = false;
     let settled = false;
     const timeout = window.setTimeout(() => {
-      settle(new Error('Codex diagram drawing timed out. Please retry or check the remote Codex session.'));
+      if (options.settleWhenOutput?.(output)) {
+        settle();
+        return;
+      }
+      settle(new Error(options.timeoutMessage || 'Codex analysis timed out. Please retry or check the remote Codex session.'));
     }, RESEARCH_AGENT_DRAW_TIMEOUT_MS);
 
     const settle = (error?: Error) => {
@@ -1852,6 +2038,10 @@ async function runResearchCodexStreamPrompt(options: {
       if (isResearchCodexStreamStarted(text)) promptStarted = true;
       if (visible.trim()) promptStarted = true;
       if (visible) output = `${output}${visible}`;
+      if (options.settleWhenOutput?.(output)) {
+        settle();
+        return;
+      }
       if (isResearchCodexStreamFailed(text)) {
         settle(new Error((output || visible || text).trim() || 'Codex diagram drawing failed.'));
         return;
@@ -1869,6 +2059,10 @@ async function runResearchCodexStreamPrompt(options: {
 
     socket.addEventListener('close', () => {
       if (settled) return;
+      if (options.settleWhenOutput?.(output)) {
+        settle();
+        return;
+      }
       settle(new Error((output || lastMessage || 'Codex WebSocket closed before completion.').trim()));
     });
   });
@@ -2216,6 +2410,9 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const [nodeFeedbackTrainingDraft, setNodeFeedbackTrainingDraft] = useState<TrainingPromptDialogState | null>(null);
   const [trainingTargetAgent, setTrainingTargetAgent] = useState<QueuedTrainingAgent>('codex');
   const [trainingSubmitting, setTrainingSubmitting] = useState(false);
+  const [condaEnvOptions, setCondaEnvOptions] = useState<LegacyCondaEnv[]>([]);
+  const [condaEnvLoading, setCondaEnvLoading] = useState(false);
+  const [condaEnvError, setCondaEnvError] = useState('');
   const [markdownSourceOpen, setMarkdownSourceOpen] = useState(false);
   const [nodeMenu, setNodeMenu] = useState<NodeMenuState | null>(null);
   const [nodeDocModalId, setNodeDocModalId] = useState('');
@@ -2430,20 +2627,49 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   );
 
   const resolveAnalysisServer = useCallback(async (): Promise<LegacySshServer> => {
-    if (!connected) {
-      throw new Error('Press Connect before using SSH agents.');
-    }
-
     const servers = await listLegacyServers();
     const server = findRememberedLegacyServer(servers) ?? servers[0] ?? null;
     if (!server) {
       throw new Error('Select an SSH server in Agents, Terminal, or File before using Codex, agy, or baillian analysis.');
     }
     return server;
-  }, [connected]);
+  }, []);
+
+  const refreshCondaEnvOptions = useCallback(async () => {
+    if (!connected) {
+      setCondaEnvOptions([]);
+      setCondaEnvError('Connect before scanning conda environments.');
+      return;
+    }
+
+    setCondaEnvLoading(true);
+    setCondaEnvError('');
+    try {
+      const server = await resolveAnalysisServer();
+      const envs = await listLegacyCondaEnvs(server.id);
+      setCondaEnvOptions(envs);
+      if (!envs.length) {
+        setCondaEnvError('No conda environments were detected on the selected server.');
+      }
+    } catch (error) {
+      setCondaEnvOptions([]);
+      setCondaEnvError(error instanceof Error ? error.message : 'Conda environment scan failed.');
+    } finally {
+      setCondaEnvLoading(false);
+    }
+  }, [connected, resolveAnalysisServer]);
+
+  useEffect(() => {
+    if (!trainingPromptDialog || !trainingDialogSource) return;
+    void refreshCondaEnvOptions();
+  }, [refreshCondaEnvOptions, trainingDialogSource, Boolean(trainingPromptDialog)]);
 
   const runSelectedTextAnalysisAgent = useCallback(
-    async (prompt: string, signal?: AbortSignal): Promise<string> => {
+    async (
+      prompt: string,
+      signal?: AbortSignal,
+      settleWhenOutput?: (output: string) => boolean,
+    ): Promise<string> => {
       const server = await resolveAnalysisServer();
       const remotePath = server.defaultPath || '~';
       const model = readResearchAgentModel(analysisAgent);
@@ -2455,6 +2681,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           remotePath,
           model,
           signal,
+          settleWhenOutput,
         });
         return agentRunOutput(result, analysisAgentLabel);
       }
@@ -2465,6 +2692,8 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           remotePath,
           model,
           signal,
+          settleWhenOutput,
+          historyTitle: 'Research agent task',
         });
       }
       throw new Error(`${analysisAgentLabel} is not available for direct text analysis.`);
@@ -2719,7 +2948,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     if (!nodeMenu) return;
     const customTitle =
       template.role === 'application'
-        ? window.prompt('隢撓??Application ?迂', template.title)
+        ? window.prompt('請輸入應用節點名稱', template.title)
         : template.title;
     if (customTitle === null) return;
     const title = customTitle.trim() || template.title;
@@ -2764,18 +2993,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
 
   const deleteNode = (nodeId: string) => {
     deleteNodeIds([nodeId]);
-  };
-
-  const updateSelectedNodeYaml = (yaml: string) => {
-    const targetNode = nodeDocModalNode || selectedNode;
-    if (!targetNode) return;
-    setNodes((current) =>
-      current.map((node) =>
-        node.id === targetNode.id
-          ? withNodeStorageDefaults({ ...node, yaml, agentPrompt: node.agentPrompt || buildNodeAgentPrompt(node) })
-          : node,
-      ),
-    );
   };
 
   const updateSelectedNodeAgentPrompt = (agentPrompt: string) => {
@@ -2919,13 +3136,12 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   };
 
   const resetConnections = () => {
-    setEdges(DEFAULT_PIPELINE_EDGES);
-    setNodes(PIPELINE_NODES);
-    setSelectedNodeId(PIPELINE_NODES[0]?.id || '');
-    setSelectedNodeIds(PIPELINE_NODES[0] ? [PIPELINE_NODES[0].id] : []);
-    setSelectedEdgeId('');
-    setConnectionDraft(null);
-    setNodeMenu(null);
+    if ((nodes.length > 0 || edges.length > 0) && !window.confirm('刪除目前 tab 的所有流程圖內容？')) {
+      return;
+    }
+    setNodes([]);
+    setEdges([]);
+    clearFlowchartInteractionState();
   };
 
   const applyDiagramDraft = (draft: CodexDiagramDraft, message: string, requireConfirm = false) => {
@@ -2983,6 +3199,16 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     agentDrawAbortRef.current?.abort();
     const abortController = new AbortController();
     agentDrawAbortRef.current = abortController;
+    const startedAt = Date.now();
+    const progressTimer = window.setInterval(() => {
+      if (abortController.signal.aborted) return;
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      setCodexDiagramStatus({
+        status: 'running',
+        message: `${analysisAgentLabel} is drawing the diagram... ${elapsedSeconds}s`,
+        startedAt,
+      });
+    }, 20000);
     try {
       if (analysisAgent === 'codex') {
         const server = await resolveAnalysisServer();
@@ -2992,6 +3218,9 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           remotePath: server.defaultPath || '~',
           model: readResearchAgentModel('codex'),
           signal: abortController.signal,
+          settleWhenOutput: canParseDiagramDraft,
+          historyTitle: 'Research diagram draw',
+          timeoutMessage: 'Codex diagram drawing timed out. Please retry or check the remote Codex session.',
         });
         setCodexDiagramJson(raw);
         const draft = parseCodexDiagramDraft(raw);
@@ -3002,6 +3231,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       const raw = await runSelectedTextAnalysisAgent(
         buildAgentDiagramJsonPrompt(prompt, nodes, edges),
         abortController.signal,
+        canParseDiagramDraft,
       );
       setCodexDiagramJson(raw);
       const draft = parseCodexDiagramDraft(raw);
@@ -3018,6 +3248,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       });
       return false;
     } finally {
+      window.clearInterval(progressTimer);
       if (agentDrawAbortRef.current === abortController) {
         agentDrawAbortRef.current = null;
       }
@@ -3105,7 +3336,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     }
 
     const instruction =
-      'Analyze this research flowchart and return Markdown for MD.md. Include a training schedule, checkpoints, required logs, metrics, and risk notes.';
+      'Analyze this research flowchart and return Markdown for MD.md. Integrate every available node feedback item into the overall training schedule, checkpoints, required logs, metrics, risk notes, and concrete next actions.';
 
     const startedAt = Date.now();
     setMarkdownAnalysis({
@@ -3176,9 +3407,10 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     setTrainingPromptDialog(null);
     setTrainingDialogSource(null);
     setNodeFeedbackTrainingDraft(null);
+    const feedbackRequests = buildNodeFeedbackRequests(nodes);
     setMarkdownAnalysis({
       status: 'running',
-      message: `node feedback analysis running: ${nodeFeedbackCount} / ${nodeFeedbackTotal}`,
+      message: `node feedback analysis running: ${nodeFeedbackCount} / ${Math.max(feedbackRequests.length, 1)}`,
       startedAt,
     });
     setActiveView('flow');
@@ -3190,9 +3422,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         startedAt,
       });
       const output = await runSelectedTextAnalysisAgent(
-        buildAgentNodeFeedbackPrompt(NODE_FEEDBACK_TOPICS, nodes, edges),
+        buildAgentNodeFeedbackPrompt(feedbackRequests, nodes, edges),
+        undefined,
+        (value) => canParseNodeFeedbackDraft(value, feedbackRequests),
       );
-      const feedback = parseNodeFeedbackFromAgentOutput(output, NODE_FEEDBACK_TOPICS);
+      const feedback = parseNodeFeedbackFromAgentOutput(output, feedbackRequests);
       if (feedback.length === 0) {
         throw new Error(`${analysisAgentLabel} did not return node feedback Markdown.`);
       }
@@ -3257,6 +3491,8 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         userPrompt: buildAutoTrainingUserPrompt(markdown, nodes, edges, 'MD.md'),
         dataSource: inferDataSourceFromMarkdownAndNodes(markdown, nodes),
         modelSource: inferModelSourceFromMarkdownAndNodes(markdown, nodes),
+        modelWeightPath: '',
+        condaEnv: '',
       };
     if (!markdownTrainingDraft) setMarkdownTrainingDraft(nextDialog);
     setTrainingDialogSource('markdown');
@@ -3290,6 +3526,8 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         ),
         dataSource: inferDataSourceFromMarkdownAndNodes(markdown, nodes),
         modelSource: inferModelSourceFromMarkdownAndNodes(markdown, nodes),
+        modelWeightPath: '',
+        condaEnv: '',
       };
     if (!nodeFeedbackTrainingDraft) setNodeFeedbackTrainingDraft(nextDialog);
     setTrainingDialogSource('nodeFeedback');
@@ -3724,9 +3962,9 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                         }}
                       />
                     )) : null}
-                    <span className="research-node-kind">{node.kind.toUpperCase()}</span>
-                    <strong>{node.title}</strong>
-                    <small>{node.subtitle}</small>
+                    <span className="research-node-kind">{PIPELINE_KIND_LABELS[node.kind]}</span>
+                    <strong>{nodeDisplayTitle(node)}</strong>
+                    <small>{nodeDisplaySubtitle(node)}</small>
                   </div>
                 ))}
                 {nodeMenu ? (
@@ -3736,7 +3974,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     onPointerDown={(event) => event.stopPropagation()}
                     onContextMenu={(event) => event.preventDefault()}
                   >
-                    <span>Add node</span>
+                    <span>新增節點</span>
                     {NODE_TEMPLATES.map((template) => (
                       <button
                         type="button"
@@ -3755,35 +3993,37 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
             <aside className="research-inspector">
               {selectedNode ? (
                 <>
-                  <span className="eyebrow">Stage inspector</span>
-                  <h3>{selectedNode.title}</h3>
-                  <span className={`chip chip-research-${selectedNode.role}`}>{selectedNode.role}</span>
+                  <span className="eyebrow">節點檢視</span>
+                  <h3>{nodeDisplayTitle(selectedNode)}</h3>
+                  <span className={`chip chip-research-${selectedNode.role}`}>
+                    {PIPELINE_ROLE_LABELS[selectedNode.role]}
+                  </span>
                   {selectedNode.role === 'application' ? (
                     <label className="research-node-editor">
-                      <span>Application name</span>
+                      <span>應用名稱</span>
                       <input
                         value={selectedNode.title}
                         onChange={(event) => updateSelectedApplicationTitle(event.target.value)}
                         onBlur={normalizeSelectedApplicationTitle}
-                        placeholder="Application"
+                        placeholder="應用"
                       />
                     </label>
                   ) : null}
                   <dl>
                     <div>
-                      <dt>Type</dt>
-                      <dd>{selectedNode.kind}</dd>
+                      <dt>類型</dt>
+                      <dd>{PIPELINE_KIND_LABELS[selectedNode.kind]}</dd>
                     </div>
                     <div>
-                      <dt>Note</dt>
-                      <dd>{selectedNode.subtitle}</dd>
+                      <dt>說明</dt>
+                      <dd>{nodeDisplaySubtitle(selectedNode)}</dd>
                     </div>
                     <div>
-                      <dt>Inputs</dt>
+                      <dt>輸入</dt>
                       <dd>{edges.filter((edge) => edge.to === selectedNode.id).length}</dd>
                     </div>
                     <div>
-                      <dt>Outputs</dt>
+                      <dt>輸出</dt>
                       <dd>{edges.filter((edge) => edge.from === selectedNode.id).length}</dd>
                     </div>
                   </dl>
@@ -3792,45 +4032,45 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     className="research-open-node-doc"
                     onClick={() => setNodeDocModalId(selectedNode.id)}
                   >
-                    Markdown note
+                    Markdown 筆記
                   </button>
                 </>
               ) : (
                 <div className="research-empty-inspector">
-                  <span className="eyebrow">Stage inspector</span>
-                  <h3>No node selected</h3>
-                  <p className="hint">Select a node to inspect and edit its role.</p>
+                  <span className="eyebrow">節點檢視</span>
+                  <h3>尚未選擇節點</h3>
+                  <p className="hint">請選擇一個節點來檢視並編輯內容。</p>
                 </div>
               )}
               <div className="research-edge-actions">
                 <div className="research-port-toggle">
-                  <span>Edit mode</span>
+                  <span>編輯模式</span>
                   <button
                     type="button"
                     className={showNodePorts ? 'research-port-toggle-active' : ''}
                     aria-pressed={showNodePorts}
                     onClick={() => setShowNodePorts((current) => !current)}
                   >
-                    {showNodePorts ? 'Connect' : 'Move'}
+                    {showNodePorts ? '連線' : '移動'}
                   </button>
                 </div>
-                <strong>Selected connection</strong>
+                <strong>目前連線</strong>
                 <span>
                   {selectedEdge
-                    ? `${nodeById(nodes, selectedEdge.from)?.title || selectedEdge.from} -> ${
-                        nodeById(nodes, selectedEdge.to)?.title || selectedEdge.to
+                    ? `${nodeDisplayTitle(nodeById(nodes, selectedEdge.from), selectedEdge.from)} -> ${
+                        nodeDisplayTitle(nodeById(nodes, selectedEdge.to), selectedEdge.to)
                       }`
-                    : 'None'}
+                    : '無'}
                 </span>
                 <button type="button" disabled={!selectedEdgeId} onClick={removeSelectedConnection}>
-                  Delete connection
+                  刪除連線
                 </button>
                 <button type="button" onClick={resetConnections}>
-                  Reset graph
+                  重置流程圖
                 </button>
               </div>
               <div className="research-inspector-analysis">
-                <span className="research-inspector-section-title">Analysis agent</span>
+                <span className="research-inspector-section-title">分析 Agent</span>
                 <div className="research-connection-toolbar">
                   <label className="research-analysis-agent-select">
                     <select
@@ -3838,26 +4078,12 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                       onChange={(event) => setAnalysisAgent(event.target.value as ResearchAnalysisAgent)}
                       aria-label="Analysis agent"
                     >
-                      <option value="">Select agent</option>
+                      <option value="">選擇 agent</option>
                       <option value="codex">Codex</option>
                       <option value="agy">agy</option>
                       <option value="bailian">baillian</option>
                     </select>
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => void analyzeFlowchartWithBailian()}
-                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
-                  >
-                    default analysis diagram
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void analyzeNodeFeedback()}
-                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
-                  >
-                    node feedback
-                  </button>
                   <button
                     type="button"
                     className={codexDiagramOpen ? 'research-codex-draw-toggle-active' : ''}
@@ -3866,6 +4092,20 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     disabled={!hasAnalysisAgent}
                   >
                     agent draw
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void analyzeNodeFeedback()}
+                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
+                  >
+                    節點回饋
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void analyzeFlowchartWithBailian()}
+                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
+                  >
+                    分析 Diagram
                   </button>
                 </div>
                 {codexDiagramStatus.message || codexDiagramJson ? (
@@ -3894,154 +4134,6 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                         </button>
                       </div>
                     </details>
-                  </div>
-                ) : null}
-              </div>
-              <div className="research-node-feedback-panel">
-                <div className="research-node-feedback-head">
-                  <strong>Node feedback</strong>
-                  <button
-                    type="button"
-                    onClick={() => void analyzeNodeFeedback()}
-                    disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
-                  >
-                    Refresh
-                  </button>
-                </div>
-                <div className={`research-node-feedback-counter research-analysis-${markdownAnalysis.status}`}>
-                  <strong>
-                    {nodeFeedbackCount} / {nodeFeedbackTotal}
-                  </strong>
-                  <span>
-                    {markdownAnalysis.status === 'running' && isNodeFeedbackAnalysisMessage
-                      ? 'Analyzing nodes'
-                      : hasNodeFeedbackMarkdown
-                        ? 'Node notes updated'
-                        : 'No node feedback yet'}
-                  </span>
-                  {visibleNodeFeedbackAnalysisMessage ? <small>{visibleNodeFeedbackAnalysisMessage}</small> : null}
-                  {markdownAnalysis.startedAt && isNodeFeedbackAnalysisMessage ? (
-                    <small>Elapsed {formatDuration(analysisElapsedMs)}</small>
-                  ) : null}
-                </div>
-                <div className="research-node-feedback-actions">
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={!hasNodeFeedbackMarkdown}
-                    onClick={startTrainingFromNodeFeedback}
-                  >
-                    Start Training
-                  </button>
-                </div>
-                {trainingPromptDialog && trainingDialogSource === 'nodeFeedback' ? (
-                  <div className="research-training-panel research-diagram-training-panel" role="region" aria-labelledby="start-training-node-feedback-title">
-                    <div className="research-training-panel-head">
-                      <div>
-                        <h4 id="start-training-node-feedback-title">Start Training</h4>
-                        <p className="hint">This uses node Markdown feedback as the training schedule prompt.</p>
-                      </div>
-                    </div>
-                    <div className="research-training-meta">
-                      <label className="research-training-field">
-                        <span>Project name</span>
-                        <input
-                          type="text"
-                          value={trainingPromptDialog.projectName ?? ''}
-                          onChange={(event) => updateTrainingDialogField('projectName', event.target.value)}
-                          placeholder="Folder name to create or reuse for outputs."
-                        />
-                      </label>
-                      <label className="research-training-field">
-                        <span>Dataset location</span>
-                        <input
-                          type="text"
-                          value={trainingPromptDialog.datasetLocation ?? ''}
-                          onChange={(event) => updateTrainingDialogField('datasetLocation', event.target.value)}
-                          placeholder="Dataset path"
-                        />
-                      </label>
-                      <label className="research-training-field">
-                        <span>File location</span>
-                        <input
-                          type="text"
-                          value={trainingPromptDialog.fileLocation ?? ''}
-                          onChange={(event) => updateTrainingDialogField('fileLocation', event.target.value)}
-                          placeholder="Output/save path"
-                        />
-                      </label>
-                      <label className="research-training-field">
-                        <span>Epoch</span>
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          value={trainingPromptDialog.epoch ?? ''}
-                          onChange={(event) => updateTrainingDialogField('epoch', event.target.value)}
-                          placeholder="Optional max epoch"
-                        />
-                      </label>
-                    </div>
-                    <label className="research-training-field">
-                      <span>Prompt</span>
-                      <textarea
-                        value={trainingPromptDialog.userPrompt}
-                        onChange={(event) => updateTrainingDialogField('userPrompt', event.target.value)}
-                      />
-                    </label>
-                    <label className="research-training-field">
-                      <span>Other prompt</span>
-                      <textarea
-                        value={trainingPromptDialog.otherPrompt ?? ''}
-                        onChange={(event) => updateTrainingDialogField('otherPrompt', event.target.value)}
-                      />
-                    </label>
-                    <div className="research-training-sources">
-                      <label className="research-training-field">
-                        <span>Data source</span>
-                        <textarea
-                          value={trainingPromptDialog.dataSource}
-                          onChange={(event) => updateTrainingDialogField('dataSource', event.target.value)}
-                        />
-                      </label>
-                      <label className="research-training-field">
-                        <span>Model source</span>
-                        <textarea
-                          value={trainingPromptDialog.modelSource}
-                          onChange={(event) => updateTrainingDialogField('modelSource', event.target.value)}
-                        />
-                      </label>
-                    </div>
-                    <div className="form-actions research-training-actions">
-                      <button
-                        type="button"
-                        className="danger research-training-cancel"
-                        onClick={() => {
-                          setTrainingPromptDialog(null);
-                          setTrainingDialogSource(null);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <label className="research-agent-send-select">
-                        <span>Send to</span>
-                        <select
-                          value={trainingTargetAgent}
-                          onChange={(event) => setTrainingTargetAgent(event.target.value as QueuedTrainingAgent)}
-                        >
-                          <option value="codex">Codex</option>
-                          <option value="agy">agy</option>
-                          <option value="bailian">baillian</option>
-                        </select>
-                      </label>
-                      <button
-                        type="button"
-                        className="primary"
-                        onClick={() => void submitTrainingPrompt()}
-                        disabled={trainingSubmitting}
-                      >
-                        {trainingSubmitting ? 'Sending...' : 'Send'}
-                      </button>
-                    </div>
                   </div>
                 ) : null}
               </div>
@@ -4152,6 +4244,47 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                       placeholder="Optional max epoch; early stop still applies."
                     />
                   </label>
+                  <label className="research-training-field">
+                    <span>Model weight path</span>
+                    <input
+                      type="text"
+                      value={trainingPromptDialog.modelWeightPath ?? ''}
+                      onChange={(event) => updateTrainingDialogField('modelWeightPath', event.target.value)}
+                      placeholder="Optional checkpoint or weights path."
+                    />
+                  </label>
+                  <label className="research-training-field research-training-conda-field">
+                    <span>Conda env</span>
+                    <div className="research-training-inline-field">
+                      <input
+                        type="text"
+                        list="research-conda-env-options"
+                        value={trainingPromptDialog.condaEnv ?? ''}
+                        onChange={(event) => updateTrainingDialogField('condaEnv', event.target.value)}
+                        placeholder="Optional, e.g. pt230"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void refreshCondaEnvOptions()}
+                        disabled={condaEnvLoading}
+                      >
+                        {condaEnvLoading ? 'Scanning...' : 'Scan'}
+                      </button>
+                    </div>
+                    <datalist id="research-conda-env-options">
+                      {condaEnvOptions.map((env) => (
+                        <option key={`${env.name}:${env.path}`} value={env.name}>
+                          {env.path}
+                        </option>
+                      ))}
+                    </datalist>
+                    <small>
+                      {condaEnvError ||
+                        (condaEnvOptions.length
+                          ? `${condaEnvOptions.length} conda envs detected.`
+                          : 'Leave empty to let the agent inspect the project environment.')}
+                    </small>
+                  </label>
                 </div>
                 <label className="research-training-field">
                   <span>Prompt</span>
@@ -4241,15 +4374,15 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
           >
             <div className="modal-head research-node-doc-modal-head">
               <div>
-                <h2 id="research-node-doc-modal-title">{nodeDocModalNode.title}</h2>
+                <h2 id="research-node-doc-modal-title">{nodeDisplayTitle(nodeDocModalNode)}</h2>
                 <p className="hint">
-                  YAML-backed node note. This describes what the block does and what an agent should follow.
+                  這是以 YAML 儲存的節點筆記，用來描述此區塊的工作內容與 agent 應遵守的規則。
                 </p>
               </div>
               <button
                 type="button"
                 className="modal-close"
-                aria-label="Close node markdown"
+                aria-label="關閉節點 Markdown"
                 onClick={() => setNodeDocModalId('')}
               >
                 x
@@ -4262,24 +4395,12 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                 </Markdown>
               </div>
               <div className="research-node-doc-modal-editor">
-                <label className="research-node-editor research-node-yaml-editor">
-                  <span>YAML storage</span>
-                  <textarea
-                    value={withNodeStorageDefaults(nodeDocModalNode).yaml || ''}
-                    onChange={(event) => updateSelectedNodeYaml(event.target.value)}
-                    spellCheck={false}
-                  />
-                </label>
-                <div className="research-node-human-rule">
-                  <span className="research-inspector-section-title">人工限制</span>
-                  <pre>{nodeHumanRuleText(nodeDocModalNode)}</pre>
-                </div>
                 <label className="research-node-editor research-node-agent-prompt">
-                  <span>Agent prompt</span>
+                  <span>Agent 輸入 Prompt</span>
                   <textarea
                     value={withNodeStorageDefaults(nodeDocModalNode).agentPrompt || ''}
                     onChange={(event) => updateSelectedNodeAgentPrompt(event.target.value)}
-                    placeholder="Agent input prompt for this node"
+                    placeholder="此節點要交給 agent 的繁體中文 prompt"
                   />
                 </label>
               </div>

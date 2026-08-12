@@ -30,6 +30,7 @@ import type {
   LegacySshServer,
 } from './agents/legacySshApi';
 import {
+  rememberLastSelectedLegacyServerId,
   readLastSelectedLegacyServerId,
   resolveLastSelectedLegacyServerId,
   subscribeLastSelectedLegacyServerId,
@@ -39,6 +40,11 @@ interface FilesWorkspaceProps {
   active?: boolean;
   connected: boolean;
   profileId?: string | null;
+  openTarget?: {
+    serverId: string;
+    path: string;
+    nonce: number;
+  } | null;
 }
 
 type DialogState =
@@ -359,14 +365,34 @@ function resolveFilesServerId(
   return resolveLastSelectedLegacyServerId(servers, currentId);
 }
 
+function resolveOpenTargetServer(
+  servers: LegacySshServer[],
+  requestedId: string,
+  currentId = '',
+): LegacySshServer | null {
+  const normalized = requestedId.trim().toLowerCase();
+  return (
+    servers.find((server) => server.id === requestedId) ??
+    servers.find((server) =>
+      [server.id, server.name, server.alias, server.host]
+        .map((value) => String(value || '').trim().toLowerCase())
+        .some((value) => value === normalized),
+    ) ??
+    servers.find((server) => server.id === currentId) ??
+    null
+  );
+}
+
 function LegacyServerFilesWorkspace({
   active = false,
   bridgeConnected,
   profileId = null,
+  openTarget = null,
 }: {
   active?: boolean;
   bridgeConnected: boolean;
   profileId?: string | null;
+  openTarget?: FilesWorkspaceProps['openTarget'];
 }) {
   const [servers, setServers] = useState<LegacySshServer[]>([]);
   const [selectedServerId, setSelectedServerId] = useState(() => readLastSelectedLegacyServerId());
@@ -383,6 +409,9 @@ function LegacyServerFilesWorkspace({
   const [selectedLegacyPath, setSelectedLegacyPath] = useState('');
   const previewObjectUrlRef = useRef('');
   const loadFilesRequestRef = useRef(0);
+  const openTargetHandledNonceRef = useRef(0);
+  const skipDefaultLoadNonceRef = useRef(0);
+  const canBrowseLegacyFiles = bridgeConnected || openTarget !== null;
 
   const selectedServer = useMemo(
     () => servers.find((server) => server.id === selectedServerId) ?? null,
@@ -405,7 +434,7 @@ function LegacyServerFilesWorkspace({
   }, [clearPreviewObjectUrl]);
 
   const loadServers = useCallback(async (refresh = false) => {
-    if (!bridgeConnected) {
+    if (!canBrowseLegacyFiles) {
       setServerError('Press Connect before browsing SSH files.');
       return;
     }
@@ -421,10 +450,10 @@ function LegacyServerFilesWorkspace({
     } catch (error) {
       setServerError(error instanceof Error ? error.message : 'server 列表載入失敗');
     }
-  }, [bridgeConnected, profileId]);
+  }, [canBrowseLegacyFiles, profileId]);
 
   useEffect(() => {
-    if (!bridgeConnected) {
+    if (!canBrowseLegacyFiles) {
       setServers([]);
       setSelectedServerId('');
       setServerError('Press Connect before browsing SSH files.');
@@ -434,7 +463,7 @@ function LegacyServerFilesWorkspace({
     }
 
     void loadServers(false);
-  }, [bridgeConnected, closePreview, loadServers]);
+  }, [canBrowseLegacyFiles, closePreview, loadServers]);
 
   useEffect(
     () =>
@@ -450,7 +479,7 @@ function LegacyServerFilesWorkspace({
 
   const loadFiles = useCallback(
     async (server: LegacySshServer, remotePath: string) => {
-      if (!bridgeConnected) {
+      if (!canBrowseLegacyFiles) {
         setLegacyActionError('Press Connect before browsing SSH files.');
         return;
       }
@@ -505,18 +534,44 @@ function LegacyServerFilesWorkspace({
         window.clearTimeout(timeout);
       }
     },
-    [bridgeConnected],
+    [canBrowseLegacyFiles],
   );
 
   useEffect(() => {
-    if (!bridgeConnected || !selectedServer) return;
+    if (!active || !canBrowseLegacyFiles || !openTarget) return;
+    if (openTargetHandledNonceRef.current === openTarget.nonce) return;
+    const targetServer = resolveOpenTargetServer(servers, openTarget.serverId, selectedServerId);
+    if (!targetServer) {
+      if (servers.length > 0) {
+        setLegacyActionError(`找不到可瀏覽的 SSH server：${openTarget.serverId}`);
+        openTargetHandledNonceRef.current = openTarget.nonce;
+      }
+      return;
+    }
+
+    const nextPath = openTarget.path.trim() || targetServer.defaultPath || '~';
+    openTargetHandledNonceRef.current = openTarget.nonce;
+    skipDefaultLoadNonceRef.current = openTarget.nonce;
+    rememberLastSelectedLegacyServerId(targetServer.id);
+    setSelectedServerId(targetServer.id);
+    setSelectedLegacyPath('');
+    closePreview();
+    void loadFiles(targetServer, nextPath);
+  }, [active, canBrowseLegacyFiles, closePreview, loadFiles, openTarget, selectedServerId, servers]);
+
+  useEffect(() => {
+    if (!canBrowseLegacyFiles || !selectedServer) return;
+    if (openTarget && skipDefaultLoadNonceRef.current === openTarget.nonce) {
+      skipDefaultLoadNonceRef.current = 0;
+      return;
+    }
     if (browser.serverId === selectedServer.id && browser.path) return;
 
     closePreview();
     const nextPath = selectedServer.defaultPath || '~';
     setPathInput(nextPath);
     void loadFiles(selectedServer, nextPath);
-  }, [bridgeConnected, browser.path, browser.serverId, closePreview, loadFiles, selectedServer]);
+  }, [canBrowseLegacyFiles, browser.path, browser.serverId, closePreview, loadFiles, selectedServer]);
 
   useEffect(() => {
     if (!profileId || !servers.some((server) => server.id === profileId)) return;
@@ -1895,12 +1950,18 @@ function BridgeFilesWorkspace({ active = false, connected }: FilesWorkspaceProps
   );
 }
 
-export function FilesWorkspace({ active = false, connected, profileId = null }: FilesWorkspaceProps) {
+export function FilesWorkspace({
+  active = false,
+  connected,
+  profileId = null,
+  openTarget = null,
+}: FilesWorkspaceProps) {
   return (
     <LegacyServerFilesWorkspace
       active={active}
       bridgeConnected={connected}
       profileId={profileId}
+      openTarget={openTarget}
     />
   );
 }

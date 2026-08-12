@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import type { ConnectionProfile } from '@cozypad/contracts';
 import {
@@ -6,7 +6,13 @@ import {
   markdownRemarkPlugins,
   normalizeMarkdownMath,
 } from '../../components/markdownPlugins';
-import { linkifyRemotePathLines, markdownComponents } from '../../components/markdownComponents';
+import {
+  createMarkdownComponents,
+  dispatchOpenFilePath,
+  filePathLinkDataset,
+  linkifyRemotePathLines,
+  markdownComponents,
+} from '../../components/markdownComponents';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
@@ -135,6 +141,10 @@ type CodexContentSection =
 
 const USER_TRANSCRIPT_MARKER = '[CozyPad User]';
 const CODEX_TRANSCRIPT_MARKER = '[CozyPad Codex]';
+const CODEX_STREAM_WAITING_TEXT = '[CozyPad] codex stream connected; waiting for agent output';
+const INLINE_REMOTE_PATH_PATTERN =
+  /((?:~(?:\/[^\s`"'<>]*)?)|(?:\/(?:home|ssd\d*|mnt|data|workspace|work|project|projects|tmp|var|opt|root|usr|srv)(?:\/[^\s`"'<>]*)?))/g;
+const TRAILING_INLINE_PATH_PUNCTUATION = /[),.，。；;：:、\]}）】》」』]+$/;
 
 function createTaskId(): string {
   if (window.crypto?.randomUUID) return `codex:${window.crypto.randomUUID()}`;
@@ -956,7 +966,55 @@ function parseCodexDialogue(task: CodexTask): CodexDialogueBlock[] {
   return blocks;
 }
 
-function renderDialogueText(block: CodexDialogueBlock) {
+type OpenFilesPathHandler = (target: { serverId: string; path: string }) => void;
+
+function openFilesPathFromLink(
+  event: React.MouseEvent<HTMLButtonElement>,
+  serverId: string,
+  path: string,
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (onOpenFilesPath) {
+    onOpenFilesPath({ serverId, path });
+    return;
+  }
+  dispatchOpenFilePath(serverId, path);
+}
+
+function renderFilePathAnchor(
+  path: string,
+  serverId: string,
+  key?: string,
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
+  return (
+    <button
+      type="button"
+      className="legacy-codex-path-link"
+      key={key ?? path}
+      {...filePathLinkDataset(serverId, path)}
+      onClick={(event) => openFilesPathFromLink(event, serverId, path, onOpenFilesPath)}
+      title="在 File 中開啟這個路徑"
+    >
+      {path}
+    </button>
+  );
+}
+
+function extractExactRemotePath(text: string): string {
+  const trimmed = normalizeOutput(text).trim();
+  if (!trimmed || trimmed.includes('\n')) return '';
+  const match = trimmed.match(INLINE_REMOTE_PATH_PATTERN);
+  return match?.[0] === trimmed ? trimmed : '';
+}
+
+function renderDialogueText(
+  block: CodexDialogueBlock,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
   return normalizeOutput(block.text)
     .split('\n')
     .map((line, index) => (
@@ -964,7 +1022,7 @@ function renderDialogueText(block: CodexDialogueBlock) {
         className={block.role === 'codex' ? getLineClass(line) : 'legacy-codex-line'}
         key={`${index}-${line.slice(0, 20)}`}
       >
-        {line || ' '}
+        {renderInlinePathLinks(line, serverId, onOpenFilesPath)}
       </span>
     ));
 }
@@ -1245,7 +1303,41 @@ function parseCodexContent(text: string): CodexContentSection[] {
   return sections;
 }
 
-function renderPreLines(text: string, codexColors = true) {
+function renderInlinePathLinks(
+  line: string,
+  serverId: string,
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
+  if (!serverId.trim() || !line.trim()) return line || ' ';
+
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  for (const match of line.matchAll(INLINE_REMOTE_PATH_PATTERN)) {
+    const rawPath = match[0];
+    const index = match.index ?? 0;
+    if (index > lastIndex) nodes.push(line.slice(lastIndex, index));
+
+    const trailing = rawPath.match(TRAILING_INLINE_PATH_PUNCTUATION)?.[0] || '';
+    const path = trailing ? rawPath.slice(0, -trailing.length) : rawPath;
+    if (!path || path === '/') {
+      nodes.push(rawPath);
+    } else {
+      nodes.push(renderFilePathAnchor(path, serverId, `${index}-${path}`, onOpenFilesPath));
+      if (trailing) nodes.push(trailing);
+    }
+    lastIndex = index + rawPath.length;
+  }
+
+  if (lastIndex < line.length) nodes.push(line.slice(lastIndex));
+  return nodes.length > 0 ? nodes : line || ' ';
+}
+
+function renderPreLines(
+  text: string,
+  codexColors = true,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
   return normalizeOutput(text)
     .split('\n')
     .map((line, index) => (
@@ -1253,16 +1345,31 @@ function renderPreLines(text: string, codexColors = true) {
         className={codexColors ? getLineClass(line) : 'legacy-codex-line'}
         key={`${index}-${line.slice(0, 20)}`}
       >
-        {line || ' '}
+        {renderInlinePathLinks(line, serverId, onOpenFilesPath)}
       </span>
     ));
 }
 
-function renderMarkdownText(text: string, className = '', key?: string, serverId = '') {
+function renderMarkdownText(
+  text: string,
+  className = '',
+  key?: string,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
+  const exactPath = serverId.trim() ? extractExactRemotePath(text) : '';
+  if (exactPath) {
+    return (
+      <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
+        {renderFilePathAnchor(exactPath, serverId, undefined, onOpenFilesPath)}
+      </div>
+    );
+  }
+
   return (
     <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
       <Markdown
-        components={markdownComponents}
+        components={onOpenFilesPath ? createMarkdownComponents(onOpenFilesPath) : markdownComponents}
         remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={markdownRehypePlugins}
       >
@@ -1299,11 +1406,17 @@ function parseUserPromptAttachments(text: string): {
   return { prompt, attachments };
 }
 
-function renderUserMessageBody(text: string, serverId = '') {
+function renderUserMessageBody(
+  text: string,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
   const { prompt, attachments } = parseUserPromptAttachments(text);
   return (
     <div className="legacy-codex-message-body legacy-codex-user-body">
-      {prompt ? renderMarkdownText(prompt, 'legacy-codex-user-markdown', undefined, serverId) : null}
+      {prompt
+        ? renderMarkdownText(prompt, 'legacy-codex-user-markdown', undefined, serverId, onOpenFilesPath)
+        : null}
       {attachments.length > 0 ? (
         <div className="legacy-codex-user-attachments" aria-label="attached images">
           {attachments.map((attachment, index) => (
@@ -1322,7 +1435,12 @@ function renderUserMessageBody(text: string, serverId = '') {
   );
 }
 
-function renderCollapsibleSection(section: CodexContentSection, index: number) {
+function renderCollapsibleSection(
+  section: CodexContentSection,
+  index: number,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
   const lines = textLineCount(section.text);
   const lowerText = normalizeOutput(section.text).toLowerCase();
   const codexEvent = isCodexEventSection(section);
@@ -1359,18 +1477,28 @@ function renderCollapsibleSection(section: CodexContentSection, index: number) {
         <span className="legacy-codex-card-title">{section.title}</span>
         <span className="legacy-codex-card-lines">{lines} lines</span>
       </summary>
-      <pre>{renderPreLines(section.text)}</pre>
+      <pre>{renderPreLines(section.text, true, serverId, onOpenFilesPath)}</pre>
     </details>
   );
 }
 
-function renderCodexRichContent(text: string, serverId = '') {
+function renderCodexRichContent(
+  text: string,
+  serverId = '',
+  onOpenFilesPath?: OpenFilesPathHandler,
+) {
   return parseCodexContent(text).map((section, index) => {
     if (section.kind === 'text' || section.kind === 'code') {
-      return renderMarkdownText(section.text, 'legacy-codex-inline-text', `text-${index}`, serverId);
+      return renderMarkdownText(
+        section.text,
+        'legacy-codex-inline-text',
+        `text-${index}`,
+        serverId,
+        onOpenFilesPath,
+      );
     }
 
-    return renderCollapsibleSection(section, index);
+    return renderCollapsibleSection(section, index, serverId, onOpenFilesPath);
   });
 }
 
@@ -1379,7 +1507,14 @@ function isPlainCodexText(text: string): boolean {
   return sections.length > 0 && sections.every((section) => section.kind === 'text' || section.kind === 'code');
 }
 
-function renderDialogue(task: CodexTask, serverId = '') {
+function hasCodexFeedbackAfterLatestPrompt(output: string): boolean {
+  const normalized = normalizeOutput(output);
+  const index = normalized.lastIndexOf(CODEX_TRANSCRIPT_MARKER);
+  if (index === -1) return normalized.trim().length > 0;
+  return normalized.slice(index + CODEX_TRANSCRIPT_MARKER.length).trim().length > 0;
+}
+
+function renderDialogue(task: CodexTask, serverId = '', onOpenFilesPath?: OpenFilesPathHandler) {
   return parseCodexDialogue(task).map((block, index) => {
     const plainCodexText = block.role === 'codex' && isPlainCodexText(block.text);
     return (
@@ -1394,16 +1529,18 @@ function renderDialogue(task: CodexTask, serverId = '') {
         </span>
         {block.role === 'codex' ? (
           plainCodexText ? (
-            renderMarkdownText(block.text, '', undefined, serverId)
+            renderMarkdownText(block.text, '', undefined, serverId, onOpenFilesPath)
           ) : (
             <div className="legacy-codex-message-body legacy-codex-message-rich">
-              {renderCodexRichContent(block.text, serverId)}
+              {renderCodexRichContent(block.text, serverId, onOpenFilesPath)}
             </div>
           )
         ) : block.role === 'user' ? (
-          renderUserMessageBody(block.text, serverId)
+          renderUserMessageBody(block.text, serverId, onOpenFilesPath)
         ) : (
-          <pre className="legacy-codex-message-body">{renderDialogueText(block)}</pre>
+          <pre className="legacy-codex-message-body">
+            {renderDialogueText(block, serverId, onOpenFilesPath)}
+          </pre>
         )}
       </div>
     );
@@ -1416,12 +1553,14 @@ export function LegacyCodexPanel({
   legacyServer,
   focusTaskId = '',
   focusRequestNonce = 0,
+  onOpenFilesPath,
 }: {
   selectedProfile: ConnectionProfile | null;
   connected: boolean;
   legacyServer: LegacySshServer | null;
   focusTaskId?: string;
   focusRequestNonce?: number;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const [helperError, setHelperError] = useState('');
   const [tasks, setTasks] = useState<CodexTask[]>(() => readStoredTasks());
@@ -1671,6 +1810,27 @@ export function LegacyCodexPanel({
     setTasks((current) =>
       current.map((task) => (task.id === taskId ? updater(task) : task)),
     );
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setTasks((current) => {
+        let changed = false;
+        const nextTasks = current.map((task) => {
+          if (task.status !== 'running' || !task.running || hasCodexFeedbackAfterLatestPrompt(task.output)) {
+            return task;
+          }
+          changed = true;
+          return {
+            ...task,
+            output: trimOutput(`${task.output}\r\n${CODEX_STREAM_WAITING_TEXT}\r\n`),
+            updatedAt: new Date().toISOString(),
+          };
+        });
+        return changed ? nextTasks : current;
+      });
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -2007,7 +2167,7 @@ export function LegacyCodexPanel({
       id: createTaskId(),
       title,
       prompt,
-      output: `${USER_TRANSCRIPT_MARKER}\n${transcriptPrompt}\n${CODEX_TRANSCRIPT_MARKER}\n`,
+      output: `${USER_TRANSCRIPT_MARKER}\n${transcriptPrompt}\n${CODEX_TRANSCRIPT_MARKER}\n[CozyPad] codex started; opening stream\n`,
       status: 'running',
       running: true,
       connected: false,
@@ -2151,7 +2311,7 @@ export function LegacyCodexPanel({
       reasoningEffort: codexRunOptions.reasoningEffort,
       historyId,
       output: trimOutput(
-        `${task.output}\r\n${USER_TRANSCRIPT_MARKER}\r\n${transcriptPrompt}\r\n${CODEX_TRANSCRIPT_MARKER}\r\n`,
+        `${task.output}\r\n${USER_TRANSCRIPT_MARKER}\r\n${transcriptPrompt}\r\n${CODEX_TRANSCRIPT_MARKER}\r\n[CozyPad] codex started; opening stream\r\n`,
       ),
       updatedAt: new Date().toISOString(),
     }));
@@ -2398,7 +2558,11 @@ export function LegacyCodexPanel({
                 ) : null}
               </div>
               <div className="legacy-codex-dialogue" ref={dialogueScrollRef}>
-                {renderDialogue(activeTask, activeTask.profileId)}
+                {renderDialogue(
+                  activeTask,
+                  activeTask.profileId || legacyServer?.id || '',
+                  onOpenFilesPath,
+                )}
               </div>
             </>
           ) : (
@@ -2463,6 +2627,19 @@ export function LegacyCodexPanel({
                 placeholder="~"
                 spellCheck={false}
               />
+              <button
+                type="button"
+                className="legacy-codex-cwd-open"
+                disabled={!legacyServer?.id || !cwdInput.trim()}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  const path = cwdInput.trim();
+                  if (!legacyServer?.id || !path) return;
+                  onOpenFilesPath?.({ serverId: legacyServer.id, path });
+                }}
+              >
+                File
+              </button>
             </dd>
             <dt>Status</dt>
             <dd>

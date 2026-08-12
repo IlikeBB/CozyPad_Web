@@ -6,12 +6,18 @@ import {
   markdownRemarkPlugins,
   normalizeMarkdownMath,
 } from '../../components/markdownPlugins';
-import { linkifyRemotePathLines, markdownComponents } from '../../components/markdownComponents';
+import {
+  createMarkdownComponents,
+  linkifyRemotePathLines,
+  markdownComponents,
+} from '../../components/markdownComponents';
 
 interface ChatTimelineProps {
   sessionId: string;
   items: ChatItem[];
   assistantLabel?: string;
+  serverId?: string;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
   onResolveApproval(itemId: string, resolution: 'allowed' | 'denied'): void;
   onAnswerQuestion(itemId: string, optionIndex: number): void;
 }
@@ -307,19 +313,36 @@ function renderAssistantStatusCard(section: Extract<AssistantSection, { kind: 'm
   );
 }
 
-function renderAssistantBody(text: string) {
+function renderMarkdownMessage(
+  text: string,
+  serverId: string,
+  className: string,
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void,
+) {
+  return (
+    <div className={`markdown legacy-codex-markdown ${className}`}>
+      <Markdown
+        components={onOpenFilesPath ? createMarkdownComponents(onOpenFilesPath) : markdownComponents}
+        remarkPlugins={markdownRemarkPlugins}
+        rehypePlugins={markdownRehypePlugins}
+      >
+        {normalizeMarkdownMath(linkifyRemotePathLines(text, serverId))}
+      </Markdown>
+    </div>
+  );
+}
+
+function renderAssistantBody(
+  text: string,
+  serverId: string,
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void,
+) {
   return (
     <div className="agent-rich-message">
       {parseAssistantSections(text).map((section, index) =>
         section.kind === 'text' ? (
-          <div className="markdown legacy-codex-markdown agent-text-markdown" key={`text-${index}`}>
-            <Markdown
-              components={markdownComponents}
-              remarkPlugins={markdownRemarkPlugins}
-              rehypePlugins={markdownRehypePlugins}
-            >
-              {normalizeMarkdownMath(linkifyRemotePathLines(section.text))}
-            </Markdown>
+          <div key={`text-${index}`}>
+            {renderMarkdownMessage(section.text, serverId, 'agent-text-markdown', onOpenFilesPath)}
           </div>
         ) : (
           renderAssistantStatusCard(section, index)
@@ -333,6 +356,8 @@ export function ChatTimeline({
   sessionId,
   items,
   assistantLabel = 'Agent',
+  serverId = '',
+  onOpenFilesPath,
   onResolveApproval,
   onAnswerQuestion,
 }: ChatTimelineProps) {
@@ -368,7 +393,9 @@ export function ChatTimeline({
                 <div className="msg-stack">
                   <div className="msg-label">{item.role === 'assistant' ? assistantLabel : 'User'}</div>
                   <div className="msg-body">
-                    {item.role === 'assistant' ? renderAssistantBody(item.text) : item.text}
+                    {item.role === 'assistant'
+                      ? renderAssistantBody(item.text, serverId, onOpenFilesPath)
+                      : renderMarkdownMessage(item.text, serverId, 'agent-user-markdown', onOpenFilesPath)}
                     {item.streaming ? <span className="caret" /> : null}
                   </div>
                 </div>

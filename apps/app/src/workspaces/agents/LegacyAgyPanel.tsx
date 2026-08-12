@@ -550,12 +550,14 @@ export function LegacyAgyPanel({
   connected = false,
   focusTaskId = '',
   focusRequestNonce = 0,
+  onOpenFilesPath,
 }: {
   agentName?: LegacyAgentName;
   legacyServer: LegacySshServer | null;
   connected?: boolean;
   focusTaskId?: string;
   focusRequestNonce?: number;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const config = AGENT_CONFIG[agentName];
   const supportsModel = agentName === 'agy' || agentName === 'bailian';
@@ -1249,7 +1251,7 @@ export function LegacyAgyPanel({
           connectBailianTask(task);
         }
       });
-  }, [agentName, connectAgyTask, connectBailianTask, connected, legacyServer?.id]);
+  }, [agentName, connectAgyTask, connectBailianTask, connected, legacyServer?.id, tasks]);
 
   const handleKeyFile = async (file: File | undefined) => {
     if (!file) return;
@@ -1831,6 +1833,8 @@ export function LegacyAgyPanel({
                 sessionId={activeTask.id}
                 items={activeTask.items}
                 assistantLabel={config.label}
+                serverId={activeTask.profileId || legacyServer?.id || ''}
+                onOpenFilesPath={onOpenFilesPath}
                 onResolveApproval={() => undefined}
                 onAnswerQuestion={() => undefined}
               />
@@ -1877,6 +1881,19 @@ export function LegacyAgyPanel({
                   if (event.key === 'Enter') applyCwdInput();
                 }}
               />
+              <button
+                type="button"
+                className="legacy-codex-cwd-open"
+                disabled={!legacyServer?.id || !cwdInput.trim()}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  const path = cwdInput.trim();
+                  if (!legacyServer?.id || !path) return;
+                  onOpenFilesPath?.({ serverId: legacyServer.id, path });
+                }}
+              >
+                File
+              </button>
             </dd>
             <dt>Status</dt>
             <dd>

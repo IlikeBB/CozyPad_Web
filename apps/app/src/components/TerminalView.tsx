@@ -5,9 +5,9 @@ import '@xterm/xterm/css/xterm.css';
 import { base64ToBytes, textToBase64 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
 
-const LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS = 2;
+const LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS = 240;
 const LEGACY_TERMINAL_CONTROL_PREFIX = '\0COZYPAD:';
-const TERMINAL_OPEN_TIMEOUT_MS = 15000;
+const TERMINAL_OPEN_TIMEOUT_MS = 30000;
 
 export interface TerminalModifiers {
   ctrl: boolean;
@@ -255,10 +255,27 @@ export function TerminalView({
           }
         };
 
+        const scheduleReconnect = (reason: string): void => {
+          if (disposed) return;
+          if (reconnectAttempts >= LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS) {
+            term.write(
+              `\r\n\x1b[31m[CozyPad] terminal auto-reconnect paused after ${LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS} reuse attempts. Press Terminal again or switch back to this tab to reconnect manually.\x1b[0m\r\n`,
+            );
+            return;
+          }
+          reconnectAttempts += 1;
+          const delayMs = Math.min(15000, 900 + reconnectAttempts * 400);
+          term.write(
+            `\r\n\x1b[2m[CozyPad] terminal ${reason}; reattaching ${reconnectAttempts}/${LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS} in ${Math.ceil(
+              delayMs / 1000,
+            )}s...\x1b[0m\r\n`,
+          );
+          reconnectTimer = setTimeout(() => openLegacySocket(true), delayMs);
+        };
+
         socket.addEventListener('open', () => {
           window.clearTimeout(openTimeout);
           socketOpened = true;
-          reconnectAttempts = 0;
           readyTimeout = window.setTimeout(() => {
             if (disposed || legacySocket !== socket || firstMessageReceived) return;
             readyTimedOut = true;
@@ -285,6 +302,7 @@ export function TerminalView({
 
         socket.addEventListener('message', (event) => {
           firstMessageReceived = true;
+          reconnectAttempts = 0;
           clearReadyTimeout();
           void writeWebSocketDataToTerminal(term, event.data);
         });
@@ -295,24 +313,21 @@ export function TerminalView({
           if (disposed) return;
           onHandleRef.current?.(null);
           legacySocket = null;
-          if (socketTimedOut || readyTimedOut) return;
+          if (socketTimedOut || readyTimedOut) {
+            if (reuse) scheduleReconnect(socketTimedOut ? 'open timed out' : 'ready timed out');
+            return;
+          }
           if (!socketOpened) {
+            if (reuse) {
+              scheduleReconnect('could not reattach');
+              return;
+            }
             term.write(
               '\r\n\x1b[31m[CozyPad] terminal could not open; retry manually after checking the SSH server and key.\x1b[0m\r\n',
             );
             return;
           }
-          if (reconnectAttempts < LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS) {
-            reconnectAttempts += 1;
-            term.write(
-              `\r\n\x1b[2m[CozyPad] terminal disconnected; reattaching ${reconnectAttempts}/${LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS}...\x1b[0m\r\n`,
-            );
-            reconnectTimer = setTimeout(() => openLegacySocket(true), 900);
-            return;
-          }
-          term.write(
-            '\r\n\x1b[31m[CozyPad] terminal auto-reconnect stopped after 2 failed attempts to avoid SSH IP lockout. Reopen the terminal manually after checking the server.\x1b[0m\r\n',
-          );
+          scheduleReconnect('disconnected');
         });
 
         socket.addEventListener('error', () => {

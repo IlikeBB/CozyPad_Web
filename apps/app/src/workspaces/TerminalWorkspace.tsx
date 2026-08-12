@@ -107,6 +107,15 @@ export function TerminalWorkspace({
       null,
     [servers],
   );
+  const isRemoteTabBlocked = useCallback(
+    (tab: TerminalTab): boolean => {
+      if (connected) return false;
+      const server = servers.find((item) => item.id === tab.serverId);
+      if (!server) return tab.serverId !== 'system:localhost';
+      return !isLocalTerminalServer(server);
+    },
+    [connected, servers],
+  );
 
   const loadServers = useCallback(
     async (refresh = false) => {
@@ -312,23 +321,33 @@ export function TerminalWorkspace({
               <p className="hint">{serverError || '左上角選擇已匯入 SSH server 後，按齒輪旁的 + 開始連線。'}</p>
             </div>
           ) : null}
-          {tabs.map((tab) => (
-            <div key={tab.id} className="terminal-pane" hidden={active !== tab.id}>
-              <TerminalView
-                legacyServerId={tab.serverId}
-                legacyTerminalId={tab.terminalId}
-                onNotify={(message) => {
-                  setToast(message);
-                  setTimeout(() => setToast(null), 1600);
-                }}
-                onModifiersChange={setModifiers}
-                onHandle={(handle) => {
-                  if (handle) handles.current.set(tab.id, handle);
-                  else handles.current.delete(tab.id);
-                }}
-              />
-            </div>
-          ))}
+          {tabs.map((tab) => {
+            const blocked = isRemoteTabBlocked(tab);
+            return (
+              <div key={tab.id} className="terminal-pane" hidden={active !== tab.id}>
+                {blocked ? (
+                  <div className="placeholder">
+                    <p>Press Connect before opening SSH terminals.</p>
+                    <p className="hint">This remote tab is kept, but CozyPad will not start SSH while disconnected.</p>
+                  </div>
+                ) : (
+                  <TerminalView
+                    legacyServerId={tab.serverId}
+                    legacyTerminalId={tab.terminalId}
+                    onNotify={(message) => {
+                      setToast(message);
+                      setTimeout(() => setToast(null), 1600);
+                    }}
+                    onModifiersChange={setModifiers}
+                    onHandle={(handle) => {
+                      if (handle) handles.current.set(tab.id, handle);
+                      else handles.current.delete(tab.id);
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
         {quickOpen && tabs.length > 0 ? (
           <aside className="quick-commands">

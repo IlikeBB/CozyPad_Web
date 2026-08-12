@@ -49,6 +49,12 @@ export type LegacySshServer = {
   localOnly?: boolean;
 };
 
+export type LegacyCondaEnv = {
+  name: string;
+  path: string;
+  active?: boolean;
+};
+
 export type LegacyCodexBinding = LegacySshServer & {
   apiBaseUrl?: string;
   commandToken?: string;
@@ -516,8 +522,8 @@ function assertLegacySshExecutionEnabled(): void {
   }
 }
 
-export function openLegacyRemoteAgentStream(): WebSocket {
-  assertLegacySshExecutionEnabled();
+export function openLegacyRemoteAgentStream(options: { allowWithoutConnect?: boolean } = {}): WebSocket {
+  if (!options.allowWithoutConnect) assertLegacySshExecutionEnabled();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return new WebSocket(`${protocol}//${window.location.host}/api/agent/session`);
 }
@@ -867,6 +873,20 @@ export async function listLegacyServers(
     ...init,
   });
   return Array.isArray(data.servers) ? data.servers : [];
+}
+
+export async function listLegacyCondaEnvs(
+  serverId: string,
+  init?: Pick<RequestInit, 'signal'>,
+): Promise<LegacyCondaEnv[]> {
+  const data = await legacyApiRequest<{ envs: LegacyCondaEnv[] }>(
+    `/api/ssh/servers/${encodeURIComponent(serverId)}/conda-envs`,
+    {
+      method: 'GET',
+      ...init,
+    },
+  );
+  return Array.isArray(data.envs) ? data.envs : [];
 }
 
 export async function createLegacyServer(
@@ -1268,8 +1288,9 @@ export async function listLegacyCodexWorkflows(
 export async function createLegacyCodexHistory(
   serverId: string,
   title: string,
+  options: { allowWithoutConnect?: boolean } = {},
 ): Promise<LegacyCodexHistory> {
-  assertLegacySshExecutionEnabled();
+  if (!options.allowWithoutConnect) assertLegacySshExecutionEnabled();
   const data = await legacyApiRequest<{ history: LegacyCodexHistory }>('/api/codex/histories', {
     method: 'POST',
     body: JSON.stringify({ serverId, title }),

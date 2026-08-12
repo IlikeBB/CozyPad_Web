@@ -1594,6 +1594,49 @@ button.danger:hover {
   color: #eafff2;
 }
 
+.legacy-codex-markdown a[href^='#cozypad-file'] {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px 5px;
+  border: 1px solid rgba(134, 239, 172, 0.22);
+  border-radius: 5px;
+  background: rgba(20, 83, 45, 0.22);
+  color: #a7f3d0;
+  text-decoration: none;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.legacy-codex-markdown a[href^='#cozypad-file']:hover {
+  border-color: rgba(16, 185, 129, 0.65);
+  background: rgba(16, 185, 129, 0.18);
+  color: #d1fae5;
+}
+
+.legacy-codex-path-link {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px 5px;
+  border: 1px solid rgba(134, 239, 172, 0.22);
+  border-radius: 5px;
+  background: rgba(20, 83, 45, 0.22);
+  color: #a7f3d0;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-decoration: none;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.legacy-codex-path-link:hover {
+  border-color: rgba(16, 185, 129, 0.65);
+  background: rgba(16, 185, 129, 0.18);
+  color: #d1fae5;
+}
+
 .legacy-codex-markdown pre {
   max-width: 100%;
   background: rgba(0, 0, 0, 0.42);
@@ -2819,10 +2862,14 @@ button.danger:hover {
 }
 
 .context-panel .legacy-codex-cwd-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: visible;
 }
 
 .legacy-codex-cwd-input {
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   height: 26px;
@@ -2839,6 +2886,29 @@ button.danger:hover {
 .legacy-codex-cwd-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.legacy-codex-cwd-open {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.legacy-codex-cwd-open:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  box-shadow: var(--matrix-glow);
+}
+
+.legacy-codex-cwd-open:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .legacy-codex-settings {
@@ -6657,7 +6727,43 @@ section.research-markdown-card:not([hidden]) {
 }
 
 .research-training-meta {
-  grid-template-columns: 1fr 1.35fr 1.35fr 0.7fr;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.research-training-conda-field {
+  min-width: 0;
+}
+
+.research-training-inline-field {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+
+.research-training-inline-field input {
+  flex: 1;
+  min-width: 0;
+}
+
+.research-training-inline-field button {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 80%, var(--panel));
+}
+
+.research-training-inline-field button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.research-training-field small {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .research-training-preview {

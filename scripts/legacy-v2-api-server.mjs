@@ -243,7 +243,7 @@ const TERMINAL_CHANNEL_OPEN_TIMEOUT_MS = Math.max(
   Number(process.env.COZYPAD_TERMINAL_CHANNEL_OPEN_TIMEOUT_MS || 15000) || 15000,
 );
 const TERMINAL_AGENT_RUN_TIMEOUT_MS = Number(
-  process.env.COZYPAD_TERMINAL_AGENT_RUN_TIMEOUT_MS || 5 * 60 * 1000,
+  process.env.COZYPAD_TERMINAL_AGENT_RUN_TIMEOUT_MS || 24 * 60 * 60 * 1000,
 );
 const AGENT_TERMINAL_BRIDGE_ENABLED = process.env.COZYPAD_AGENT_TERMINAL_BRIDGE !== "false";
 const CODEX_SESSION_DETACHED_TTL_MS = Number(
@@ -5237,6 +5237,110 @@ function runProcess(command, args, options = {}) {
       resolve({ ok: code === 0, code, stdout, stderr });
     });
   });
+}
+
+function condaEnvNameFromPath(envPath) {
+  const normalized = String(envPath || "").replace(/\\/g, "/").replace(/\/+$/g, "");
+  const name = normalized.split("/").filter(Boolean).pop() || normalized;
+  return /^(?:miniconda3|anaconda3|mambaforge|micromamba)$/i.test(name) ? "base" : name;
+}
+
+function uniqueCondaEnvs(envs) {
+  const seen = new Set();
+  return envs
+    .map((env) => ({
+      name: String(env.name || condaEnvNameFromPath(env.path)).trim(),
+      path: String(env.path || "").trim(),
+      active: Boolean(env.active),
+    }))
+    .filter((env) => env.name && env.path)
+    .filter((env) => {
+      const key = `${env.name}\n${env.path}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function parseCondaEnvOutput(stdout) {
+  const raw = String(stdout || "").trim();
+  if (!raw) return [];
+
+  try {
+    const data = JSON.parse(raw);
+    if (Array.isArray(data?.envs)) {
+      return uniqueCondaEnvs(
+        data.envs.map((envPath) => ({
+          name: condaEnvNameFromPath(envPath),
+          path: String(envPath || ""),
+          active: false,
+        })),
+      );
+    }
+  } catch {
+    // Fall through to plain-text conda output parsing.
+  }
+
+  return uniqueCondaEnvs(
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const active = /\*/.test(line);
+        const cleaned = line.replace(/\*/g, " ").trim();
+        const parts = cleaned.split(/\s+/).filter(Boolean);
+        if (parts.length === 1) {
+          return { name: condaEnvNameFromPath(parts[0]), path: parts[0], active };
+        }
+        return { name: parts[0], path: parts[parts.length - 1], active };
+      }),
+  );
+}
+
+async function listLocalCondaEnvs() {
+  const jsonScript =
+    "$ErrorActionPreference='SilentlyContinue'; conda env list --json 2>$null";
+  const jsonResult = await runProcess("powershell.exe", ["-NoProfile", "-Command", jsonScript], {
+    timeoutMs: 15000,
+    stdoutLimit: 128 * 1024,
+    stderrLimit: 64 * 1024,
+  });
+  const jsonEnvs = parseCondaEnvOutput(jsonResult.stdout);
+  if (jsonEnvs.length) return jsonEnvs;
+
+  const textScript = "$ErrorActionPreference='SilentlyContinue'; conda info --envs 2>$null";
+  const textResult = await runProcess("powershell.exe", ["-NoProfile", "-Command", textScript], {
+    timeoutMs: 15000,
+    stdoutLimit: 128 * 1024,
+    stderrLimit: 64 * 1024,
+  });
+  return parseCondaEnvOutput(textResult.stdout);
+}
+
+async function listServerCondaEnvs(session, server) {
+  if (isSystemLocalServer(server)) {
+    return listLocalCondaEnvs();
+  }
+
+  const command = [
+    "if command -v conda >/dev/null 2>&1; then",
+    "conda env list --json 2>/dev/null || conda info --envs 2>/dev/null || true;",
+    "elif [ -n \"$CONDA_EXE\" ] && [ -x \"$CONDA_EXE\" ]; then",
+    "\"$CONDA_EXE\" env list --json 2>/dev/null || \"$CONDA_EXE\" info --envs 2>/dev/null || true;",
+    "else",
+    "printf '';",
+    "fi",
+  ].join(" ");
+  const result = await runRemoteCommand(session, server, command, 15000, {
+    purpose: "conda env scan",
+    stdoutLimit: 128 * 1024,
+    stderrLimit: 64 * 1024,
+  });
+  if (!result.ok && !result.stdout) {
+    throw new Error(result.stderr || "Conda env scan failed");
+  }
+  return parseCondaEnvOutput(result.stdout);
 }
 
 function sanitizePublicWorkflowText(value) {
@@ -15092,12 +15196,26 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
   codexSession.buffer = trimCodexSessionBuffer(
     `${codexSession.buffer}${codexSession.buffer.endsWith("\n") ? "" : "\r\n"}> ${historyPrompt}\r\n`,
   );
+  appendCodexSessionOutput(codexSession, "[CozyPad] codex started; waiting for CLI output\r\n");
 
   let assistantOutput = "";
   let openAiAuthError = false;
+  let lastVisibleCodexOutputAt = Date.now();
+  const progressTimer = setInterval(() => {
+    if (!codexSession.running || codexSession.activeChild !== child) {
+      clearInterval(progressTimer);
+      return;
+    }
+    if (Date.now() - lastVisibleCodexOutputAt < 60000) {
+      return;
+    }
+    lastVisibleCodexOutputAt = Date.now();
+    appendCodexSessionOutput(codexSession, "[CozyPad] codex is still processing; waiting for CLI output\r\n");
+  }, 15000);
+  progressTimer.unref?.();
   const openAiAuthMessage = localCodex
-    ? "本機的 Codex OpenAI 登入已失效。請在這台電腦執行 `codex login`，完成後再重試。"
-    : `${selectedServer.name} 的 Codex OpenAI 登入已失效。請在該台 SSH server 執行 \`codex login\`，完成後再重試。`;
+    ? "Local Codex OpenAI login is invalid. Run `codex login` on this computer, then retry."
+    : `${selectedServer.name} Codex OpenAI login is invalid. Run \`codex login\` on that SSH server, then retry.`;
   const markOpenAiAuthError = () => {
     if (openAiAuthError) return;
     openAiAuthError = true;
@@ -15107,7 +15225,10 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
     appendCodexSessionOutput(codexSession, `\r\n${openAiAuthMessage}\r\n`);
   };
   const outputParser = createCodexOutputParser(
-    (text) => appendCodexSessionOutput(codexSession, text),
+    (text) => {
+      lastVisibleCodexOutputAt = Date.now();
+      appendCodexSessionOutput(codexSession, text);
+    },
     (text) => {
       assistantOutput = `${assistantOutput}${assistantOutput ? "\n" : ""}${text}`.slice(
         -64 * 1024,
@@ -15127,6 +15248,7 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
     }
     const visibleError = visibleRemoteCodexStderr(text);
     if (visibleError) {
+      lastVisibleCodexOutputAt = Date.now();
       appendCodexSessionOutput(
         codexSession,
         `\r\n[${localCodex ? "Local Codex" : "Remote Codex"}]\r\n${visibleError}\r\n`,
@@ -15134,6 +15256,7 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
     }
   });
   child.on("error", async (error) => {
+    clearInterval(progressTimer);
     codexSession.status = "failed";
     const terminalBridgeClosedByUser = !localCodex && isTerminalBridgeUserClosedError(error);
     const failureText = terminalBridgeClosedByUser
@@ -15167,6 +15290,7 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
     }
   });
   child.on("close", async (code) => {
+    clearInterval(progressTimer);
     outputParser.flush();
     const transportError = !localCodex && isRemoteCodexSshTransportError(stderr);
     const authError = openAiAuthError || isRemoteCodexOpenAiAuthError(stderr);
@@ -16872,6 +16996,25 @@ async function handleRequest(request, response) {
       }
       return;
     }
+  }
+
+  const condaEnvRoute = pathname.match(/^\/api\/ssh\/servers\/([^/]+)\/conda-envs$/);
+  if (request.method === "GET" && condaEnvRoute) {
+    try {
+      const server = await findServer(condaEnvRoute[1], session);
+      if (!server) {
+        sendJson(response, 404, { ok: false, error: "SSH server not found" });
+        return;
+      }
+      const envs = await listServerCondaEnvs(session, server);
+      sendJson(response, 200, { ok: true, server: publicSshServer(server), envs });
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        error: error instanceof Error ? error.message : "Conda env scan failed",
+      });
+    }
+    return;
   }
 
   if (request.method === "GET" && pathname === "/api/ssh/servers") {

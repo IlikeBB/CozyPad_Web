@@ -145,6 +145,7 @@ export function AgentsWorkspace({
   selectedProfile,
   connected,
   openTarget,
+  onOpenFilesPath,
 }: {
   mockData: boolean;
   selectedProfile: ConnectionProfile | null;
@@ -155,6 +156,7 @@ export function AgentsWorkspace({
     profileId: string;
     nonce: number;
   } | null;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const [agent, setAgent] = useState<AgentKind>(DEFAULT_AGENT);
   const [remoteServer, setRemoteServer] = useState<LegacySshServer | null>(null);
@@ -443,6 +445,7 @@ export function AgentsWorkspace({
           legacyServer={remoteServer}
           focusTaskId={openTarget?.agent === 'codex' ? openTarget.taskId : ''}
           focusRequestNonce={openTarget?.agent === 'codex' ? openTarget.nonce : 0}
+          onOpenFilesPath={onOpenFilesPath}
         />
       ) : agent === 'agy' ? (
         <LegacyAgyPanel
@@ -452,6 +455,7 @@ export function AgentsWorkspace({
           connected={connected}
           focusTaskId={openTarget?.agent === 'agy' ? openTarget.taskId : ''}
           focusRequestNonce={openTarget?.agent === 'agy' ? openTarget.nonce : 0}
+          onOpenFilesPath={onOpenFilesPath}
         />
       ) : agent === 'bailian' ? (
         <LegacyAgyPanel
@@ -461,6 +465,7 @@ export function AgentsWorkspace({
           connected={connected}
           focusTaskId={openTarget?.agent === 'bailian' ? openTarget.taskId : ''}
           focusRequestNonce={openTarget?.agent === 'bailian' ? openTarget.nonce : 0}
+          onOpenFilesPath={onOpenFilesPath}
         />
       ) : mockAgentInstallState[agent] === 'not_detected' ? (
         <div className="agent-setup">
@@ -527,6 +532,8 @@ export function AgentsWorkspace({
                   sessionId={selectedSession.id}
                   items={timeline}
                   assistantLabel={AGENTS.find((entry) => entry.kind === agent)?.label ?? agent}
+                  serverId={remoteServer?.id || ''}
+                  onOpenFilesPath={onOpenFilesPath}
                   onResolveApproval={resolveApproval}
                   onAnswerQuestion={answerQuestion}
                 />
@@ -559,7 +566,20 @@ export function AgentsWorkspace({
                   <dt>Project</dt>
                   <dd>{selectedSession.project}</dd>
                   <dt>cwd</dt>
-                  <dd className="mono">{selectedSession.cwd}</dd>
+                  <dd className="legacy-codex-cwd-cell">
+                    <span className="mono">{selectedSession.cwd}</span>
+                    <button
+                      type="button"
+                      className="legacy-codex-cwd-open"
+                      disabled={!remoteServer?.id || !selectedSession.cwd}
+                      onClick={() => {
+                        if (!remoteServer?.id || !selectedSession.cwd) return;
+                        onOpenFilesPath?.({ serverId: remoteServer.id, path: selectedSession.cwd });
+                      }}
+                    >
+                      File
+                    </button>
+                  </dd>
                   <dt>Status</dt>
                   <dd>
                     <span className={`chip chip-${selectedSession.status}`}>
