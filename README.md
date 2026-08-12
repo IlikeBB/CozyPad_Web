@@ -76,19 +76,6 @@ pnpm install
 pnpm test         # 全綠即環境就緒
 ```
 
-### 日常使用
-
-| 做什麼 | 操作 |
-| --- | --- |
-| 連真實主機使用 | 雙擊 `CozyPad.bat`，或 `pnpm --filter @cozypad/desktop start` |
-| Demo（內建假主機，零設定） | 雙擊 `CozyPad-Demo.bat` |
-| UI 開發（瀏覽器熱更新） | `pnpm dev` → http://localhost:5173 |
-| 桌面開發（Electron 熱更新，mock） | `pnpm dev:desktop` |
-| 桌面開發（真 SSH） | `pnpm dev:desktop:ssh` |
-| Android debug APK | `pnpm --filter @cozypad/mobile apk:debug`（需 Android SDK + JDK 21） |
-| Android signed release APK | 設定簽章環境變數後執行 `pnpm --filter @cozypad/mobile apk` |
-| 檢查 | `pnpm lint` / `pnpm typecheck` / `pnpm test` |
-
 第一次連主機：右上 **⚙** 新增連線 → 選擇「密碼」或「SSH Key」→ Connect
 → 核對並確認 host key 指紋。關閉「以 OS 安全儲存保留驗證資料」時，憑證只保留
 到本次 app 結束，期間仍可自動重連。
