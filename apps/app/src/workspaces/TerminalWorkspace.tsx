@@ -100,18 +100,11 @@ export function TerminalWorkspace({
     () => servers.find((server) => server.id === selectedServerId) ?? null,
     [selectedServerId, servers],
   );
-  const localServer = useMemo(
-    () =>
-      servers.find((server) => server.id === 'system:localhost') ??
-      servers.find(isLocalTerminalServer) ??
-      null,
-    [servers],
-  );
   const isRemoteTabBlocked = useCallback(
     (tab: TerminalTab): boolean => {
       if (connected) return false;
       const server = servers.find((item) => item.id === tab.serverId);
-      if (!server) return tab.serverId !== 'system:localhost';
+      if (!server) return true;
       return !isLocalTerminalServer(server);
     },
     [connected, servers],
@@ -134,9 +127,6 @@ export function TerminalWorkspace({
         if (loadServersRequestRef.current !== requestId) return;
         setServers(nextServers);
         setSelectedServerId((current) => {
-          if (!connected) {
-            return nextServers.find((server) => server.id === 'system:localhost')?.id ?? '';
-          }
           return resolveTerminalServerId(nextServers, profileId, current);
         });
       } catch (error) {
@@ -228,15 +218,15 @@ export function TerminalWorkspace({
   }, [connected, selectedServer]);
 
   useEffect(() => {
-    const handleNewTerminal = () => addTab(connected ? selectedServer : localServer);
+    const handleNewTerminal = () => addTab(selectedServer);
     window.addEventListener('cozypad:terminal:new', handleNewTerminal);
     return () => window.removeEventListener('cozypad:terminal:new', handleNewTerminal);
-  }, [addTab, connected, localServer, selectedServer]);
+  }, [addTab, selectedServer]);
 
   useEffect(() => {
     if (!workspaceActive || tabs.length > 0 || servers.length === 0) return;
-    addTab(connected ? selectedServer : localServer);
-  }, [addTab, connected, localServer, selectedServer, servers.length, tabs.length, workspaceActive]);
+    addTab(selectedServer);
+  }, [addTab, selectedServer, servers.length, tabs.length, workspaceActive]);
 
   const closeTab = (id: number) => {
     const tab = tabs.find((item) => item.id === id);
@@ -291,8 +281,8 @@ export function TerminalWorkspace({
           type="button"
           title="New terminal"
           aria-label="New terminal"
-          onClick={() => addTab(connected ? selectedServer : localServer)}
-          disabled={!(connected ? selectedServer : localServer)}
+          onClick={() => addTab(selectedServer)}
+          disabled={!selectedServer}
         >
           +
         </button>

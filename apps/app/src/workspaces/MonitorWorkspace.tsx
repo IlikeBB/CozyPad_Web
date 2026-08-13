@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { createLegacyWebSocketUrl } from '../platform/legacyApiRoutes';
 import {
   isLegacyAuthError,
   listLegacyServers,
@@ -626,16 +627,16 @@ export function MonitorWorkspace({
     }
 
     let closedByEffect = false;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams();
 
     if (selectedServerId) {
       params.set('serverId', selectedServerId);
     }
-    const query = params.toString();
-    const socket = new WebSocket(
-      `${protocol}//${window.location.host}/api/ssh/monitor${query ? `?${query}` : ''}`,
-    );
+    const url = createLegacyWebSocketUrl('/api/ssh/monitor');
+    for (const [key, value] of params) {
+      url.searchParams.set(key, value);
+    }
+    const socket = new WebSocket(url.toString());
     let socketOpened = false;
 
     setMonitorState('connecting');

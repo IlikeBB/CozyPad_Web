@@ -13,6 +13,7 @@ import {
   filePathLinkDataset,
   linkifyRemotePathLines,
 } from '../../components/markdownComponents';
+import { createLegacyWebSocketUrl } from '../../platform/legacyApiRoutes';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
 import { EditSentMessageDialog } from './EditSentMessageDialog';
@@ -1967,8 +1968,7 @@ export function LegacyCodexPanel({
       }
       existing?.close();
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = new URL(`${protocol}//${window.location.host}/api/codex/session`);
+      const url = createLegacyWebSocketUrl('/api/codex/session');
       url.searchParams.set('serverId', legacyServer.id);
       url.searchParams.set('remotePath', task.remotePath || legacyServer.defaultPath || '~');
       url.searchParams.set('taskId', task.id);

@@ -4699,21 +4699,6 @@ function isSystemLocalServer(server) {
   return isLoopbackHostname(host) && (labelledLocalTerminal || noSshPort);
 }
 
-function createLocalhostServer() {
-  return {
-    id: "system:localhost",
-    source: "system",
-    name: "localhost",
-    alias: "localhost",
-    host: "127.0.0.1",
-    user: os.userInfo().username,
-    port: 0,
-    identityFile: "",
-    defaultPath: os.homedir(),
-    localOnly: true,
-  };
-}
-
 function localCodexSshBinding(server, commandAccess = null) {
   const {
     configFile,
@@ -4746,7 +4731,6 @@ async function listServers(session, options = {}) {
   const localAliases = new Set(localServers.map((server) => server.alias || server.name));
 
   const servers = [
-    createLocalhostServer(),
     ...localServers.map((server) => ({ ...server, source: "local" })),
     ...configServers.filter((server) => !localAliases.has(server.alias)),
   ];
@@ -5515,12 +5499,51 @@ function createLocalTestResult(server) {
   };
 }
 
+function opensshFallbackAllowed(server, options = {}) {
+  return options.opensshFallback !== false && !isSystemLocalServer(server);
+}
+
 async function runSshCommand(server, remoteCommand, timeoutMs, sshOptions = {}) {
-  throw new Error(ssh2RequiredMessage(server, sshOptions.purpose || "SSH command"));
+  const startedAt = Date.now();
+  const args = [
+    ...buildSshArgs(server, {
+      ...sshOptions,
+      controlMaster: sshOptions.controlMaster ?? false,
+    }),
+    remoteCommand,
+  ];
+  const result = await runProcess("ssh.exe", args, {
+    timeoutMs,
+    stdoutLimit: sshOptions.stdoutLimit,
+    stderrLimit: sshOptions.stderrLimit,
+  });
+  return {
+    ...result,
+    durationMs: Date.now() - startedAt,
+    transport: "openssh",
+  };
 }
 
 async function runSshCommandWithInput(server, remoteCommand, input, timeoutMs, sshOptions = {}) {
-  throw new Error(ssh2RequiredMessage(server, sshOptions.purpose || "SSH command"));
+  const startedAt = Date.now();
+  const args = [
+    ...buildSshArgs(server, {
+      ...sshOptions,
+      controlMaster: sshOptions.controlMaster ?? false,
+    }),
+    remoteCommand,
+  ];
+  const result = await runProcess("ssh.exe", args, {
+    input,
+    timeoutMs,
+    stdoutLimit: sshOptions.stdoutLimit,
+    stderrLimit: sshOptions.stderrLimit,
+  });
+  return {
+    ...result,
+    durationMs: Date.now() - startedAt,
+    transport: "openssh",
+  };
 }
 
 function expandLocalSshPath(value) {
@@ -5869,14 +5892,44 @@ async function runSsh2BrokerCommand(session, server, remoteCommand, input, timeo
 
 function runRemoteCommand(session, server, remoteCommand, timeoutMs, sshOptions = {}) {
   if (canUseSsh2Broker(server) && sshOptions.ssh2 !== false) {
-    return runSsh2BrokerCommand(session, server, remoteCommand, undefined, timeoutMs, sshOptions);
+    return runSsh2BrokerCommand(session, server, remoteCommand, undefined, timeoutMs, sshOptions).then(
+      async (result) => {
+        if (
+          opensshFallbackAllowed(server, sshOptions) &&
+          !result.ok &&
+          (result.code === 124 || result.code === -1) &&
+          !String(result.stdout || "").trim()
+        ) {
+          return runSshCommand(server, remoteCommand, timeoutMs, sshOptions);
+        }
+        return result;
+      },
+    );
+  }
+  if (opensshFallbackAllowed(server, sshOptions)) {
+    return runSshCommand(server, remoteCommand, timeoutMs, sshOptions);
   }
   return Promise.reject(new Error(ssh2RequiredMessage(server, sshOptions.purpose || "SSH command")));
 }
 
 function runRemoteCommandWithInput(session, server, remoteCommand, input, timeoutMs, sshOptions = {}) {
   if (canUseSsh2Broker(server) && sshOptions.ssh2 !== false) {
-    return runSsh2BrokerCommand(session, server, remoteCommand, input, timeoutMs, sshOptions);
+    return runSsh2BrokerCommand(session, server, remoteCommand, input, timeoutMs, sshOptions).then(
+      async (result) => {
+        if (
+          opensshFallbackAllowed(server, sshOptions) &&
+          !result.ok &&
+          (result.code === 124 || result.code === -1) &&
+          !String(result.stdout || "").trim()
+        ) {
+          return runSshCommandWithInput(server, remoteCommand, input, timeoutMs, sshOptions);
+        }
+        return result;
+      },
+    );
+  }
+  if (opensshFallbackAllowed(server, sshOptions)) {
+    return runSshCommandWithInput(server, remoteCommand, input, timeoutMs, sshOptions);
   }
   return Promise.reject(new Error(ssh2RequiredMessage(server, sshOptions.purpose || "SSH command")));
 }
@@ -9739,12 +9792,28 @@ async function createSsh2ExecChild(owner, server, remoteCommand, gateOptions = {
 
 async function createRemoteWorkerChild(owner, server, remoteCommand, purpose, gateOptions = {}) {
   if (!canUseSsh2Broker(server)) {
+    if (opensshFallbackAllowed(server)) {
+      return spawn("ssh.exe", [...buildSshArgs(server, { controlMaster: false }), remoteCommand], {
+        cwd: appRoot,
+        env: { ...process.env, TERM: "xterm-256color" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
     throw new Error(ssh2RequiredMessage(server, purpose));
   }
 
   try {
     return await createSsh2ExecChild(owner, server, remoteCommand, gateOptions);
   } catch (error) {
+    if (opensshFallbackAllowed(server)) {
+      return spawn("ssh.exe", [...buildSshArgs(server, { controlMaster: false }), remoteCommand], {
+        cwd: appRoot,
+        env: { ...process.env, TERM: "xterm-256color" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
     throw new Error(
       `ssh2 ${purpose} failed for ${server.name || getServerTargetLabel(server)}: ${
         error instanceof Error ? error.message : String(error || "unknown error")
@@ -9764,16 +9833,46 @@ async function createTerminalChild(owner, server, dimensions = {}, gateOptions =
   }
 
   if (!SSH2_TERMINAL_ENABLED) {
+    if (opensshFallbackAllowed(server)) {
+      const args = buildSshArgs(server, { batch: false, controlMaster: false });
+      args.splice(Math.max(0, args.length - 1), 0, "-tt");
+      return spawn("ssh.exe", args, {
+        cwd: appRoot,
+        env: { ...process.env, TERM: "xterm-256color" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
     throw new Error(ssh2RequiredMessage(server, "SSH terminal"));
   }
 
   if (!canUseSsh2Broker(server)) {
+    if (opensshFallbackAllowed(server)) {
+      const args = buildSshArgs(server, { batch: false, controlMaster: false });
+      args.splice(Math.max(0, args.length - 1), 0, "-tt");
+      return spawn("ssh.exe", args, {
+        cwd: appRoot,
+        env: { ...process.env, TERM: "xterm-256color" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
     throw new Error(ssh2RequiredMessage(server, "SSH terminal"));
   }
 
   try {
     return await createSsh2TerminalChild(owner, server, dimensions, gateOptions);
   } catch (error) {
+    if (opensshFallbackAllowed(server)) {
+      const args = buildSshArgs(server, { batch: false, controlMaster: false });
+      args.splice(Math.max(0, args.length - 1), 0, "-tt");
+      return spawn("ssh.exe", args, {
+        cwd: appRoot,
+        env: { ...process.env, TERM: "xterm-256color" },
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
     throw new Error(
       `ssh2 terminal failed for ${server.name || getServerTargetLabel(server)}: ${
         error instanceof Error ? error.message : String(error || "unknown error")
@@ -17454,6 +17553,10 @@ const server = createServer((request, response) => {
 
 server.on("upgrade", (request, socket) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+  if (url.pathname.startsWith("/cozypad-agent/")) {
+    url.pathname = `/api/${url.pathname.slice("/cozypad-agent/".length)}`;
+    request.url = `${url.pathname}${url.search}`;
+  }
   if (!CODEX_FEATURE_ENABLED && url.pathname === "/api/codex/session") {
     rejectSocket(socket, 410, "Codex feature is disabled");
     return;

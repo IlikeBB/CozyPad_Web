@@ -115,17 +115,7 @@ function profileMatchesLegacyServer(
 function profileToLegacyServer(profile: ConnectionProfile | null): LegacySshServer | null {
   if (profile === null) return null;
   if (isLocalProfile(profile)) {
-    return {
-      id: 'system:localhost',
-      source: 'system',
-      name: profile.name || 'localhost',
-      alias: profile.name || 'localhost',
-      host: '127.0.0.1',
-      user: profile.username,
-      port: 0,
-      defaultPath: '~',
-      localOnly: true,
-    };
+    return null;
   }
 
   return {

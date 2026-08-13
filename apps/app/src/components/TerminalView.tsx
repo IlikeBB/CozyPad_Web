@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { base64ToBytes, textToBase64 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
+import { createLegacyWebSocketUrl } from '../platform/legacyApiRoutes';
 
 const LEGACY_TERMINAL_RECONNECT_MAX_ATTEMPTS = 240;
 const LEGACY_TERMINAL_CONTROL_PREFIX = '\0COZYPAD:';
@@ -76,8 +77,7 @@ function createLegacyTerminalUrl(
   rows: number,
   reuse: boolean,
 ): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL('/api/ssh/terminal', `${protocol}//${window.location.host}`);
+  const url = createLegacyWebSocketUrl('/api/ssh/terminal');
   url.searchParams.set('serverId', serverId);
   url.searchParams.set('terminalId', terminalId);
   url.searchParams.set('cols', String(cols));

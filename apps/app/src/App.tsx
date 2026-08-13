@@ -116,12 +116,7 @@ function legacyServerToConnectionProfile(server: LegacySshServer): ConnectionPro
 }
 
 function canUseLegacyProfile(profile: ConnectionProfile): boolean {
-  return (
-    profile.id === 'system:localhost' ||
-    profile.host === '127.0.0.1' ||
-    profile.host === 'localhost' ||
-    profile.hasPrivateKey === true
-  );
+  return profile.hasPrivateKey === true;
 }
 
 function mergeProfileOptions(
@@ -235,7 +230,9 @@ export function App() {
     void listLegacyServers(false)
       .then((servers) => {
         if (!active) return;
-        const nextLegacyProfiles = servers.map(legacyServerToConnectionProfile);
+        const nextLegacyProfiles = servers
+          .filter((server) => !isLocalLegacyServer(server))
+          .map(legacyServerToConnectionProfile);
         setLegacyProfileOptions(nextLegacyProfiles);
         setSelectedId((current) => {
           const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);

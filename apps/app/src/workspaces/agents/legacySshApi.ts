@@ -1,3 +1,5 @@
+import { createLegacyWebSocketUrl, resolveLegacyHttpPath } from '../../platform/legacyApiRoutes';
+
 export type LegacyAuthUser = {
   username: string;
   role: string;
@@ -526,8 +528,7 @@ function assertLegacySshExecutionEnabled(): void {
 
 export function openLegacyRemoteAgentStream(options: { allowWithoutConnect?: boolean } = {}): WebSocket {
   if (!options.allowWithoutConnect) assertLegacySshExecutionEnabled();
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return new WebSocket(`${protocol}//${window.location.host}/api/agent/session`);
+  return new WebSocket(createLegacyWebSocketUrl('/api/agent/session').toString());
 }
 
 export function openLegacyClaudeSession(options: {
@@ -537,8 +538,7 @@ export function openLegacyClaudeSession(options: {
   suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL(`${protocol}//${window.location.host}/api/claude/session`);
+  const url = createLegacyWebSocketUrl('/api/claude/session');
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
@@ -553,8 +553,7 @@ export function openLegacyAgySession(options: {
   suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL(`${protocol}//${window.location.host}/api/agy/session`);
+  const url = createLegacyWebSocketUrl('/api/agy/session');
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
@@ -569,8 +568,7 @@ export function openLegacyBailianSession(options: {
   suppressReplay?: boolean;
 }): WebSocket {
   assertLegacySshExecutionEnabled();
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL(`${protocol}//${window.location.host}/api/bailian/session`);
+  const url = createLegacyWebSocketUrl('/api/bailian/session');
   url.searchParams.set('serverId', options.serverId);
   if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
   if (options.taskId) url.searchParams.set('taskId', options.taskId);
@@ -782,7 +780,7 @@ async function fetchLegacyApi(path: string, init?: RequestInit, extraHeaders: Re
   let response: Response;
   const request = withLegacyApiTimeout(init);
   try {
-    response = await fetch(path, {
+    response = await fetch(resolveLegacyHttpPath(path), {
       ...request.init,
       credentials: 'include',
       headers: {

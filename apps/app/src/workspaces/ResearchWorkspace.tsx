@@ -6,6 +6,7 @@ import {
   markdownRemarkPlugins,
   normalizeMarkdownMath,
 } from '../components/markdownPlugins';
+import { createLegacyWebSocketUrl } from '../platform/legacyApiRoutes';
 import {
   createLegacyCodexHistory,
   listLegacyCondaEnvs,
@@ -1974,8 +1975,7 @@ async function runResearchCodexStreamPrompt(options: {
       reject(new Error('Agent Draw cancelled.'));
       return;
     }
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = new URL(`${protocol}//${window.location.host}/api/codex/session`);
+    const url = createLegacyWebSocketUrl('/api/codex/session');
     url.searchParams.set('serverId', options.serverId);
     if (options.remotePath) url.searchParams.set('remotePath', options.remotePath);
     url.searchParams.set('taskId', createResearchCodexTaskId());

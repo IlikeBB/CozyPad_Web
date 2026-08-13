@@ -9,7 +9,7 @@ const PROD_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' data: blob:",
+  "connect-src 'self' data: blob: http://127.0.0.1:5174 http://localhost:5174 ws://127.0.0.1:5174 ws://localhost:5174",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -49,6 +49,7 @@ export default defineConfig(({ command }) => ({
       },
       '/cozypad-agent': {
         target: 'http://127.0.0.1:5174',
+        ws: true,
       },
     },
   },
