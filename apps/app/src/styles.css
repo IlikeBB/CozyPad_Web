@@ -2402,6 +2402,7 @@ button.danger:hover {
 
 .codex-app-composer-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -2429,6 +2430,10 @@ button.danger:hover {
 
 .codex-app-composer-controls label:first-of-type select {
   max-width: 180px;
+}
+
+.codex-app-composer-controls .codex-app-review-target select {
+  min-width: 138px;
 }
 
 .codex-app-mode-button {

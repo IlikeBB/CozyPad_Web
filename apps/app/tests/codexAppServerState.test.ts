@@ -119,4 +119,23 @@ describe('reduceCodexRuntimeEvent', () => {
       modelContextWindow: 200_000,
     });
   });
+
+  it('keeps the final review result as a structured item', () => {
+    const entered = reduceCodexRuntimeEvent(
+      { ...EMPTY_CODEX_STRUCTURED_STATE, threadId: 'thread-1' },
+      event('item/started', {
+        item: { id: 'review-1', type: 'enteredReviewMode', review: 'current changes' },
+      }),
+    );
+    const exited = reduceCodexRuntimeEvent(
+      entered,
+      event('item/completed', {
+        item: { id: 'review-1', type: 'exitedReviewMode', review: 'No findings.' },
+      }),
+    );
+
+    expect(exited.items).toEqual([
+      { id: 'review-1', type: 'exitedReviewMode', review: 'No findings.' },
+    ]);
+  });
 });

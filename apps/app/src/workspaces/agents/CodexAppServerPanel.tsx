@@ -47,6 +47,16 @@ type ThreadGoal = {
   timeUsedSeconds?: number;
 };
 type ThreadGoalResponse = { goal?: ThreadGoal | null };
+type ReviewTargetType = 'uncommittedChanges' | 'baseBranch' | 'commit' | 'custom';
+type ReviewTarget =
+  | { type: 'uncommittedChanges' }
+  | { type: 'baseBranch'; branch: string }
+  | { type: 'commit'; sha: string; title: string | null }
+  | { type: 'custom'; instructions: string };
+type ReviewStartResponse = {
+  turn?: { id?: string; status?: string };
+  reviewThreadId?: string;
+};
 
 const CODEX_MODEL_STORAGE_KEY = 'cozypad3.remoteCodex.model.v1';
 const CODEX_EFFORT_STORAGE_KEY = 'cozypad3.remoteCodex.reasoningEffort.v1';
@@ -130,12 +140,19 @@ function itemTitle(item: CodexThreadItem): string {
       return 'Web search';
     case 'collabToolCall':
       return `Agent · ${String(item.tool || 'collaboration')}`;
+    case 'enteredReviewMode':
+      return 'Review started';
+    case 'exitedReviewMode':
+      return 'Review result';
     default:
       return item.type;
   }
 }
 
 function readableItemText(item: CodexThreadItem): string {
+  if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') {
+    return String(item.review || 'Code review');
+  }
   if (item.type === 'reasoning') {
     const summary = Array.isArray(item.summary) ? item.summary.map(String).filter(Boolean) : [];
     const content = Array.isArray(item.content)
@@ -344,6 +361,8 @@ export function CodexAppServerPanel({
   const [error, setError] = useState('');
   const [threadQuery, setThreadQuery] = useState('');
   const [goalMode, setGoalMode] = useState(false);
+  const [reviewMode, setReviewMode] = useState(false);
+  const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>('uncommittedChanges');
   const [goal, setGoal] = useState<ThreadGoal | null>(null);
   const unavailableThreadIdsRef = useRef(new Set<string>());
   const itemsScrollRef = useRef<HTMLDivElement>(null);
@@ -641,11 +660,63 @@ export function CodexAppServerPanel({
     }
   };
 
+  const reviewTarget = (value: string): ReviewTarget => {
+    switch (reviewTargetType) {
+      case 'baseBranch':
+        return { type: 'baseBranch', branch: value };
+      case 'commit':
+        return { type: 'commit', sha: value, title: null };
+      case 'custom':
+        return { type: 'custom', instructions: value };
+      default:
+        return { type: 'uncommittedChanges' };
+    }
+  };
+
+  const runReview = async (value: string) => {
+    const client = clientRef.current;
+    if (!client || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      let threadId = selectedThreadId || (await createThread());
+      const startReview = (targetThreadId: string) =>
+        client.call<ReviewStartResponse>('review/start', {
+          threadId: targetThreadId,
+          delivery: 'inline',
+          target: reviewTarget(value),
+        });
+      let response;
+      try {
+        response = await startReview(threadId);
+      } catch (reviewError) {
+        if (!selectedThreadId || !isMissingRolloutError(reviewError)) throw reviewError;
+        forgetUnavailableThread(selectedThreadId);
+        threadId = await createThread();
+        response = await startReview(threadId);
+      }
+      setView((current) => ({
+        ...current,
+        threadId: response.reviewThreadId || threadId,
+        turnId: String(response.turn?.id || current.turnId),
+        turnStatus: String(response.turn?.status || 'inProgress'),
+      }));
+    } catch (nextError) {
+      setBusy(false);
+      setError(nextError instanceof Error ? nextError.message : 'Unable to start Codex review');
+    }
+  };
+
   const sendTurn = async (event: React.FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text) return;
+    if (!text && !(reviewMode && reviewTargetType === 'uncommittedChanges')) return;
     setDraft('');
+    if (reviewMode) {
+      await runReview(text);
+      setReviewMode(false);
+      return;
+    }
     await runTurn(text, goalMode ? text : '');
     if (goalMode) setGoalMode(false);
   };
@@ -856,15 +927,30 @@ export function CodexAppServerPanel({
                     event.currentTarget.form?.requestSubmit();
                   }
                 }}
-                placeholder={goalMode
-                  ? 'Describe the outcome and success criteria for this goal…'
-                  : selectedThreadId
-                    ? 'Continue this Codex thread…'
-                    : 'Start a Codex task…'}
+                placeholder={reviewMode
+                  ? reviewTargetType === 'uncommittedChanges'
+                    ? 'Review staged, unstaged, and untracked changes…'
+                    : reviewTargetType === 'baseBranch'
+                      ? 'Enter the base branch, for example main…'
+                      : reviewTargetType === 'commit'
+                        ? 'Enter the commit SHA to review…'
+                        : 'Describe exactly what Codex should review…'
+                  : goalMode
+                    ? 'Describe the outcome and success criteria for this goal…'
+                    : selectedThreadId
+                      ? 'Continue this Codex thread…'
+                      : 'Start a Codex task…'}
                 rows={3}
               />
-              <button type="submit" disabled={!draft.trim() || busy || runtime?.status !== 'ready'}>
-                {busy ? 'Running…' : goalMode ? 'Start goal' : 'Send'}
+              <button
+                type="submit"
+                disabled={
+                  (!draft.trim() && !(reviewMode && reviewTargetType === 'uncommittedChanges')) ||
+                  busy ||
+                  runtime?.status !== 'ready'
+                }
+              >
+                {busy ? 'Running…' : reviewMode ? 'Start review' : goalMode ? 'Start goal' : 'Send'}
               </button>
             </div>
             <div className="codex-app-composer-controls">
@@ -872,11 +958,43 @@ export function CodexAppServerPanel({
                 type="button"
                 className={`codex-app-mode-button${goalMode ? ' active' : ''}`}
                 aria-pressed={goalMode}
-                onClick={() => setGoalMode((current) => !current)}
+                onClick={() => {
+                  setGoalMode((current) => !current);
+                  setReviewMode(false);
+                }}
                 disabled={busy || runtime?.status !== 'ready'}
               >
                 ◎ Goal
               </button>
+              <button
+                type="button"
+                className={`codex-app-mode-button${reviewMode ? ' active' : ''}`}
+                aria-pressed={reviewMode}
+                onClick={() => {
+                  setReviewMode((current) => !current);
+                  setGoalMode(false);
+                }}
+                disabled={busy || runtime?.status !== 'ready'}
+              >
+                Review
+              </button>
+              {reviewMode ? (
+                <label className="codex-app-review-target">
+                  <span>Target</span>
+                  <select
+                    value={reviewTargetType}
+                    onChange={(event) => {
+                      setReviewTargetType(event.target.value as ReviewTargetType);
+                      setDraft('');
+                    }}
+                  >
+                    <option value="uncommittedChanges">Current changes</option>
+                    <option value="baseBranch">Base branch</option>
+                    <option value="commit">Commit</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+              ) : null}
               <label>
                 <span>Model</span>
                 <select value={model} onChange={(event) => setModel(event.target.value)}>
@@ -911,6 +1029,9 @@ export function CodexAppServerPanel({
                 </select>
               </label>
               {goalMode ? <span className="codex-app-goal-hint">Goal mode enabled for the next prompt</span> : null}
+              {reviewMode ? (
+                <span className="codex-app-goal-hint">Review runs inline on this task</span>
+              ) : null}
             </div>
           </form>
         </main>
