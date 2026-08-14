@@ -17,11 +17,13 @@ import { mimeTypeForFileName, saveWithBrowserDownload } from '../fileDownload';
 import { buildFileBreadcrumbs, directoryItems } from './fileNavigation';
 import {
   createLegacyServerFolder,
+  createLegacyServerFile,
   deleteLegacyServerFile,
   listLegacyServerFiles,
   listLegacyServers,
   previewLegacyServerFile,
   renameLegacyServerFile,
+  transferLegacyServerFile,
 } from './agents/legacySshApi';
 import type {
   LegacyFilePreviewKind,
@@ -35,6 +37,7 @@ import {
   resolveLastSelectedLegacyServerId,
   subscribeLastSelectedLegacyServerId,
 } from './sshServerPreference';
+import { codexCwdForPath, rememberCodexCwd } from './agents/codexCwdPreference';
 
 interface FilesWorkspaceProps {
   active?: boolean;
@@ -83,6 +86,7 @@ type LegacyFilePreviewState = {
 
 type LegacyFilesDialogState =
   | null
+  | { kind: 'new-file'; dir: string }
   | { kind: 'new-folder'; dir: string }
   | { kind: 'rename'; item: LegacySshFileItem }
   | { kind: 'delete'; item: LegacySshFileItem };
@@ -386,6 +390,7 @@ function resolveFilesServerId(
   preferredId: string | null | undefined,
   currentId = '',
 ): string {
+  if (preferredId === null) return '';
   if (preferredId && servers.some((server) => server.id === preferredId)) {
     return preferredId;
   }
@@ -434,6 +439,10 @@ function LegacyServerFilesWorkspace({
   const [legacyFlash, setLegacyFlash] = useState('');
   const [legacyActionError, setLegacyActionError] = useState('');
   const [selectedLegacyPath, setSelectedLegacyPath] = useState('');
+  const [legacyClipboard, setLegacyClipboard] = useState<{
+    item: LegacySshFileItem;
+    mode: 'copy' | 'move';
+  } | null>(null);
   const previewObjectUrlRef = useRef('');
   const loadFilesRequestRef = useRef(0);
   const openTargetHandledNonceRef = useRef(0);
@@ -495,7 +504,14 @@ function LegacyServerFilesWorkspace({
   useEffect(
     () =>
       subscribeLastSelectedLegacyServerId((serverId) => {
-        if (!serverId || !servers.some((server) => server.id === serverId)) return;
+        if (!serverId) {
+          setSelectedServerId('');
+          closePreview();
+          setBrowser(emptyLegacyFileBrowser);
+          setPathInput('~');
+          return;
+        }
+        if (!servers.some((server) => server.id === serverId)) return;
         setSelectedServerId(serverId);
         closePreview();
         setBrowser(emptyLegacyFileBrowser);
@@ -674,6 +690,10 @@ function LegacyServerFilesWorkspace({
   }, [canBrowseLegacyFiles, browser.path, browser.serverId, closePreview, loadFiles, selectedServer]);
 
   useEffect(() => {
+    if (profileId === null) {
+      setSelectedServerId('');
+      return;
+    }
     if (!profileId || !servers.some((server) => server.id === profileId)) return;
     setSelectedServerId(profileId);
   }, [profileId, servers]);
@@ -787,21 +807,89 @@ function LegacyServerFilesWorkspace({
   };
 
   const legacyItemMenuActions: MenuAction[] = [
+    {
+      id: 'set-codex-cwd',
+      label: '設為 Codex / Terminal CWD',
+      hint: '套用到下一個 Codex thread 與新 Terminal',
+    },
+    { id: 'copy', label: '複製', hint: '之後在目標資料夾貼上', separatorBefore: true },
+    { id: 'cut', label: '剪切', hint: '之後在目標資料夾貼上' },
+    { id: 'copy-path', label: '複製完整路徑' },
     { id: 'rename', label: '重新命名' },
     { id: 'delete', label: '刪除', danger: true, separatorBefore: true },
   ];
 
   const legacyBlankMenuActions: MenuAction[] = [
+    { id: 'set-codex-cwd', label: '設為 Codex / Terminal CWD' },
+    {
+      id: 'paste',
+      label: legacyClipboard ? `貼上 ${legacyClipboard.item.name}` : '貼上',
+      disabled: legacyClipboard === null,
+      separatorBefore: true,
+    },
+    { id: 'new-file', label: '新增檔案', separatorBefore: true },
     { id: 'new-folder', label: '新增資料夾' },
   ];
+
+  const pasteLegacyClipboard = async (destination: string) => {
+    if (!selectedServer || !legacyClipboard || legacyBusy) return;
+    setLegacyBusy(true);
+    setLegacyActionError('');
+    try {
+      const { item, mode } = legacyClipboard;
+      await transferLegacyServerFile(selectedServer.id, item.path, destination, mode);
+      if (mode === 'move') setLegacyClipboard(null);
+      showLegacyFlash(mode === 'copy' ? '已複製' : '已移動');
+      await loadFiles(selectedServer, destination);
+    } catch (error) {
+      setLegacyActionError(error instanceof Error ? error.message : '貼上失敗');
+    } finally {
+      setLegacyBusy(false);
+    }
+  };
 
   const runLegacyMenuAction = (actionId: string) => {
     if (!legacyMenu) return;
     if (legacyMenu.kind === 'blank') {
+      if (actionId === 'set-codex-cwd' && selectedServer) {
+        const path = rememberCodexCwd(selectedServer.id, currentLegacyDir);
+        showLegacyFlash(`Codex / Terminal CWD 已設為 ${path}`);
+      }
+      if (actionId === 'paste') {
+        void pasteLegacyClipboard(currentLegacyDir);
+      }
+      if (actionId === 'new-file') {
+        setLegacyDialogInput('');
+        setLegacyDialog({ kind: 'new-file', dir: currentLegacyDir });
+      }
       if (actionId === 'new-folder') {
         setLegacyDialogInput('');
         setLegacyDialog({ kind: 'new-folder', dir: currentLegacyDir });
       }
+      return;
+    }
+
+    if (actionId === 'set-codex-cwd' && selectedServer) {
+      const path = rememberCodexCwd(
+        selectedServer.id,
+        codexCwdForPath(legacyMenu.item.path, legacyMenu.item.isDirectory),
+      );
+      showLegacyFlash(`Codex / Terminal CWD 已設為 ${path}`);
+      return;
+    }
+
+    if (actionId === 'copy' || actionId === 'cut') {
+      setLegacyClipboard({
+        item: legacyMenu.item,
+        mode: actionId === 'copy' ? 'copy' : 'move',
+      });
+      showLegacyFlash(actionId === 'copy' ? '已暫存複製，請到目標資料夾貼上' : '已暫存剪切，請到目標資料夾貼上');
+      return;
+    }
+
+    if (actionId === 'copy-path') {
+      copyPath(legacyMenu.item.path);
+      showLegacyFlash('完整路徑已複製');
       return;
     }
 
@@ -828,7 +916,9 @@ function LegacyServerFilesWorkspace({
     setLegacyActionError('');
     try {
       const result =
-        legacyDialog.kind === 'new-folder'
+        legacyDialog.kind === 'new-file'
+          ? await createLegacyServerFile(selectedServer.id, legacyDialog.dir, input)
+          : legacyDialog.kind === 'new-folder'
           ? await createLegacyServerFolder(selectedServer.id, legacyDialog.dir, input)
           : legacyDialog.kind === 'rename'
             ? await renameLegacyServerFile(selectedServer.id, legacyDialog.item.path, input)
@@ -846,9 +936,11 @@ function LegacyServerFilesWorkspace({
       showLegacyFlash(
         legacyDialog.kind === 'new-folder'
           ? '資料夾已新增'
-          : legacyDialog.kind === 'rename'
-            ? '已重新命名'
-            : '已刪除',
+          : legacyDialog.kind === 'new-file'
+            ? '檔案已新增'
+            : legacyDialog.kind === 'rename'
+              ? '已重新命名'
+              : '已刪除',
       );
       await loadFiles(selectedServer, result.parent || currentLegacyDir);
     } catch (error) {
@@ -895,6 +987,18 @@ function LegacyServerFilesWorkspace({
         {serverError ? <div className="error-banner">{serverError}</div> : null}
         {legacyActionError ? <div className="error-banner">{legacyActionError}</div> : null}
         {legacyFlash ? <div className="legacy-files-flash">{legacyFlash}</div> : null}
+        {legacyClipboard ? (
+          <div className="clipboard-bar">
+            <span className={`clip-mode clip-${legacyClipboard.mode}`}>
+              {legacyClipboard.mode === 'copy' ? '複製' : '剪切'}
+            </span>
+            <span className="clip-name" title={legacyClipboard.item.path}>{legacyClipboard.item.name}</span>
+            <button type="button" disabled={legacyBusy} onClick={() => void pasteLegacyClipboard(currentLegacyDir)}>
+              貼到目前資料夾
+            </button>
+            <button type="button" onClick={() => setLegacyClipboard(null)}>取消</button>
+          </div>
+        ) : null}
 
         <div className="tree-scroll legacy-files-list" onContextMenu={openLegacyBlankMenu}>
           {!selectedServer ? (
@@ -994,9 +1098,31 @@ function LegacyServerFilesWorkspace({
                 <span className="hint">Current folder</span>
                 <h3>{browser.path || pathInput}</h3>
               </div>
-              <span className="legacy-files-count">
-                {browser.loading ? 'loading' : `${browser.items.length} items`}
-              </span>
+              <div className="legacy-files-side-actions">
+                <span className="legacy-files-count">
+                  {browser.loading ? 'loading' : `${browser.items.length} items`}
+                </span>
+                <button
+                  type="button"
+                  disabled={legacyBusy || browser.loading}
+                  onClick={() => {
+                    setLegacyDialogInput('');
+                    setLegacyDialog({ kind: 'new-file', dir: currentLegacyDir });
+                  }}
+                >
+                  ＋檔案
+                </button>
+                <button
+                  type="button"
+                  disabled={legacyBusy || browser.loading}
+                  onClick={() => {
+                    setLegacyDialogInput('');
+                    setLegacyDialog({ kind: 'new-folder', dir: currentLegacyDir });
+                  }}
+                >
+                  ＋資料夾
+                </button>
+              </div>
             </div>
             {inlineImagePreview ? (
               <section className="legacy-files-inline-preview" aria-label="image preview">
@@ -1186,20 +1312,20 @@ function LegacyServerFilesWorkspace({
             ) : (
               <>
                 <div className="modal-head">
-                  <h2>{legacyDialog.kind === 'new-folder' ? '新增資料夾' : '重新命名'}</h2>
+                  <h2>{legacyDialog.kind === 'new-folder' ? '新增資料夾' : legacyDialog.kind === 'new-file' ? '新增檔案' : '重新命名'}</h2>
                   <button className="modal-close" type="button" onClick={() => setLegacyDialog(null)}>
                     ×
                   </button>
                 </div>
                 <p className="hint">
-                  {legacyDialog.kind === 'new-folder'
+                  {legacyDialog.kind === 'new-folder' || legacyDialog.kind === 'new-file'
                     ? `位置：${legacyDialog.dir}`
                     : `原名稱：${legacyDialog.item.name}`}
                 </p>
                 <input
                   autoFocus
                   value={legacyDialogInput}
-                  placeholder={legacyDialog.kind === 'new-folder' ? '資料夾名稱' : legacyDialog.item.name}
+                  placeholder={legacyDialog.kind === 'new-folder' ? '資料夾名稱' : legacyDialog.kind === 'new-file' ? '檔案名稱' : legacyDialog.item.name}
                   onChange={(event) => setLegacyDialogInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') void confirmLegacyDialog();

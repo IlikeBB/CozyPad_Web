@@ -948,6 +948,17 @@ export function closeLegacyTerminal(terminalId: string): Promise<{ ok: boolean; 
   });
 }
 
+export function connectLegacySsh(serverId: string): Promise<{
+  ok: boolean;
+  serverId: string;
+  status: 'ready';
+}> {
+  return legacyApiRequest('/api/ssh/connect', {
+    method: 'POST',
+    body: JSON.stringify({ serverId }),
+  });
+}
+
 export function closeAllLegacySshRuntime(): Promise<{
   ok: boolean;
   closed: Record<string, number>;
@@ -993,10 +1004,24 @@ export function previewLegacyServerFile(
 
 export type LegacySshFileMutationResult = {
   ok: boolean;
-  action: 'mkdir' | 'rename' | 'delete';
+  action: 'mkdir' | 'touch' | 'rename' | 'delete' | 'copy' | 'move';
   path: string;
   parent: string;
 };
+
+export function createLegacyServerFile(
+  serverId: string,
+  directory: string,
+  name: string,
+): Promise<LegacySshFileMutationResult> {
+  return legacyApiRequest<LegacySshFileMutationResult>(
+    `/api/ssh/servers/${encodeURIComponent(serverId)}/files`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ action: 'touch', directory, name }),
+    },
+  );
+}
 
 export function createLegacyServerFolder(
   serverId: string,
@@ -1035,6 +1060,21 @@ export function deleteLegacyServerFile(
     {
       method: 'POST',
       body: JSON.stringify({ action: 'delete', path: remotePath }),
+    },
+  );
+}
+
+export function transferLegacyServerFile(
+  serverId: string,
+  remotePath: string,
+  destination: string,
+  mode: 'copy' | 'move',
+): Promise<LegacySshFileMutationResult> {
+  return legacyApiRequest<LegacySshFileMutationResult>(
+    `/api/ssh/servers/${encodeURIComponent(serverId)}/files`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ action: mode, path: remotePath, destination }),
     },
   );
 }

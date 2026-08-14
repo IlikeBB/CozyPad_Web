@@ -2033,6 +2033,522 @@ button.danger:hover {
   padding: 0 10px;
 }
 
+.codex-app-panel {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.codex-app-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.codex-app-head h2 {
+  margin: 0 0 3px;
+  font-size: 16px;
+}
+
+.codex-app-head span,
+.codex-app-head small {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.codex-app-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-app-head button,
+.codex-app-turn-head button,
+.codex-app-approval button,
+.codex-app-composer button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.codex-app-head button:disabled,
+.codex-app-composer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.codex-app-runtime {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--bg);
+}
+
+.codex-app-runtime-ready {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+}
+
+.codex-app-runtime-reconnecting,
+.codex-app-runtime-starting {
+  color: var(--yellow) !important;
+}
+
+.codex-app-error {
+  padding: 8px 18px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--red) 42%, var(--border));
+}
+
+.codex-app-layout {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.codex-app-context {
+  background: var(--bg-raised);
+}
+
+.codex-app-context .legacy-codex-segmented button.active {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--accent);
+}
+
+.codex-app-threads {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 5px;
+  overflow: auto;
+  padding: 12px 9px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.codex-app-threads > strong {
+  padding: 3px 7px 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.codex-app-threads button {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 9px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.codex-app-threads button:hover,
+.codex-app-threads button.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg));
+  color: var(--accent);
+  box-shadow: var(--matrix-glow);
+}
+
+.codex-app-threads button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-app-threads button small,
+.codex-app-threads p {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.codex-app-conversation {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  margin-right: 42px;
+  overflow: hidden;
+}
+
+.codex-app-turn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.codex-app-turn-head span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-app-turn-head small {
+  color: var(--text-faint);
+}
+
+.codex-app-items {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px clamp(14px, 4vw, 52px);
+}
+
+.codex-app-item {
+  max-width: min(900px, 92%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.codex-app-item > header {
+  padding: 9px 12px 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.codex-app-item .legacy-codex-markdown {
+  padding: 4px 12px 10px;
+}
+
+.codex-app-item-userMessage {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+}
+
+.codex-app-item-agentMessage {
+  align-self: flex-start;
+}
+
+.codex-app-tool {
+  width: min(900px, 96%);
+  align-self: flex-start;
+}
+
+.codex-app-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.codex-app-tool summary code {
+  overflow: hidden;
+  flex: 1;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-app-tool summary small {
+  color: var(--text-faint);
+}
+
+.codex-app-tool pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 11px 13px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+  white-space: pre-wrap;
+}
+
+.codex-app-change-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.codex-app-change-list section {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.codex-app-change-list strong {
+  display: block;
+  padding: 7px 9px;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.codex-app-change-list pre {
+  max-height: 340px;
+  border-top: 1px solid var(--border);
+}
+
+.codex-app-empty {
+  margin: auto;
+  color: var(--text-faint);
+}
+
+.codex-app-approval {
+  margin: 0 clamp(14px, 4vw, 52px) 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 42%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-raised));
+}
+
+.codex-app-approval p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+}
+
+.codex-app-approval small {
+  color: var(--yellow);
+}
+
+.codex-app-approval > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.codex-app-question {
+  display: block;
+  margin: 10px 0;
+}
+
+.codex-app-question > span {
+  color: var(--yellow);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.codex-app-question input,
+.codex-app-question select {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--yellow) 40%, var(--border));
+  border-radius: 7px;
+  background: var(--bg);
+  color: inherit;
+  padding: 8px 9px;
+}
+
+.codex-app-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px clamp(14px, 4vw, 52px) 15px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.codex-app-prompt-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+  width: 100%;
+}
+
+.codex-app-composer textarea {
+  min-height: 58px;
+  flex: 1;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--bg);
+  color: inherit;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.codex-app-composer textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent), var(--matrix-glow);
+}
+
+.codex-app-composer-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+}
+
+.codex-app-composer-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.codex-app-composer-controls select {
+  min-width: 92px;
+  height: 30px;
+  padding: 0 25px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+}
+
+.codex-app-composer-controls label:first-of-type select {
+  max-width: 180px;
+}
+
+.codex-app-mode-button {
+  min-height: 30px;
+  white-space: nowrap;
+}
+
+.codex-app-mode-button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 17%, var(--bg));
+  color: var(--accent);
+  box-shadow: var(--matrix-glow);
+}
+
+.codex-app-goal-hint {
+  overflow: hidden;
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-app-thread-search {
+  width: calc(100% - 4px);
+  min-height: 32px;
+  margin: 0 2px 6px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.codex-app-goal {
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+}
+
+.codex-app-goal > strong {
+  color: var(--accent);
+}
+
+.codex-app-goal button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+
+.codex-app-goal button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--matrix-glow);
+}
+
+.codex-app-goal-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.codex-app-goal-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 7px;
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+
+.codex-app-goal-status dt {
+  color: var(--text-faint);
+}
+
+.codex-app-goal-status dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 760px) {
+  .codex-app-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .codex-app-layout {
+    flex-direction: column;
+  }
+
+  .codex-app-threads {
+    width: auto;
+    max-height: 150px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .codex-app-context {
+    display: none;
+  }
+
+  .codex-app-conversation {
+    margin-right: 0;
+  }
+
+  .codex-app-composer-controls {
+    flex-wrap: wrap;
+  }
+
+  .codex-app-goal-hint {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
 .agent-panes {
   flex: 1;
   min-height: 0;
@@ -4663,6 +5179,22 @@ button.danger:hover {
   font-size: 14px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.legacy-files-side-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.legacy-files-side-actions button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+  padding: 4px 8px;
 }
 
 .legacy-files-count {

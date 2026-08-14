@@ -64,6 +64,7 @@ interface TerminalViewProps {
   profileId?: string;
   legacyServerId?: string;
   legacyTerminalId?: string;
+  initialCwd?: string;
   onExit?: () => void;
   onHandle?: (handle: TerminalHandle | null) => void;
   onNotify?: (message: string) => void;
@@ -76,6 +77,7 @@ function createLegacyTerminalUrl(
   cols: number,
   rows: number,
   reuse: boolean,
+  cwd: string,
 ): string {
   const url = createLegacyWebSocketUrl('/api/ssh/terminal');
   url.searchParams.set('serverId', serverId);
@@ -83,6 +85,7 @@ function createLegacyTerminalUrl(
   url.searchParams.set('cols', String(cols));
   url.searchParams.set('rows', String(rows));
   if (reuse) url.searchParams.set('reuse', '1');
+  if (!reuse && cwd.trim()) url.searchParams.set('cwd', cwd.trim());
   return url.toString();
 }
 
@@ -117,6 +120,7 @@ export function TerminalView({
   profileId,
   legacyServerId,
   legacyTerminalId,
+  initialCwd = '~',
   onExit,
   onHandle,
   onNotify,
@@ -234,6 +238,7 @@ export function TerminalView({
             term.cols,
             term.rows,
             reuse,
+            initialCwd,
           ),
         );
         legacySocket = socket;
@@ -446,7 +451,7 @@ export function TerminalView({
       if (terminalId) void bridge.closeTerminal({ terminalId });
       term.dispose();
     };
-  }, [legacyServerId, legacyTerminalId, profileId]);
+  }, [initialCwd, legacyServerId, legacyTerminalId, profileId]);
 
   return <div className="terminal-host" ref={containerRef} />;
 }

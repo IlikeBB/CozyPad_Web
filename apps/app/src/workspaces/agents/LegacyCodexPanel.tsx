@@ -40,6 +40,11 @@ import type {
   LegacyCodexWorkflow,
   LegacySshServer,
 } from './legacySshApi';
+import {
+  readCodexCwd,
+  rememberCodexCwd,
+  subscribeCodexCwd,
+} from './codexCwdPreference';
 
 const STORAGE_KEY = 'cozypad3.legacyCodexTasks.v1';
 const COMPOSER_DRAFT_STORAGE_KEY = 'cozypad3.legacyCodexComposerDraft.v1';
@@ -1689,9 +1694,14 @@ export function LegacyCodexPanel({
   }, [connected, legacyServer?.id]);
 
   useEffect(() => {
-    if (legacyServer?.defaultPath) {
-      setRemotePath(legacyServer.defaultPath);
-    }
+    if (!legacyServer?.id) return;
+    const preferred = readCodexCwd(legacyServer.id, legacyServer.defaultPath || '~');
+    setRemotePath(preferred);
+    setCwdInput(preferred);
+    return subscribeCodexCwd(legacyServer.id, (path) => {
+      setRemotePath(path);
+      setCwdInput(path);
+    });
   }, [legacyServer?.defaultPath, legacyServer?.id]);
 
   useEffect(() => {
@@ -1869,6 +1879,7 @@ export function LegacyCodexPanel({
   const applyCwdInput = useCallback(() => {
     const nextPath = normalizeRemotePath(cwdInput);
     setCwdInput(nextPath);
+    if (legacyServer?.id) rememberCodexCwd(legacyServer.id, nextPath);
     if (activeTask) {
       updateTask(activeTask.id, (task) => ({
         ...task,
@@ -1878,7 +1889,7 @@ export function LegacyCodexPanel({
       return;
     }
     setRemotePath(nextPath);
-  }, [activeTask, cwdInput, updateTask]);
+  }, [activeTask, cwdInput, legacyServer?.id, updateTask]);
 
   const clearImageAttachments = useCallback(() => {
     setImageAttachments((current) => {

@@ -13,6 +13,7 @@ import {
   resolveLastSelectedLegacyServerId,
   subscribeLastSelectedLegacyServerId,
 } from './sshServerPreference';
+import { readCodexCwd } from './agents/codexCwdPreference';
 
 interface TerminalWorkspaceProps {
   active?: boolean;
@@ -25,6 +26,7 @@ type TerminalTab = {
   terminalId: string;
   serverId: string;
   serverName: string;
+  cwd: string;
 };
 
 const QUICK_COMMANDS: { label: string; command: string }[] = [
@@ -58,6 +60,7 @@ function resolveTerminalServerId(
   preferredId: string | null | undefined,
   currentId = '',
 ): string {
+  if (preferredId === null) return '';
   if (preferredId && servers.some((server) => server.id === preferredId)) {
     return preferredId;
   }
@@ -180,6 +183,10 @@ export function TerminalWorkspace({
   }, [connected, servers, tabs]);
 
   useEffect(() => {
+    if (profileId === null) {
+      setSelectedServerId('');
+      return;
+    }
     if (!profileId || !servers.some((server) => server.id === profileId)) return;
     setSelectedServerId(profileId);
   }, [profileId, servers]);
@@ -187,7 +194,11 @@ export function TerminalWorkspace({
   useEffect(
     () =>
       subscribeLastSelectedLegacyServerId((serverId) => {
-        if (!serverId || !servers.some((server) => server.id === serverId)) return;
+        if (!serverId) {
+          setSelectedServerId('');
+          return;
+        }
+        if (!servers.some((server) => server.id === serverId)) return;
         setSelectedServerId(serverId);
       }),
     [servers],
@@ -211,6 +222,7 @@ export function TerminalWorkspace({
       terminalId: createTerminalSessionId(targetServer.id),
       serverId: targetServer.id,
       serverName: targetServer.name,
+      cwd: readCodexCwd(targetServer.id, targetServer.defaultPath || '~'),
     };
     setTabs((current) => [...current, tab]);
     setActive(id);
@@ -263,7 +275,7 @@ export function TerminalWorkspace({
             className={`tab${active === tab.id ? ' tab-active' : ''}`}
             onClick={() => setActive(tab.id)}
           >
-            <span>{tab.serverName}</span>
+            <span title={`${tab.serverName} · ${tab.cwd}`}>{tab.serverName}</span>
             <button
               className="tab-close"
               title="Close"
@@ -324,6 +336,7 @@ export function TerminalWorkspace({
                   <TerminalView
                     legacyServerId={tab.serverId}
                     legacyTerminalId={tab.terminalId}
+                    initialCwd={tab.cwd}
                     onNotify={(message) => {
                       setToast(message);
                       setTimeout(() => setToast(null), 1600);
