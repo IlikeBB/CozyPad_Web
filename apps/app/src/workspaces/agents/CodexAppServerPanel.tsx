@@ -18,6 +18,7 @@ import {
 } from './codexAppServerClient';
 import {
   EMPTY_CODEX_STRUCTURED_STATE,
+  codexContextBudget,
   codexTokenUsageFrom,
   reduceCodexRuntimeEvent,
   structuredStateFromThread,
@@ -399,6 +400,10 @@ export function CodexAppServerPanel({
       settings: { ...(preset.settings || {}), model: selectedModel },
     } : undefined;
   }, [collaborationMode, collaborationModes, model, models]);
+  const contextBudget = useMemo(
+    () => (view.tokenUsage ? codexContextBudget(view.tokenUsage) : null),
+    [view.tokenUsage],
+  );
 
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
@@ -1108,6 +1113,31 @@ export function CodexAppServerPanel({
                 <span>Total tokens</span>
                 <strong>{formatTokenCount(view.tokenUsage.total.totalTokens)}</strong>
               </div>
+              {contextBudget ? (
+                <div className="codex-app-context-budget">
+                  <div className="codex-app-context-budget-head">
+                    <span>Context remaining</span>
+                    <strong>{contextBudget.remainingPercent}%</strong>
+                  </div>
+                  <div
+                    className="codex-app-context-meter"
+                    role="progressbar"
+                    aria-label="Context window used"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={contextBudget.usedPercent}
+                  >
+                    <span style={{ width: `${contextBudget.usedPercent}%` }} />
+                  </div>
+                  <div className="codex-app-context-budget-counts">
+                    <span>Used {formatTokenCount(contextBudget.usedTokens)}</span>
+                    <span>Remaining {formatTokenCount(contextBudget.remainingTokens)}</span>
+                  </div>
+                  <small>
+                    {formatTokenCount(contextBudget.reservedTokens)} reserved by Codex
+                  </small>
+                </div>
+              ) : null}
               <dl className="codex-app-usage-details">
                 <dt>Input</dt>
                 <dd>{formatTokenCount(view.tokenUsage.total.inputTokens)}</dd>
@@ -1117,7 +1147,7 @@ export function CodexAppServerPanel({
                 <dd>{formatTokenCount(view.tokenUsage.total.outputTokens)}</dd>
                 <dt>Reasoning</dt>
                 <dd>{formatTokenCount(view.tokenUsage.total.reasoningOutputTokens)}</dd>
-                <dt>Last turn</dt>
+                <dt>Current context</dt>
                 <dd>{formatTokenCount(view.tokenUsage.last.totalTokens)}</dd>
                 {view.tokenUsage.modelContextWindow ? (
                   <>

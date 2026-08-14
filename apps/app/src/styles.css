@@ -2543,6 +2543,56 @@ button.danger:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.codex-app-context-budget {
+  display: grid;
+  gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.codex-app-context-budget-head,
+.codex-app-context-budget-counts {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.codex-app-context-budget-head {
+  align-items: baseline;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.codex-app-context-budget-head strong {
+  color: var(--accent);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-app-context-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-faint) 18%, transparent);
+}
+
+.codex-app-context-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+.codex-app-context-budget-counts,
+.codex-app-context-budget small {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 .codex-app-usage-details {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

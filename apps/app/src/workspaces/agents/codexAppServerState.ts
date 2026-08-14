@@ -44,6 +44,36 @@ export type CodexTokenUsage = {
   modelContextWindow: number | null;
 };
 
+export type CodexContextBudget = {
+  usedTokens: number;
+  remainingTokens: number;
+  usedPercent: number;
+  remainingPercent: number;
+  reservedTokens: number;
+};
+
+// Matches the baseline used by Codex CLI for fixed prompts, tools, and compaction headroom.
+export const CODEX_CONTEXT_BASELINE_TOKENS = 12_000;
+
+export function codexContextBudget(tokenUsage: CodexTokenUsage): CodexContextBudget | null {
+  const contextWindow = tokenUsage.modelContextWindow;
+  if (!contextWindow || contextWindow <= CODEX_CONTEXT_BASELINE_TOKENS) return null;
+  const effectiveWindow = contextWindow - CODEX_CONTEXT_BASELINE_TOKENS;
+  const usedTokens = Math.min(
+    effectiveWindow,
+    Math.max(0, tokenUsage.last.totalTokens - CODEX_CONTEXT_BASELINE_TOKENS),
+  );
+  const remainingTokens = Math.max(0, effectiveWindow - usedTokens);
+  const remainingPercent = Math.round((remainingTokens / effectiveWindow) * 100);
+  return {
+    usedTokens,
+    remainingTokens,
+    usedPercent: 100 - remainingPercent,
+    remainingPercent,
+    reservedTokens: CODEX_CONTEXT_BASELINE_TOKENS,
+  };
+}
+
 export type CodexStructuredState = {
   threadId: string;
   turnId: string;

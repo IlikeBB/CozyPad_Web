@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CodexRuntimeEvent } from '@cozypad/contracts';
 import {
   EMPTY_CODEX_STRUCTURED_STATE,
+  codexContextBudget,
   reduceCodexRuntimeEvent,
 } from '../src/workspaces/agents/codexAppServerState';
 
@@ -137,5 +138,31 @@ describe('reduceCodexRuntimeEvent', () => {
     expect(exited.items).toEqual([
       { id: 'review-1', type: 'exitedReviewMode', review: 'No findings.' },
     ]);
+  });
+
+  it('calculates the same user-controllable context budget as Codex CLI', () => {
+    expect(codexContextBudget({
+      total: {
+        inputTokens: 180_000,
+        cachedInputTokens: 100_000,
+        outputTokens: 20_000,
+        reasoningOutputTokens: 5_000,
+        totalTokens: 200_000,
+      },
+      last: {
+        inputTokens: 55_000,
+        cachedInputTokens: 40_000,
+        outputTokens: 7_000,
+        reasoningOutputTokens: 2_000,
+        totalTokens: 62_000,
+      },
+      modelContextWindow: 200_000,
+    })).toEqual({
+      usedTokens: 50_000,
+      remainingTokens: 138_000,
+      usedPercent: 27,
+      remainingPercent: 73,
+      reservedTokens: 12_000,
+    });
   });
 });
