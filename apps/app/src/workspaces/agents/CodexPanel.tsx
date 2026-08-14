@@ -29,7 +29,7 @@ export function CodexPanel({
   useEffect(() => {
     setForcedLegacy(false);
     setUseAppServer(false);
-    if (!connected || !serverId) return;
+    if (!serverId) return;
     let active = true;
     void getCodexAppServerStatus(serverId)
       .then((status) => {
@@ -45,12 +45,13 @@ export function CodexPanel({
     return () => {
       active = false;
     };
-  }, [connected, serverId]);
+  }, [serverId]);
 
   if (useAppServer && !forcedLegacy) {
     return (
       <CodexAppServerPanel
         selectedProfile={selectedProfile}
+        connected={connected}
         legacyServer={legacyServer}
         onOpenFilesPath={onOpenFilesPath}
         onUseLegacy={() => setForcedLegacy(true)}

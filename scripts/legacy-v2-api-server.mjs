@@ -15919,6 +15919,7 @@ async function handleCodexUpgrade(request, socket) {
 const CODEX_APP_SERVER_RPC_METHODS = new Set([
   "model/list",
   "collaborationMode/list",
+  "skills/list",
   "thread/start",
   "thread/resume",
   "thread/read",
@@ -15928,6 +15929,7 @@ const CODEX_APP_SERVER_RPC_METHODS = new Set([
   "thread/goal/set",
   "thread/goal/get",
   "thread/goal/clear",
+  "fs/readFile",
   "turn/start",
   "turn/steer",
   "turn/interrupt",

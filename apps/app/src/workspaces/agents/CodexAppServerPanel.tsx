@@ -27,9 +27,35 @@ import {
   type CodexThreadSummary,
   type CodexTokenUsage,
 } from './codexAppServerState';
+import {
+  DEFAULT_MANAGED_GOAL_POLICY,
+  advanceManagedGoalRuntime,
+  buildManagedGoalObjective,
+  createManagedGoalRuntime,
+  goalHasTokensRemaining,
+  normalizeManagedGoalPolicy,
+  type ManagedGoalPolicy,
+  type ManagedGoalRuntime,
+} from './codexGoalController';
+import {
+  CODEX_DISPLAY_ITEM_BATCH,
+  CODEX_DISPLAY_TEXT_PREVIEW_CHARS,
+  codexDisplayText,
+  codexDisplayWindow,
+} from './codexDisplayWindow';
+import {
+  buildCodexSkillTurnInput,
+  normalizeCodexSkills,
+  type CodexSkill,
+} from './codexSkillManager';
 
 type ThreadListResponse = { data?: CodexThreadSummary[] };
-type ThreadResponse = { thread?: CodexThreadSummary };
+type ThreadResponse = {
+  thread?: CodexThreadSummary;
+  instructionSources?: string[];
+};
+type InstructionRule = { path: string; content: string };
+type FsReadFileResponse = { dataBase64?: string };
 type ModelListResponse = {
   data?: Array<{ id?: string; model?: string; slug?: string }>;
 };
@@ -39,6 +65,7 @@ type CollaborationMode = {
   settings?: Record<string, unknown>;
 };
 type CollaborationModeListResponse = { data?: CollaborationMode[] };
+type SkillsListResponse = { data?: unknown[] };
 type ThreadGoal = {
   threadId: string;
   objective: string;
@@ -48,20 +75,29 @@ type ThreadGoal = {
   timeUsedSeconds?: number;
 };
 type ThreadGoalResponse = { goal?: ThreadGoal | null };
-type ReviewTargetType = 'uncommittedChanges' | 'baseBranch' | 'commit' | 'custom';
-type ReviewTarget =
-  | { type: 'uncommittedChanges' }
-  | { type: 'baseBranch'; branch: string }
-  | { type: 'commit'; sha: string; title: string | null }
-  | { type: 'custom'; instructions: string };
-type ReviewStartResponse = {
-  turn?: { id?: string; status?: string };
-  reviewThreadId?: string;
+type ReviewPermissionMode = 'ask' | 'autoReview' | 'fullAccess';
+type ReviewPermissionSettings = {
+  approvalPolicy: 'on-request' | 'never';
+  approvalsReviewer: 'user' | 'auto_review';
+  sandbox: 'workspace-write' | 'danger-full-access';
+  sandboxPolicy:
+    | { type: 'dangerFullAccess' }
+    | {
+        type: 'workspaceWrite';
+        writableRoots: string[];
+        networkAccess: boolean;
+        excludeTmpdirEnvVar: boolean;
+        excludeSlashTmp: boolean;
+      };
 };
 
 const CODEX_MODEL_STORAGE_KEY = 'cozypad3.remoteCodex.model.v1';
 const CODEX_EFFORT_STORAGE_KEY = 'cozypad3.remoteCodex.reasoningEffort.v1';
+const CODEX_REVIEW_PERMISSION_STORAGE_KEY = 'cozypad3.remoteCodex.reviewPermission.v1';
+const CODEX_THREADS_COLLAPSED_STORAGE_KEY = 'cozypad3.remoteCodex.threadsCollapsed.v1';
 const CODEX_TOKEN_USAGE_STORAGE_PREFIX = 'cozypad3.remoteCodex.tokenUsage.v1';
+const CODEX_GOAL_POLICY_STORAGE_KEY = 'cozypad3.remoteCodex.goalPolicy.v1';
+const CODEX_GOAL_RUNTIME_STORAGE_PREFIX = 'cozypad3.remoteCodex.goalRuntime.v1';
 const CODEX_MODEL_FALLBACKS = [
   'gpt-5.6-sol',
   'gpt-5.6-terra',
@@ -73,6 +109,46 @@ const CODEX_MODEL_FALLBACKS = [
   'gpt-5.3-codex-spark',
 ];
 const CODEX_EFFORT_OPTIONS = ['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+const CODEX_REVIEW_PERMISSION_OPTIONS: Array<{
+  value: ReviewPermissionMode;
+  label: string;
+}> = [
+  { value: 'ask', label: 'Ask for approval' },
+  { value: 'autoReview', label: 'Approve for me' },
+  { value: 'fullAccess', label: 'Full access' },
+];
+
+function reviewPermissionLabel(mode: ReviewPermissionMode): string {
+  return CODEX_REVIEW_PERMISSION_OPTIONS.find((option) => option.value === mode)?.label || mode;
+}
+
+function reviewPermissionSettings(mode: ReviewPermissionMode): ReviewPermissionSettings {
+  if (mode === 'fullAccess') {
+    return {
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      sandbox: 'danger-full-access',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+    };
+  }
+  return {
+    approvalPolicy: 'on-request',
+    approvalsReviewer: mode === 'autoReview' ? 'auto_review' : 'user',
+    sandbox: 'workspace-write',
+    sandboxPolicy: {
+      type: 'workspaceWrite',
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    },
+  };
+}
+
+function decodeBase64Text(value: string): string {
+  const bytes = Uint8Array.from(window.atob(value), (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
 
 function formatTokenCount(value: number): string {
   return Math.max(0, value).toLocaleString();
@@ -102,6 +178,40 @@ function rememberTokenUsage(
     tokenUsageStorageKey(serverId, threadId),
     JSON.stringify(tokenUsage),
   );
+}
+
+function readGoalPolicy(): ManagedGoalPolicy {
+  try {
+    const value = window.localStorage.getItem(CODEX_GOAL_POLICY_STORAGE_KEY);
+    return normalizeManagedGoalPolicy(value ? JSON.parse(value) : DEFAULT_MANAGED_GOAL_POLICY);
+  } catch {
+    return DEFAULT_MANAGED_GOAL_POLICY;
+  }
+}
+
+function goalRuntimeStorageKey(serverId: string, threadId: string): string {
+  return `${CODEX_GOAL_RUNTIME_STORAGE_PREFIX}:${serverId}:${threadId}`;
+}
+
+function readGoalRuntime(serverId: string, threadId: string): ManagedGoalRuntime | null {
+  if (!serverId || !threadId) return null;
+  try {
+    const value = window.localStorage.getItem(goalRuntimeStorageKey(serverId, threadId));
+    return value ? JSON.parse(value) as ManagedGoalRuntime : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberGoalRuntime(
+  serverId: string,
+  threadId: string,
+  runtime: ManagedGoalRuntime | null,
+): void {
+  if (!serverId || !threadId) return;
+  const key = goalRuntimeStorageKey(serverId, threadId);
+  if (runtime) window.localStorage.setItem(key, JSON.stringify(runtime));
+  else window.localStorage.removeItem(key);
 }
 
 function isMissingRolloutError(error: unknown): boolean {
@@ -185,35 +295,190 @@ function readableItemText(item: CodexThreadItem): string {
   return String(item.text || '');
 }
 
-function CodexItemCard({
-  item,
+type CodexDisplayEntry =
+  | { kind: 'item'; item: CodexThreadItem }
+  | { kind: 'activity'; id: string; items: CodexThreadItem[] };
+
+function isConversationMessage(item: CodexThreadItem): boolean {
+  return item.type === 'userMessage'
+    || (item.type === 'agentMessage' && item.phase !== 'commentary');
+}
+
+export function groupCodexActivity(items: CodexThreadItem[]): CodexDisplayEntry[] {
+  const entries: CodexDisplayEntry[] = [];
+  let activity: CodexThreadItem[] = [];
+  const flushActivity = () => {
+    if (!activity.length) return;
+    entries.push({ kind: 'activity', id: `activity-${activity[0]?.id || entries.length}`, items: activity });
+    activity = [];
+  };
+
+  for (const item of items) {
+    if (isConversationMessage(item)) {
+      flushActivity();
+      entries.push({ kind: 'item', item });
+    } else {
+      activity.push(item);
+    }
+  }
+  flushActivity();
+  return entries;
+}
+
+function CodexActivityGroup({
+  items,
   serverId,
   onOpenFilesPath,
 }: {
-  item: CodexThreadItem;
+  items: CodexThreadItem[];
   serverId: string;
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
-  const text = item.type === 'userMessage' ? itemTextContent(item) : readableItemText(item);
+  const [expanded, setExpanded] = useState(false);
   const markdownComponents = useMemo(
     () => createMarkdownComponents(onOpenFilesPath, { serverId }),
     [onOpenFilesPath, serverId],
   );
+  const latestText = [...items]
+    .reverse()
+    .map((item) => readableItemText(item).replace(/\s+/g, ' ').trim())
+    .find(Boolean) || 'Working';
+
+  return (
+    <section className="codex-app-activity-group" data-open={expanded ? 'true' : 'false'}>
+      <button
+        type="button"
+        className="codex-app-activity-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="codex-app-activity-chevron" aria-hidden="true">›</span>
+        <strong>Codex activity</strong>
+        <code>{latestText}</code>
+        <small>{items.length} {items.length === 1 ? 'update' : 'updates'}</small>
+      </button>
+      {expanded ? <div className="codex-app-activity-feed">
+        {items.map((item) => {
+          const text = readableItemText(item);
+          return (
+            <section key={item.id} className="codex-app-activity-entry">
+              <header>{item.type === 'agentMessage' ? 'Commentary' : itemTitle(item)}</header>
+              <div className="legacy-codex-markdown">
+                <ReactMarkdown components={markdownComponents}>
+                  {linkifyRemotePathLines(text || 'No additional details.', serverId)}
+                </ReactMarkdown>
+              </div>
+            </section>
+          );
+        })}
+      </div> : null}
+    </section>
+  );
+}
+
+function CodexItemCard({
+  item,
+  serverId,
+  onOpenFilesPath,
+  onOpenNewTask,
+  onEditUserMessage,
+}: {
+  item: CodexThreadItem;
+  serverId: string;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
+  onOpenNewTask: (text: string) => void;
+  onEditUserMessage: (text: string) => void;
+}) {
+  const text = item.type === 'userMessage' ? itemTextContent(item) : readableItemText(item);
+  const cardRef = useRef<HTMLElement>(null);
+  const selectedTextRef = useRef('');
+  const [copied, setCopied] = useState(false);
+  const [showFullText, setShowFullText] = useState(false);
+  const displayedText = codexDisplayText(text, showFullText);
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(onOpenFilesPath, { serverId }),
+    [onOpenFilesPath, serverId],
+  );
+  const selectedCardText = () => {
+    const selection = window.getSelection();
+    const selected = selection?.toString().trim() || '';
+    if (
+      selected &&
+      cardRef.current &&
+      selection?.anchorNode &&
+      selection.focusNode &&
+      cardRef.current.contains(selection.anchorNode) &&
+      cardRef.current.contains(selection.focusNode)
+    ) {
+      selectedTextRef.current = selected;
+    }
+    return selectedTextRef.current;
+  };
+  const copyText = async () => {
+    const value = selectedCardText() || text;
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
   if (item.type === 'agentMessage' || item.type === 'userMessage') {
     return (
-      <article className={`codex-app-item codex-app-item-${item.type}`}>
-        <header>{itemTitle(item)}</header>
-        <div className="legacy-codex-markdown">
+      <article ref={cardRef} className={`codex-app-item codex-app-item-${item.type}`}>
+        <header>
+          <span>{itemTitle(item)}</span>
+          <div className="codex-app-message-actions">
+            <button type="button" onClick={() => void copyText()} disabled={!text}>
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+            {item.type === 'agentMessage' ? (
+              <button
+                type="button"
+                onClick={() => onOpenNewTask(selectedCardText() || text)}
+                disabled={!text}
+                title="Use selected text, or the full response when nothing is selected"
+              >
+                New task
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onEditUserMessage(text)}
+                disabled={!text}
+                title="Put this message back in the composer without sending it"
+              >
+                Edit &amp; resend
+              </button>
+            )}
+          </div>
+        </header>
+        <div
+          className="legacy-codex-markdown"
+          onMouseUp={() => selectedCardText()}
+          onKeyUp={() => selectedCardText()}
+        >
           <ReactMarkdown components={markdownComponents}>
-            {linkifyRemotePathLines(text || '…', serverId)}
+            {linkifyRemotePathLines(displayedText || '…', serverId)}
           </ReactMarkdown>
         </div>
+        {text.length > CODEX_DISPLAY_TEXT_PREVIEW_CHARS ? (
+          <button
+            type="button"
+            className="codex-app-expand-content"
+            onClick={() => setShowFullText((current) => !current)}
+          >
+            {showFullText ? 'Show less' : `Show full content (${text.length.toLocaleString()} characters)`}
+          </button>
+        ) : null}
       </article>
     );
   }
   if (item.type === 'commandExecution') {
     return (
-      <details className="codex-app-item codex-app-tool" open={item.status === 'inProgress'}>
+      <details className="codex-app-item codex-app-tool">
         <summary>
           <span>{itemTitle(item)}</span>
           <code>{String(item.command || '')}</code>
@@ -228,7 +493,7 @@ function CodexItemCard({
       ? item.changes as Array<Record<string, unknown>>
       : [];
     return (
-      <details className="codex-app-item codex-app-tool codex-app-file-change" open={item.status === 'inProgress'}>
+      <details className="codex-app-item codex-app-tool codex-app-file-change">
         <summary>
           <span>{itemTitle(item)}</span>
           <code>{changes.map((change) => String(change.path || '')).filter(Boolean).join(', ') || 'Pending changes'}</code>
@@ -339,11 +604,13 @@ function CodexUserInputRequest({
 
 export function CodexAppServerPanel({
   selectedProfile,
+  connected,
   legacyServer,
   onOpenFilesPath,
   onUseLegacy,
 }: {
   selectedProfile: ConnectionProfile | null;
+  connected: boolean;
   legacyServer: LegacySshServer | null;
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
   onUseLegacy: () => void;
@@ -362,18 +629,43 @@ export function CodexAppServerPanel({
   const [error, setError] = useState('');
   const [threadQuery, setThreadQuery] = useState('');
   const [goalMode, setGoalMode] = useState(false);
-  const [reviewMode, setReviewMode] = useState(false);
-  const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>('uncommittedChanges');
+  const [reviewPermissionMode, setReviewPermissionMode] = useState<ReviewPermissionMode>(() => {
+    const stored = window.localStorage.getItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY);
+    return stored === 'ask' || stored === 'autoReview' || stored === 'fullAccess'
+      ? stored
+      : 'autoReview';
+  });
+  const [threadsCollapsed, setThreadsCollapsed] = useState(
+    () => window.localStorage.getItem(CODEX_THREADS_COLLAPSED_STORAGE_KEY) === 'true',
+  );
+  const [instructionRules, setInstructionRules] = useState<InstructionRule[]>([]);
+  const [skills, setSkills] = useState<CodexSkill[]>([]);
+  const [skillQuery, setSkillQuery] = useState('');
+  const [selectedSkill, setSelectedSkill] = useState<CodexSkill | null>(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillError, setSkillError] = useState('');
   const [goal, setGoal] = useState<ThreadGoal | null>(null);
+  const [goalPolicy, setGoalPolicy] = useState<ManagedGoalPolicy>(readGoalPolicy);
+  const [goalRuntime, setGoalRuntime] = useState<ManagedGoalRuntime | null>(null);
   const unavailableThreadIdsRef = useRef(new Set<string>());
+  const viewRef = useRef<CodexStructuredState>(EMPTY_CODEX_STRUCTURED_STATE);
+  const goalRef = useRef<ThreadGoal | null>(null);
+  const goalPolicyRef = useRef(goalPolicy);
+  const goalRuntimeRef = useRef<ManagedGoalRuntime | null>(null);
+  const goalWatchdogBusyRef = useRef(false);
   const itemsScrollRef = useRef<HTMLDivElement>(null);
+  const olderItemsScrollAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const followLatestRef = useRef(true);
   const lastScrolledThreadIdRef = useRef<string | null>(null);
   const [cwd, setCwd] = useState(() => readCodexCwd(serverId, defaultCwd));
+  const cwdRef = useRef(cwd);
   const [model, setModel] = useState(() => window.localStorage.getItem(CODEX_MODEL_STORAGE_KEY) || '');
   const [effort, setEffort] = useState(() => window.localStorage.getItem(CODEX_EFFORT_STORAGE_KEY) || '');
   const [models, setModels] = useState<string[]>(CODEX_MODEL_FALLBACKS);
   const [collaborationMode, setCollaborationMode] = useState('default');
+  const [renderedItemLimit, setRenderedItemLimit] = useState(CODEX_DISPLAY_ITEM_BATCH);
+  const previousNonPlanModeRef = useRef('default');
   const [collaborationModes, setCollaborationModes] = useState<CollaborationMode[]>([
     { mode: 'default', settings: { developer_instructions: null } },
     { mode: 'plan', settings: { developer_instructions: null, reasoning_effort: 'medium' } },
@@ -400,14 +692,105 @@ export function CodexAppServerPanel({
       settings: { ...(preset.settings || {}), model: selectedModel },
     } : undefined;
   }, [collaborationMode, collaborationModes, model, models]);
+  const planCollaborationMode = useMemo(
+    () => collaborationModes.find((candidate) => candidate.mode === 'plan') || null,
+    [collaborationModes],
+  );
+  const nonPlanCollaborationModes = useMemo(
+    () => collaborationModes.filter((candidate) => candidate.mode !== 'plan'),
+    [collaborationModes],
+  );
   const contextBudget = useMemo(
     () => (view.tokenUsage ? codexContextBudget(view.tokenUsage) : null),
     [view.tokenUsage],
   );
+  const displayWindow = useMemo(
+    () => codexDisplayWindow(view.items, renderedItemLimit),
+    [renderedItemLimit, view.items],
+  );
+  const { visibleItems, hiddenItemCount } = displayWindow;
+  const displayEntries = useMemo(() => groupCodexActivity(visibleItems), [visibleItems]);
+  const runtimeStatusLabel = connected ? runtime?.status || 'connecting' : 'disconnected';
+  const visibleSkills = useMemo(() => {
+    const query = skillQuery.trim().toLowerCase();
+    if (!query) return skills;
+    return skills.filter((skill) => [
+      skill.name,
+      skill.displayName,
+      skill.description,
+      skill.shortDescription,
+      skill.path,
+    ].some((value) => value.toLowerCase().includes(query)));
+  }, [skillQuery, skills]);
 
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    cwdRef.current = cwd;
+  }, [cwd]);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  useEffect(() => {
+    goalRef.current = goal;
+  }, [goal]);
+
+  useEffect(() => {
+    goalPolicyRef.current = goalPolicy;
+    window.localStorage.setItem(CODEX_GOAL_POLICY_STORAGE_KEY, JSON.stringify(goalPolicy));
+  }, [goalPolicy]);
+
+  useEffect(() => {
+    goalRuntimeRef.current = goalRuntime;
+    if (selectedThreadId) rememberGoalRuntime(serverId, selectedThreadId, goalRuntime);
+  }, [goalRuntime, selectedThreadId, serverId]);
+
+  useEffect(() => {
+    if (!goal || goal.status !== 'active' || !goalRuntime || !selectedThreadId) return;
+    const timer = window.setInterval(() => {
+      const runtimeState = goalRuntimeRef.current;
+      const activeGoal = goalRef.current;
+      const client = clientRef.current;
+      if (!runtimeState || activeGoal?.status !== 'active' || !client) return;
+      const elapsedMinutes = (Date.now() - runtimeState.startedAt) / 60_000;
+      if (elapsedMinutes < goalPolicyRef.current.maxMinutes || goalWatchdogBusyRef.current) return;
+
+      goalWatchdogBusyRef.current = true;
+      const stoppedRuntime = {
+        ...runtimeState,
+        stopReason: `The managed Goal reached its ${goalPolicyRef.current.maxMinutes}-minute safety limit.`,
+        nextStep: 'Review the latest checkpoint and explicitly resume with more time if continued work is appropriate.',
+      };
+      goalRuntimeRef.current = stoppedRuntime;
+      setGoalRuntime(stoppedRuntime);
+      void (async () => {
+        try {
+          const activeView = viewRef.current;
+          if (activeView.turnId && /progress|running/i.test(activeView.turnStatus)) {
+            await client.call('turn/interrupt', {
+              threadId: selectedThreadId,
+              turnId: activeView.turnId,
+            }).catch(() => undefined);
+          }
+          const response = await client.call<ThreadGoalResponse>('thread/goal/set', {
+            threadId: selectedThreadId,
+            status: 'paused',
+          });
+          goalRef.current = response.goal || activeGoal;
+          setGoal(response.goal || activeGoal);
+        } catch (timerError) {
+          setError(timerError instanceof Error ? timerError.message : 'Goal time limit could not pause the run');
+        } finally {
+          goalWatchdogBusyRef.current = false;
+        }
+      })();
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [goal, goalRuntime, selectedThreadId]);
 
   useLayoutEffect(() => {
     const element = itemsScrollRef.current;
@@ -424,8 +807,25 @@ export function CodexAppServerPanel({
     }
   }, [view.items, view.threadId]);
 
+  useLayoutEffect(() => {
+    const element = itemsScrollRef.current;
+    const anchor = olderItemsScrollAnchorRef.current;
+    if (!element || !anchor) return;
+    element.scrollTop = anchor.top + (element.scrollHeight - anchor.height);
+    olderItemsScrollAnchorRef.current = null;
+  }, [renderedItemLimit]);
+
+  useEffect(() => {
+    setRenderedItemLimit(CODEX_DISPLAY_ITEM_BATCH);
+    olderItemsScrollAnchorRef.current = null;
+  }, [view.threadId]);
+
   useEffect(() => {
     setCwd(readCodexCwd(serverId, defaultCwd));
+    setInstructionRules([]);
+    setSkills([]);
+    setSelectedSkill(null);
+    setSkillError('');
     return subscribeCodexCwd(serverId, setCwd);
   }, [defaultCwd, serverId]);
 
@@ -433,6 +833,17 @@ export function CodexAppServerPanel({
     if (model) window.localStorage.setItem(CODEX_MODEL_STORAGE_KEY, model);
     else window.localStorage.removeItem(CODEX_MODEL_STORAGE_KEY);
   }, [model]);
+
+  useEffect(() => {
+    window.localStorage.setItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY, reviewPermissionMode);
+  }, [reviewPermissionMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      CODEX_THREADS_COLLAPSED_STORAGE_KEY,
+      String(threadsCollapsed),
+    );
+  }, [threadsCollapsed]);
 
   useEffect(() => {
     if (effort) window.localStorage.setItem(CODEX_EFFORT_STORAGE_KEY, effort);
@@ -460,6 +871,51 @@ export function CodexAppServerPanel({
     setModels([...new Set([...discovered, ...CODEX_MODEL_FALLBACKS])]);
   };
 
+  const refreshSkills = async (
+    client: CodexAppServerSocket,
+    forceReload = false,
+    targetCwd = cwdRef.current,
+  ) => {
+    const normalizedCwd = targetCwd.trim() || '~';
+    setSkillsLoading(true);
+    setSkillError('');
+    try {
+      const response = await client.call<SkillsListResponse>('skills/list', {
+        cwds: [normalizedCwd],
+        forceReload,
+      });
+      const discovered = normalizeCodexSkills(response);
+      setSkills(discovered);
+      setSelectedSkill((current) => {
+        if (!current) return null;
+        return discovered.find((skill) =>
+          (skill.path && skill.path === current.path) ||
+          (!skill.path && skill.name === current.name),
+        ) || null;
+      });
+    } catch (nextError) {
+      setSkills([]);
+      setSelectedSkill(null);
+      setSkillError(nextError instanceof Error ? nextError.message : 'Unable to load Skills');
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
+  const selectSkill = (skill: CodexSkill) => {
+    setSelectedSkill(skill.enabled ? skill : null);
+    setSkillError('');
+  };
+
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client || runtime?.status !== 'ready') return;
+    const timer = window.setTimeout(() => {
+      void refreshSkills(client, false, cwd).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [cwd, runtime?.status, serverId]);
+
   const refreshCollaborationModes = async (client: CodexAppServerSocket) => {
     const response = await client.call<CollaborationModeListResponse>('collaborationMode/list', {});
     if (Array.isArray(response?.data) && response.data.length) {
@@ -479,10 +935,36 @@ export function CodexAppServerPanel({
   const refreshGoal = async (client: CodexAppServerSocket, threadId: string) => {
     if (!threadId) {
       setGoal(null);
+      goalRef.current = null;
       return;
     }
     const response = await client.call<ThreadGoalResponse>('thread/goal/get', { threadId });
-    setGoal(response.goal || null);
+    const nextGoal = response.goal || null;
+    goalRef.current = nextGoal;
+    setGoal(nextGoal);
+  };
+
+  const refreshInstructionRules = async (
+    client: CodexAppServerSocket,
+    sources: unknown,
+  ) => {
+    const paths = Array.isArray(sources)
+      ? sources.map((source) => String(source || '').trim()).filter(Boolean)
+      : [];
+    if (!paths.length) {
+      setInstructionRules([]);
+      return;
+    }
+    const loaded = await Promise.all(paths.map(async (path): Promise<InstructionRule | null> => {
+      try {
+        const response = await client.call<FsReadFileResponse>('fs/readFile', { path });
+        const content = response.dataBase64 ? decodeBase64Text(response.dataBase64).trim() : '';
+        return content ? { path, content } : null;
+      } catch {
+        return null;
+      }
+    }));
+    setInstructionRules(loaded.filter((rule): rule is InstructionRule => Boolean(rule)));
   };
 
   const forgetUnavailableThread = (threadId: string) => {
@@ -491,15 +973,38 @@ export function CodexAppServerPanel({
     setThreads((current) => current.filter((thread) => thread.id !== threadId));
     setSelectedThreadId('');
     setView(EMPTY_CODEX_STRUCTURED_STATE);
+    viewRef.current = EMPTY_CODEX_STRUCTURED_STATE;
+    setGoalRuntime(null);
+    goalRuntimeRef.current = null;
+    setInstructionRules([]);
   };
 
   const startNewThreadDraft = () => {
     selectedThreadIdRef.current = '';
     setSelectedThreadId('');
     setView(EMPTY_CODEX_STRUCTURED_STATE);
+    viewRef.current = EMPTY_CODEX_STRUCTURED_STATE;
     setApprovals([]);
     setGoal(null);
+    goalRef.current = null;
+    setGoalRuntime(null);
+    goalRuntimeRef.current = null;
+    setInstructionRules([]);
     setError('');
+  };
+
+  const focusPromptWithText = (text: string) => {
+    setDraft(text);
+    window.requestAnimationFrame(() => {
+      promptRef.current?.focus();
+      promptRef.current?.setSelectionRange(text.length, text.length);
+    });
+  };
+
+  const startNewTaskFromText = (text: string) => {
+    if (!text.trim()) return;
+    startNewThreadDraft();
+    focusPromptWithText(text.trim());
   };
 
   const openThread = async (thread: CodexThreadSummary) => {
@@ -511,8 +1016,18 @@ export function CodexAppServerPanel({
       const response = await client.call<ThreadResponse>('thread/resume', { threadId: thread.id });
       const resumed = response.thread || thread;
       setSelectedThreadId(resumed.id);
-      setView(structuredStateFromThread(resumed, readTokenUsage(serverId, resumed.id)));
-      await refreshGoal(client, resumed.id).catch(() => setGoal(null));
+      const resumedView = structuredStateFromThread(resumed, readTokenUsage(serverId, resumed.id));
+      viewRef.current = resumedView;
+      setView(resumedView);
+      const savedRuntime = readGoalRuntime(serverId, resumed.id);
+      goalRuntimeRef.current = savedRuntime;
+      setGoalRuntime(savedRuntime);
+      await Promise.all([
+        refreshGoal(client, resumed.id).catch(() => setGoal(null)),
+        refreshInstructionRules(client, response.instructionSources).catch(() => {
+          setInstructionRules([]);
+        }),
+      ]);
     } catch (nextError) {
       if (isMissingRolloutError(nextError)) {
         forgetUnavailableThread(thread.id);
@@ -526,7 +1041,19 @@ export function CodexAppServerPanel({
   };
 
   useEffect(() => {
-    if (!serverId) return;
+    if (!serverId || !connected) {
+      clientRef.current = null;
+      setRuntime(serverId ? {
+        key: serverId,
+        status: 'stopped',
+        detail: 'Connect SSH to start Codex app-server.',
+        sequence: 0,
+      } : null);
+      setBusy(false);
+      setApprovals([]);
+      setError('');
+      return;
+    }
     const client = new CodexAppServerSocket(serverId);
     clientRef.current = client;
     const unsubscribe = client.subscribe((message) => {
@@ -542,11 +1069,19 @@ export function CodexAppServerPanel({
               .call<ThreadResponse>('thread/resume', { threadId })
               .then((response) => {
                 if (response.thread) {
-                  setView(structuredStateFromThread(
+                  const resumedView = structuredStateFromThread(
                     response.thread,
                     readTokenUsage(serverId, response.thread.id),
-                  ));
+                  );
+                  viewRef.current = resumedView;
+                  setView(resumedView);
+                  const savedRuntime = readGoalRuntime(serverId, response.thread.id);
+                  goalRuntimeRef.current = savedRuntime;
+                  setGoalRuntime(savedRuntime);
                   void refreshGoal(client, response.thread.id).catch(() => undefined);
+                  void refreshInstructionRules(client, response.instructionSources).catch(() => {
+                    setInstructionRules([]);
+                  });
                 }
               })
               .catch((resumeError) => {
@@ -555,22 +1090,121 @@ export function CodexAppServerPanel({
           }
         }
       } else if (message.type === 'event') {
-        setView((current) => {
-          const next = reduceCodexRuntimeEvent(current, message.event);
-          if (next.tokenUsage && next.tokenUsage !== current.tokenUsage) {
-            rememberTokenUsage(
-              serverId,
-              next.threadId || message.event.threadId || '',
-              next.tokenUsage,
-            );
-          }
-          return next;
-        });
+        if (message.event.method === 'skills/changed') {
+          void refreshSkills(client, true).catch(() => undefined);
+        }
+        const currentView = viewRef.current;
+        const nextView = reduceCodexRuntimeEvent(currentView, message.event);
+        viewRef.current = nextView;
+        setView(nextView);
+        if (nextView.tokenUsage && nextView.tokenUsage !== currentView.tokenUsage) {
+          rememberTokenUsage(
+            serverId,
+            nextView.threadId || message.event.threadId || '',
+            nextView.tokenUsage,
+          );
+        }
         if (message.event.method === 'turn/completed') {
+          const completedTurnId = nextView.turnId;
           setBusy(false);
           void refreshThreads(client).catch(() => undefined);
           const threadId = selectedThreadIdRef.current;
-          if (threadId) void refreshGoal(client, threadId).catch(() => undefined);
+          if (threadId) {
+            void (async () => {
+              try {
+                const response = await client.call<ThreadGoalResponse>('thread/goal/get', { threadId });
+                const latestGoal = response.goal || null;
+                goalRef.current = latestGoal;
+                setGoal(latestGoal);
+                const currentRuntime = goalRuntimeRef.current;
+                if (latestGoal?.status !== 'active' || !currentRuntime || goalWatchdogBusyRef.current) return;
+
+                let nextRuntime = advanceManagedGoalRuntime(
+                  currentRuntime,
+                  goalPolicyRef.current,
+                  nextView.items,
+                );
+                const nextContextBudget = nextView.tokenUsage
+                  ? codexContextBudget(nextView.tokenUsage)
+                  : null;
+                if (nextContextBudget && nextContextBudget.remainingPercent <= 15) {
+                  nextRuntime = {
+                    ...nextRuntime,
+                    stopReason: `Only ${nextContextBudget.remainingPercent}% of the usable context window remains.`,
+                    nextStep: 'Use Fresh task to continue from the saved checkpoint with the same cwd and a clean context.',
+                  };
+                } else if (
+                  nextContextBudget && nextContextBudget.remainingPercent <= 30 &&
+                  !nextRuntime.checkpoint
+                ) {
+                  nextRuntime = {
+                    ...nextRuntime,
+                    checkpoint: `Context warning: ${nextContextBudget.remainingPercent}% remains.\nTurns completed: ${nextRuntime.turnsCompleted}`,
+                  };
+                }
+                goalRuntimeRef.current = nextRuntime;
+                setGoalRuntime(nextRuntime);
+                rememberGoalRuntime(serverId, threadId, nextRuntime);
+                if (!nextRuntime.stopReason) return;
+
+                goalWatchdogBusyRef.current = true;
+                const paused = await client.call<ThreadGoalResponse>('thread/goal/set', {
+                  threadId,
+                  status: 'paused',
+                });
+                goalRef.current = paused.goal || latestGoal;
+                setGoal(paused.goal || latestGoal);
+
+                const activeView = viewRef.current;
+                if (
+                  activeView.turnId && activeView.turnId !== completedTurnId &&
+                  /progress|running/i.test(activeView.turnStatus)
+                ) {
+                  await client.call('turn/interrupt', {
+                    threadId,
+                    turnId: activeView.turnId,
+                  }).catch(() => undefined);
+                }
+
+                if (goalHasTokensRemaining(latestGoal)) {
+                  setBusy(true);
+                  const report = await client.call<{ turn?: { id?: string; status?: string } }>(
+                    'turn/start',
+                    {
+                      threadId,
+                      clientUserMessageId: crypto.randomUUID(),
+                      input: [{
+                        type: 'text',
+                        text: [
+                          'CozyPad paused the managed Goal because its no-progress or safety limit was reached.',
+                          `Controller reason: ${nextRuntime.stopReason}`,
+                          'Do not resume implementation in this turn. Using evidence already present in this thread, reply with exactly these sections:',
+                          'Why progress cannot continue',
+                          'Evidence',
+                          'Next action',
+                          'Make the next action concrete enough for the user to perform or approve.',
+                        ].join('\n'),
+                        text_elements: [],
+                      }],
+                    },
+                  );
+                  viewRef.current = {
+                    ...viewRef.current,
+                    turnId: String(report.turn?.id || viewRef.current.turnId),
+                    turnStatus: String(report.turn?.status || 'inProgress'),
+                  };
+                  setView(viewRef.current);
+                }
+              } catch (watchdogError) {
+                setBusy(false);
+                setError(watchdogError instanceof Error
+                  ? `Goal watchdog: ${watchdogError.message}`
+                  : 'Goal watchdog could not pause the Goal');
+              } finally {
+                goalWatchdogBusyRef.current = false;
+              }
+            })();
+          }
         }
       } else if (message.type === 'server_request') {
         setApprovals((current) =>
@@ -597,25 +1231,29 @@ export function CodexAppServerPanel({
       client.close();
       if (clientRef.current === client) clientRef.current = null;
     };
-  }, [serverId]);
+  }, [connected, serverId]);
 
   const createThread = async (): Promise<string> => {
     const client = clientRef.current;
     if (!client) throw new Error('Codex app-server is not connected');
+    const permissions = reviewPermissionSettings(reviewPermissionMode);
     const response = await client.call<ThreadResponse>('thread/start', {
       cwd,
       model: model || undefined,
-      approvalPolicy: 'on-request',
-      approvalsReviewer: 'user',
-      sandbox: 'workspace-write',
+      approvalPolicy: permissions.approvalPolicy,
+      approvalsReviewer: permissions.approvalsReviewer,
+      sandbox: permissions.sandbox,
       config: effort ? { model_reasoning_effort: effort } : undefined,
       collaborationMode: activeCollaborationMode,
     });
     const thread = response.thread;
     if (!thread?.id) throw new Error('Codex did not return a thread id');
+    await refreshInstructionRules(client, response.instructionSources);
     setThreads((current) => [thread, ...current.filter((candidate) => candidate.id !== thread.id)]);
     setSelectedThreadId(thread.id);
-    setView(structuredStateFromThread(thread));
+    const nextView = structuredStateFromThread(thread);
+    viewRef.current = nextView;
+    setView(nextView);
     return thread.id;
   };
 
@@ -626,20 +1264,35 @@ export function CodexAppServerPanel({
     setError('');
     try {
       let threadId = selectedThreadId || (await createThread());
+      const managedObjective = goalObjective
+        ? buildManagedGoalObjective(goalObjective, goalPolicy)
+        : '';
       if (goalObjective) {
         const goalResponse = await client.call<ThreadGoalResponse>('thread/goal/set', {
           threadId,
-          objective: goalObjective,
+          objective: managedObjective,
           status: 'active',
+          tokenBudget: goalPolicy.tokenBudget,
         });
-        setGoal(goalResponse.goal || null);
+        const nextGoal = goalResponse.goal || null;
+        goalRef.current = nextGoal;
+        setGoal(nextGoal);
+        const nextRuntime = createManagedGoalRuntime(viewRef.current.items);
+        goalRuntimeRef.current = nextRuntime;
+        setGoalRuntime(nextRuntime);
+        rememberGoalRuntime(serverId, threadId, nextRuntime);
       }
+      const permissions = reviewPermissionSettings(reviewPermissionMode);
+      const skillForTurn = selectedSkill?.enabled ? selectedSkill : null;
       const startTurn = (targetThreadId: string) =>
         client.call<{ turn?: { id?: string; status?: string } }>('turn/start', {
           threadId: targetThreadId,
           clientUserMessageId: crypto.randomUUID(),
-          input: [{ type: 'text', text, text_elements: [] }],
+          input: buildCodexSkillTurnInput(managedObjective || text, skillForTurn),
           cwd,
+          approvalPolicy: permissions.approvalPolicy,
+          approvalsReviewer: permissions.approvalsReviewer,
+          sandboxPolicy: permissions.sandboxPolicy,
           model: model || undefined,
           effort: effort || undefined,
           collaborationMode: activeCollaborationMode,
@@ -653,77 +1306,50 @@ export function CodexAppServerPanel({
         threadId = await createThread();
         response = await startTurn(threadId);
       }
-      setView((current) => ({
-        ...current,
+      const nextView = {
+        ...viewRef.current,
         threadId,
-        turnId: String(response.turn?.id || current.turnId),
+        turnId: String(response.turn?.id || viewRef.current.turnId),
         turnStatus: String(response.turn?.status || 'inProgress'),
-      }));
+      };
+      viewRef.current = nextView;
+      setView(nextView);
+      if (skillForTurn) setSelectedSkill(null);
     } catch (nextError) {
       setBusy(false);
       setError(nextError instanceof Error ? nextError.message : 'Unable to start Codex turn');
     }
   };
 
-  const reviewTarget = (value: string): ReviewTarget => {
-    switch (reviewTargetType) {
-      case 'baseBranch':
-        return { type: 'baseBranch', branch: value };
-      case 'commit':
-        return { type: 'commit', sha: value, title: null };
-      case 'custom':
-        return { type: 'custom', instructions: value };
-      default:
-        return { type: 'uncommittedChanges' };
-    }
-  };
-
-  const runReview = async (value: string) => {
-    const client = clientRef.current;
-    if (!client || busy) return;
-    setBusy(true);
-    setError('');
-    try {
-      let threadId = selectedThreadId || (await createThread());
-      const startReview = (targetThreadId: string) =>
-        client.call<ReviewStartResponse>('review/start', {
-          threadId: targetThreadId,
-          delivery: 'inline',
-          target: reviewTarget(value),
-        });
-      let response;
-      try {
-        response = await startReview(threadId);
-      } catch (reviewError) {
-        if (!selectedThreadId || !isMissingRolloutError(reviewError)) throw reviewError;
-        forgetUnavailableThread(selectedThreadId);
-        threadId = await createThread();
-        response = await startReview(threadId);
-      }
-      setView((current) => ({
-        ...current,
-        threadId: response.reviewThreadId || threadId,
-        turnId: String(response.turn?.id || current.turnId),
-        turnStatus: String(response.turn?.status || 'inProgress'),
-      }));
-    } catch (nextError) {
-      setBusy(false);
-      setError(nextError instanceof Error ? nextError.message : 'Unable to start Codex review');
-    }
-  };
-
   const sendTurn = async (event: React.FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text && !(reviewMode && reviewTargetType === 'uncommittedChanges')) return;
+    if (!text) return;
     setDraft('');
-    if (reviewMode) {
-      await runReview(text);
-      setReviewMode(false);
-      return;
-    }
     await runTurn(text, goalMode ? text : '');
     if (goalMode) setGoalMode(false);
+  };
+
+  const selectCollaborationMode = (nextMode: string) => {
+    if (nextMode !== 'plan') previousNonPlanModeRef.current = nextMode;
+    setCollaborationMode(nextMode);
+    const nextEffort = collaborationModes.find(
+      (candidate) => candidate.mode === nextMode,
+    )?.settings?.reasoning_effort;
+    if (typeof nextEffort === 'string') setEffort(nextEffort);
+  };
+
+  const togglePlanMode = () => {
+    if (collaborationMode === 'plan') {
+      const fallbackMode = nonPlanCollaborationModes.some(
+        (candidate) => candidate.mode === previousNonPlanModeRef.current,
+      )
+        ? previousNonPlanModeRef.current
+        : nonPlanCollaborationModes[0]?.mode || 'default';
+      selectCollaborationMode(fallbackMode);
+      return;
+    }
+    selectCollaborationMode('plan');
   };
 
   const updateGoalStatus = async (status: 'active' | 'paused') => {
@@ -735,7 +1361,19 @@ export function CodexAppServerPanel({
         threadId: selectedThreadId,
         status,
       });
-      setGoal(response.goal || null);
+      const nextGoal = response.goal || null;
+      goalRef.current = nextGoal;
+      setGoal(nextGoal);
+      if (status === 'active' && goalRuntimeRef.current) {
+        const resumedRuntime = {
+          ...goalRuntimeRef.current,
+          noProgressTurns: 0,
+          stopReason: '',
+          nextStep: '',
+        };
+        goalRuntimeRef.current = resumedRuntime;
+        setGoalRuntime(resumedRuntime);
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to update Goal');
     }
@@ -748,6 +1386,10 @@ export function CodexAppServerPanel({
     try {
       await client.call('thread/goal/clear', { threadId: selectedThreadId });
       setGoal(null);
+      goalRef.current = null;
+      setGoalRuntime(null);
+      goalRuntimeRef.current = null;
+      rememberGoalRuntime(serverId, selectedThreadId, null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to clear Goal');
     }
@@ -776,6 +1418,23 @@ export function CodexAppServerPanel({
       await client.call('turn/interrupt', { threadId: view.threadId, turnId: view.turnId });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to interrupt Codex');
+    }
+  };
+
+  const stopGoalNow = async () => {
+    const client = clientRef.current;
+    if (!client || !selectedThreadId || !goal) return;
+    setError('');
+    try {
+      if (view.turnId && /progress|running/i.test(view.turnStatus)) {
+        await client.call('turn/interrupt', {
+          threadId: selectedThreadId,
+          turnId: view.turnId,
+        }).catch(() => undefined);
+      }
+      await updateGoalStatus('paused');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to stop Goal');
     }
   };
 
@@ -820,7 +1479,7 @@ export function CodexAppServerPanel({
         </div>
         <div className="legacy-codex-actions codex-app-head-actions">
           <span className={`codex-app-runtime codex-app-runtime-${runtime?.status || 'starting'}`}>
-            {runtime?.status || 'connecting'}
+            {runtimeStatusLabel}
           </span>
           <button type="button" onClick={startNewThreadDraft} disabled={runtime?.status !== 'ready'}>
             New thread
@@ -832,27 +1491,49 @@ export function CodexAppServerPanel({
       {error || view.error ? <div className="codex-app-error">{error || view.error}</div> : null}
 
       <div className="agent-panes legacy-codex-panes codex-app-layout">
-        <aside className="session-sidebar legacy-codex-sidebar codex-app-threads">
-          <strong>Threads</strong>
-          <input
-            className="codex-app-thread-search"
-            value={threadQuery}
-            onChange={(event) => setThreadQuery(event.target.value)}
-            placeholder="Search threads"
-            aria-label="Search Codex threads"
-          />
-          {visibleThreads.map((thread) => (
+        <aside
+          className={`session-sidebar legacy-codex-sidebar codex-app-threads${
+            threadsCollapsed ? ' collapsed' : ''
+          }`}
+        >
+          <div className="codex-app-threads-header">
+            {!threadsCollapsed ? <strong>Threads</strong> : null}
             <button
               type="button"
-              key={thread.id}
-              className={thread.id === selectedThreadId ? 'active' : ''}
-              onClick={() => void openThread(thread)}
+              className="codex-app-threads-toggle"
+              aria-label={threadsCollapsed ? 'Expand Threads' : 'Collapse Threads'}
+              aria-expanded={!threadsCollapsed}
+              title={threadsCollapsed ? 'Expand Threads' : 'Collapse Threads'}
+              onClick={() => setThreadsCollapsed((current) => !current)}
             >
-              <span>{thread.name || thread.preview || 'Untitled thread'}</span>
-              <small>{thread.cwd || cwd}</small>
+              {threadsCollapsed ? '›' : '‹'}
             </button>
-          ))}
-          {!visibleThreads.length ? <p>{threads.length ? 'No matching thread.' : 'No saved thread yet.'}</p> : null}
+          </div>
+          {!threadsCollapsed ? (
+            <>
+              <input
+                className="codex-app-thread-search"
+                value={threadQuery}
+                onChange={(event) => setThreadQuery(event.target.value)}
+                placeholder="Search threads"
+                aria-label="Search Codex threads"
+              />
+              {visibleThreads.map((thread) => (
+                <button
+                  type="button"
+                  key={thread.id}
+                  className={thread.id === selectedThreadId ? 'active' : ''}
+                  onClick={() => void openThread(thread)}
+                >
+                  <span>{thread.name || thread.preview || 'Untitled thread'}</span>
+                  <small>{thread.cwd || cwd}</small>
+                </button>
+              ))}
+              {!visibleThreads.length ? (
+                <p>{threads.length ? 'No matching thread.' : 'No saved thread yet.'}</p>
+              ) : null}
+            </>
+          ) : null}
         </aside>
 
         <main className="chat-column legacy-codex-output codex-app-conversation">
@@ -881,16 +1562,53 @@ export function CodexAppServerPanel({
                 element.scrollHeight - element.scrollTop - element.clientHeight < 160;
             }}
           >
-            {view.items.map((item) => (
-              <CodexItemCard
-                key={item.id}
-                item={item}
+            {hiddenItemCount ? (
+              <div className="codex-app-display-window" role="status">
+                <span>{hiddenItemCount.toLocaleString()} earlier items are hidden to keep the browser responsive.</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const element = itemsScrollRef.current;
+                    if (element) {
+                      olderItemsScrollAnchorRef.current = {
+                        height: element.scrollHeight,
+                        top: element.scrollTop,
+                      };
+                    }
+                    followLatestRef.current = false;
+                    setRenderedItemLimit((current) => Math.min(
+                      view.items.length,
+                      current + CODEX_DISPLAY_ITEM_BATCH,
+                    ));
+                  }}
+                >
+                  Load earlier
+                </button>
+              </div>
+            ) : null}
+            {displayEntries.map((entry) => entry.kind === 'activity' ? (
+              <CodexActivityGroup
+                key={entry.id}
+                items={entry.items}
                 serverId={serverId}
                 onOpenFilesPath={onOpenFilesPath}
               />
+            ) : (
+              <CodexItemCard
+                key={entry.item.id}
+                item={entry.item}
+                serverId={serverId}
+                onOpenFilesPath={onOpenFilesPath}
+                onOpenNewTask={startNewTaskFromText}
+                onEditUserMessage={focusPromptWithText}
+              />
             ))}
             {!view.items.length ? (
-              <div className="codex-app-empty">Start a structured Codex thread on this server.</div>
+              <div className="codex-app-empty">
+                {connected
+                  ? 'Start a structured Codex thread on this server.'
+                  : 'Connect SSH to start or resume a Codex thread.'}
+              </div>
             ) : null}
           </div>
 
@@ -917,6 +1635,7 @@ export function CodexAppServerPanel({
           <form className="codex-app-composer" onSubmit={sendTurn}>
             <div className="codex-app-prompt-row">
               <textarea
+                ref={promptRef}
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -932,15 +1651,7 @@ export function CodexAppServerPanel({
                     event.currentTarget.form?.requestSubmit();
                   }
                 }}
-                placeholder={reviewMode
-                  ? reviewTargetType === 'uncommittedChanges'
-                    ? 'Review staged, unstaged, and untracked changes…'
-                    : reviewTargetType === 'baseBranch'
-                      ? 'Enter the base branch, for example main…'
-                      : reviewTargetType === 'commit'
-                        ? 'Enter the commit SHA to review…'
-                        : 'Describe exactly what Codex should review…'
-                  : goalMode
+                placeholder={goalMode
                     ? 'Describe the outcome and success criteria for this goal…'
                     : selectedThreadId
                       ? 'Continue this Codex thread…'
@@ -950,56 +1661,71 @@ export function CodexAppServerPanel({
               <button
                 type="submit"
                 disabled={
-                  (!draft.trim() && !(reviewMode && reviewTargetType === 'uncommittedChanges')) ||
-                  busy ||
+                  !draft.trim() || busy ||
                   runtime?.status !== 'ready'
                 }
               >
-                {busy ? 'Running…' : reviewMode ? 'Start review' : goalMode ? 'Start goal' : 'Send'}
+                {busy ? 'Running…' : goalMode ? 'Start goal' : 'Send'}
               </button>
             </div>
             <div className="codex-app-composer-controls">
+              {selectedSkill ? (
+                <button
+                  type="button"
+                  className="codex-app-selected-skill"
+                  title={`Remove $${selectedSkill.name} from the next prompt`}
+                  onClick={() => setSelectedSkill(null)}
+                >
+                  ${selectedSkill.name} <span aria-hidden="true">×</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 className={`codex-app-mode-button${goalMode ? ' active' : ''}`}
                 aria-pressed={goalMode}
                 onClick={() => {
                   setGoalMode((current) => !current);
-                  setReviewMode(false);
                 }}
                 disabled={busy || runtime?.status !== 'ready'}
               >
                 ◎ Goal
               </button>
-              <button
-                type="button"
-                className={`codex-app-mode-button${reviewMode ? ' active' : ''}`}
-                aria-pressed={reviewMode}
-                onClick={() => {
-                  setReviewMode((current) => !current);
-                  setGoalMode(false);
-                }}
-                disabled={busy || runtime?.status !== 'ready'}
-              >
-                Review
-              </button>
-              {reviewMode ? (
-                <label className="codex-app-review-target">
-                  <span>Target</span>
-                  <select
-                    value={reviewTargetType}
-                    onChange={(event) => {
-                      setReviewTargetType(event.target.value as ReviewTargetType);
-                      setDraft('');
-                    }}
-                  >
-                    <option value="uncommittedChanges">Current changes</option>
-                    <option value="baseBranch">Base branch</option>
-                    <option value="commit">Commit</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
+              {planCollaborationMode ? (
+                <button
+                  type="button"
+                  className={`codex-app-mode-button${collaborationMode === 'plan' ? ' active' : ''}`}
+                  aria-pressed={collaborationMode === 'plan'}
+                  onClick={togglePlanMode}
+                  disabled={busy || runtime?.status !== 'ready'}
+                  title={collaborationMode === 'plan' ? 'Disable Plan mode' : 'Enable Plan mode'}
+                >
+                  ◇ Plan
+                </button>
               ) : null}
+              <label className="codex-app-review-permission">
+                <span>Review</span>
+                <select
+                  value={reviewPermissionMode}
+                  onChange={(event) => {
+                    const nextMode = event.target.value as ReviewPermissionMode;
+                    if (
+                      nextMode === 'fullAccess' &&
+                      !window.confirm(
+                        'Full access lets Codex modify any file, run commands, and use the network without approval. Enable it?',
+                      )
+                    ) {
+                      event.currentTarget.value = reviewPermissionMode;
+                      return;
+                    }
+                    setReviewPermissionMode(nextMode);
+                  }}
+                  disabled={busy || runtime?.status !== 'ready'}
+                >
+                  {CODEX_REVIEW_PERMISSION_OPTIONS.map((option) => (
+                    <option value={option.value} key={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
               <label>
                 <span>Model</span>
                 <select value={model} onChange={(event) => setModel(event.target.value)}>
@@ -1015,29 +1741,108 @@ export function CodexAppServerPanel({
                   ))}
                 </select>
               </label>
-              <label>
-                <span>Mode</span>
-                <select
-                  value={collaborationMode}
-                  onChange={(event) => {
-                    const nextMode = event.target.value;
-                    setCollaborationMode(nextMode);
-                    const nextEffort = collaborationModes.find(
-                      (candidate) => candidate.mode === nextMode,
-                    )?.settings?.reasoning_effort;
-                    if (typeof nextEffort === 'string') setEffort(nextEffort);
-                  }}
+              {nonPlanCollaborationModes.length > 1 ? (
+                <label>
+                  <span>Mode</span>
+                  <select
+                    value={collaborationMode === 'plan'
+                      ? previousNonPlanModeRef.current
+                      : collaborationMode}
+                    onChange={(event) => selectCollaborationMode(event.target.value)}
+                  >
+                    {nonPlanCollaborationModes.map((option) => (
+                      <option value={option.mode} key={option.mode}>{option.mode}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : !planCollaborationMode && collaborationModes.length === 1 ? (
+                <button
+                  type="button"
+                  className="codex-app-mode-button active"
+                  onClick={() => selectCollaborationMode(collaborationModes[0]?.mode || 'default')}
+                  disabled={busy || runtime?.status !== 'ready'}
+                  title="Activate collaboration mode"
                 >
-                  {collaborationModes.map((option) => (
-                    <option value={option.mode} key={option.mode}>{option.mode}</option>
-                  ))}
-                </select>
-              </label>
-              {goalMode ? <span className="codex-app-goal-hint">Goal mode enabled for the next prompt</span> : null}
-              {reviewMode ? (
-                <span className="codex-app-goal-hint">Review runs inline on this task</span>
+                  ◉ Mode · {collaborationModes[0]?.mode || 'default'}
+                </button>
               ) : null}
+              {goalMode ? <span className="codex-app-goal-hint">Goal mode enabled for the next prompt</span> : null}
             </div>
+            {goalMode ? (
+              <details className="codex-app-goal-safety">
+                <summary>Goal safety</summary>
+                <fieldset className="codex-app-goal-setup">
+                  <legend className="sr-only">Goal safety controls</legend>
+                  <label>
+                    <span>Token budget</span>
+                    <input
+                      type="number" min={1_000} step={1_000} value={goalPolicy.tokenBudget}
+                      onChange={(event) => setGoalPolicy((current) => normalizeManagedGoalPolicy({
+                        ...current, tokenBudget: Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                  <label>
+                    <span>Max minutes</span>
+                    <input
+                      type="number" min={1} value={goalPolicy.maxMinutes}
+                      onChange={(event) => setGoalPolicy((current) => normalizeManagedGoalPolicy({
+                        ...current, maxMinutes: Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                  <label>
+                    <span>Max turns</span>
+                    <input
+                      type="number" min={1} value={goalPolicy.maxTurns}
+                      onChange={(event) => setGoalPolicy((current) => normalizeManagedGoalPolicy({
+                        ...current, maxTurns: Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                  <label>
+                    <span>No progress turns</span>
+                    <input
+                      type="number" min={1} value={goalPolicy.noProgressLimit}
+                      onChange={(event) => setGoalPolicy((current) => normalizeManagedGoalPolicy({
+                        ...current, noProgressLimit: Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                  <label className="wide">
+                    <span>Done when</span>
+                    <textarea
+                      rows={2} value={goalPolicy.successCriteria}
+                      placeholder="Tests, measurements, or artifacts that prove completion"
+                      onChange={(event) => setGoalPolicy((current) => ({
+                        ...current, successCriteria: event.target.value,
+                      }))}
+                    />
+                  </label>
+                  <label className="wide">
+                    <span>Constraints / do not change</span>
+                    <textarea
+                      rows={2} value={goalPolicy.constraints}
+                      onChange={(event) => setGoalPolicy((current) => ({
+                        ...current, constraints: event.target.value,
+                      }))}
+                    />
+                  </label>
+                  <label className="wide">
+                    <span>Additional stop conditions</span>
+                    <textarea
+                      rows={2} value={goalPolicy.stopConditions}
+                      onChange={(event) => setGoalPolicy((current) => ({
+                        ...current, stopConditions: event.target.value,
+                      }))}
+                    />
+                  </label>
+                  <small className="wide">
+                    If progress stalls, CozyPad pauses the Goal and asks Codex for the reason, evidence, and a concrete next action while tokens remain.
+                  </small>
+                </fieldset>
+              </details>
+            ) : null}
           </form>
         </main>
 
@@ -1048,6 +1853,8 @@ export function CodexAppServerPanel({
             <dd>Codex app-server</dd>
             <dt>Mode</dt>
             <dd>remote SSH server</dd>
+            <dt>Review</dt>
+            <dd>{reviewPermissionLabel(reviewPermissionMode)}</dd>
             <dt>Server</dt>
             <dd>{legacyServer?.name || selectedProfile?.name || 'Not selected'}</dd>
             <dt>Target</dt>
@@ -1074,7 +1881,7 @@ export function CodexAppServerPanel({
               <button
                 type="button"
                 className="legacy-codex-cwd-open"
-                disabled={!serverId || !cwd.trim()}
+                disabled={!connected || !serverId || !cwd.trim()}
                 onClick={() => {
                   if (serverId && cwd.trim()) onOpenFilesPath?.({ serverId, path: cwd.trim() });
                 }}
@@ -1083,8 +1890,106 @@ export function CodexAppServerPanel({
               </button>
             </dd>
             <dt>Status</dt>
-            <dd><span className={`chip chip-${runtime?.status === 'ready' ? 'ready' : 'disconnected'}`}>{runtime?.status || 'connecting'}</span></dd>
+            <dd><span className={`chip chip-${runtime?.status === 'ready' ? 'ready' : 'disconnected'}`}>{runtimeStatusLabel}</span></dd>
           </dl>
+          {instructionRules.length ? (
+            <section className="codex-app-instruction-rules" aria-label="Personalized rules">
+              <h3>Personalized rules</h3>
+              {instructionRules.map((rule) => (
+                <details key={rule.path}>
+                  <summary title={rule.path}>
+                    {rule.path.split(/[\\/]/).pop() || rule.path}
+                  </summary>
+                  <pre>{rule.content}</pre>
+                </details>
+              ))}
+            </section>
+          ) : null}
+          <details className="codex-app-skill-manager">
+            <summary>
+              <span>Skills</span>
+              <small>{skillsLoading ? 'Loading…' : `${skills.length} available`}</small>
+            </summary>
+            <div className="codex-app-skill-tools">
+              <input
+                type="search"
+                value={skillQuery}
+                onChange={(event) => setSkillQuery(event.target.value)}
+                placeholder="Search Skills"
+                aria-label="Search Skills"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const client = clientRef.current;
+                  if (client) void refreshSkills(client, true);
+                }}
+                disabled={skillsLoading || runtime?.status !== 'ready'}
+              >
+                Refresh
+              </button>
+            </div>
+            {selectedSkill ? (
+              <div className="codex-app-skill-selected" role="status">
+                <span><b>${selectedSkill.name}</b> applies to the next prompt.</span>
+                <button type="button" onClick={() => setSelectedSkill(null)}>Clear</button>
+              </div>
+            ) : null}
+            {skillError ? <p className="codex-app-skill-error" role="alert">{skillError}</p> : null}
+            <div className="codex-app-skill-list">
+              {visibleSkills.map((skill) => {
+                const active = Boolean(
+                  selectedSkill && (
+                    (skill.path && selectedSkill.path === skill.path) ||
+                    (!skill.path && selectedSkill.name === skill.name)
+                  ),
+                );
+                return (
+                  <article
+                    className={active ? 'active' : ''}
+                    key={`${skill.cwd}:${skill.path || skill.name}`}
+                    title={skill.path || skill.description}
+                  >
+                    <button
+                      type="button"
+                      className="codex-app-skill-use"
+                      aria-pressed={active}
+                      disabled={!skill.enabled}
+                      onClick={() => selectSkill(skill)}
+                    >
+                      <span>
+                        <strong>{skill.displayName}</strong>
+                        <small>${skill.name}</small>
+                      </span>
+                      <p>{skill.shortDescription || skill.description || 'No description provided.'}</p>
+                      <span className="codex-app-skill-meta">
+                        <em>{skill.enabled ? 'Enabled' : 'Disabled'}</em>
+                        {skill.dependencies.length ? (
+                          <small>{skill.dependencies.length} dependencies</small>
+                        ) : null}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="codex-app-skill-file"
+                      disabled={!connected || !serverId || !skill.path || !onOpenFilesPath}
+                      title={skill.path ? `Open ${skill.path} in File` : 'SKILL.md path unavailable'}
+                      onClick={() => {
+                        if (serverId && skill.path) {
+                          onOpenFilesPath?.({ serverId, path: skill.path });
+                        }
+                      }}
+                    >
+                      File
+                    </button>
+                  </article>
+                );
+              })}
+              {!skillsLoading && !visibleSkills.length ? (
+                <p className="hint">No Skills match this cwd and search.</p>
+              ) : null}
+            </div>
+          </details>
           <h3>Runtime</h3>
           <p className="hint">{model || 'default'} · effort {effort || 'auto'} · {collaborationMode}</p>
           <h3>Workflow</h3>
@@ -1095,13 +2000,50 @@ export function CodexAppServerPanel({
               <dl className="codex-app-goal-status">
                 <dt>Status</dt><dd>{goal.status}</dd>
                 <dt>Objective</dt><dd>{goal.objective}</dd>
-                <dt>Usage</dt><dd>{Number(goal.tokensUsed || 0).toLocaleString()} tokens · {Number(goal.timeUsedSeconds || 0)}s</dd>
+                <dt>Usage</dt><dd>{Number(goal.tokensUsed || 0).toLocaleString()} / {Number(goal.tokenBudget || 0).toLocaleString()} tokens · {Number(goal.timeUsedSeconds || 0)}s</dd>
+                {goalRuntime ? (
+                  <>
+                    <dt>Turns</dt><dd>{goalRuntime.turnsCompleted} / {goalPolicy.maxTurns}</dd>
+                    <dt>No progress</dt><dd>{goalRuntime.noProgressTurns} / {goalPolicy.noProgressLimit}</dd>
+                  </>
+                ) : null}
               </dl>
             ) : <p className="hint">No active goal on this thread.</p>}
+            {goalRuntime?.stopReason ? (
+              <div className="codex-app-goal-stop-reason" role="status">
+                <strong>Paused by safety control</strong>
+                <p>{goalRuntime.stopReason}</p>
+                <p><b>Next:</b> {goalRuntime.nextStep}</p>
+              </div>
+            ) : null}
+            {goal && contextBudget && contextBudget.remainingPercent <= 30 ? (
+              <div className="codex-app-goal-context-warning" role="status">
+                Context remaining: {contextBudget.remainingPercent}%.
+                {contextBudget.remainingPercent <= 15
+                  ? ' CozyPad will pause and recommend a fresh task.'
+                  : ' A checkpoint will be prepared before the context becomes fragile.'}
+              </div>
+            ) : null}
+            {goalRuntime?.checkpoint ? (
+              <details className="codex-app-goal-checkpoint">
+                <summary>Latest checkpoint</summary>
+                <pre>{goalRuntime.checkpoint}</pre>
+              </details>
+            ) : null}
             <div className="codex-app-goal-actions">
               <button type="button" onClick={() => void refreshGoal(clientRef.current!, selectedThreadId)} disabled={!selectedThreadId || runtime?.status !== 'ready'}>Refresh</button>
-              <button type="button" onClick={() => void updateGoalStatus('paused')} disabled={!goal || goal.status !== 'active'}>Pause</button>
+              <button type="button" onClick={() => void updateGoalStatus('paused')} disabled={!goal || goal.status !== 'active'}>Pause after turn</button>
+              <button type="button" className="danger" onClick={() => void stopGoalNow()} disabled={!goal || goal.status !== 'active'}>Stop now</button>
               <button type="button" onClick={() => void updateGoalStatus('active')} disabled={!goal || goal.status !== 'paused'}>Resume</button>
+              <button
+                type="button"
+                onClick={() => startNewTaskFromText([
+                  'Continue this work in a fresh task using the checkpoint below.',
+                  goalRuntime?.checkpoint || goal?.objective || '',
+                  goalRuntime?.stopReason ? `Previous stop reason: ${goalRuntime.stopReason}` : '',
+                ].filter(Boolean).join('\n\n'))}
+                disabled={!goalRuntime?.checkpoint}
+              >Fresh task</button>
               <button type="button" className="danger" onClick={() => void clearGoal()} disabled={!goal}>Clear</button>
             </div>
           </section>
