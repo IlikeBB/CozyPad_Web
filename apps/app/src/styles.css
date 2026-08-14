@@ -2514,6 +2514,48 @@ button.danger:hover {
   text-overflow: ellipsis;
 }
 
+.codex-app-usage {
+  display: grid;
+  gap: 8px;
+}
+
+.codex-app-usage-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.codex-app-usage-total strong {
+  color: var(--accent);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-app-usage-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 9px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.codex-app-usage-details dt {
+  color: var(--text-faint);
+}
+
+.codex-app-usage-details dd {
+  margin: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 760px) {
   .codex-app-head {
     align-items: flex-start;

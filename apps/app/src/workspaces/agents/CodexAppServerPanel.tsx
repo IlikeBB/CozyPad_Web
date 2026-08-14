@@ -18,11 +18,13 @@ import {
 } from './codexAppServerClient';
 import {
   EMPTY_CODEX_STRUCTURED_STATE,
+  codexTokenUsageFrom,
   reduceCodexRuntimeEvent,
   structuredStateFromThread,
   type CodexStructuredState,
   type CodexThreadItem,
   type CodexThreadSummary,
+  type CodexTokenUsage,
 } from './codexAppServerState';
 
 type ThreadListResponse = { data?: CodexThreadSummary[] };
@@ -48,6 +50,7 @@ type ThreadGoalResponse = { goal?: ThreadGoal | null };
 
 const CODEX_MODEL_STORAGE_KEY = 'cozypad3.remoteCodex.model.v1';
 const CODEX_EFFORT_STORAGE_KEY = 'cozypad3.remoteCodex.reasoningEffort.v1';
+const CODEX_TOKEN_USAGE_STORAGE_PREFIX = 'cozypad3.remoteCodex.tokenUsage.v1';
 const CODEX_MODEL_FALLBACKS = [
   'gpt-5.6-sol',
   'gpt-5.6-terra',
@@ -59,6 +62,36 @@ const CODEX_MODEL_FALLBACKS = [
   'gpt-5.3-codex-spark',
 ];
 const CODEX_EFFORT_OPTIONS = ['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+function formatTokenCount(value: number): string {
+  return Math.max(0, value).toLocaleString();
+}
+
+function tokenUsageStorageKey(serverId: string, threadId: string): string {
+  return `${CODEX_TOKEN_USAGE_STORAGE_PREFIX}:${serverId}:${threadId}`;
+}
+
+function readTokenUsage(serverId: string, threadId: string): CodexTokenUsage | null {
+  if (!serverId || !threadId) return null;
+  try {
+    const value = window.localStorage.getItem(tokenUsageStorageKey(serverId, threadId));
+    return value ? codexTokenUsageFrom(JSON.parse(value)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberTokenUsage(
+  serverId: string,
+  threadId: string,
+  tokenUsage: CodexTokenUsage,
+): void {
+  if (!serverId || !threadId) return;
+  window.localStorage.setItem(
+    tokenUsageStorageKey(serverId, threadId),
+    JSON.stringify(tokenUsage),
+  );
+}
 
 function isMissingRolloutError(error: unknown): boolean {
   return /no rollout found for thread id/i.test(
@@ -454,7 +487,7 @@ export function CodexAppServerPanel({
       const response = await client.call<ThreadResponse>('thread/resume', { threadId: thread.id });
       const resumed = response.thread || thread;
       setSelectedThreadId(resumed.id);
-      setView(structuredStateFromThread(resumed));
+      setView(structuredStateFromThread(resumed, readTokenUsage(serverId, resumed.id)));
       await refreshGoal(client, resumed.id).catch(() => setGoal(null));
     } catch (nextError) {
       if (isMissingRolloutError(nextError)) {
@@ -485,7 +518,10 @@ export function CodexAppServerPanel({
               .call<ThreadResponse>('thread/resume', { threadId })
               .then((response) => {
                 if (response.thread) {
-                  setView(structuredStateFromThread(response.thread));
+                  setView(structuredStateFromThread(
+                    response.thread,
+                    readTokenUsage(serverId, response.thread.id),
+                  ));
                   void refreshGoal(client, response.thread.id).catch(() => undefined);
                 }
               })
@@ -495,7 +531,17 @@ export function CodexAppServerPanel({
           }
         }
       } else if (message.type === 'event') {
-        setView((current) => reduceCodexRuntimeEvent(current, message.event));
+        setView((current) => {
+          const next = reduceCodexRuntimeEvent(current, message.event);
+          if (next.tokenUsage && next.tokenUsage !== current.tokenUsage) {
+            rememberTokenUsage(
+              serverId,
+              next.threadId || message.event.threadId || '',
+              next.tokenUsage,
+            );
+          }
+          return next;
+        });
         if (message.event.method === 'turn/completed') {
           setBusy(false);
           void refreshThreads(client).catch(() => undefined);
@@ -935,7 +981,35 @@ export function CodexAppServerPanel({
           </section>
           <p className="hint">Model, effort, and cwd apply when the next thread starts.</p>
           <h3>Usage</h3>
-          <p className="hint">Threads and structured output remain on the selected remote server.</p>
+          {view.tokenUsage ? (
+            <section className="codex-app-usage" aria-label="Codex token usage">
+              <div className="codex-app-usage-total">
+                <span>Total tokens</span>
+                <strong>{formatTokenCount(view.tokenUsage.total.totalTokens)}</strong>
+              </div>
+              <dl className="codex-app-usage-details">
+                <dt>Input</dt>
+                <dd>{formatTokenCount(view.tokenUsage.total.inputTokens)}</dd>
+                <dt>Cached input</dt>
+                <dd>{formatTokenCount(view.tokenUsage.total.cachedInputTokens)}</dd>
+                <dt>Output</dt>
+                <dd>{formatTokenCount(view.tokenUsage.total.outputTokens)}</dd>
+                <dt>Reasoning</dt>
+                <dd>{formatTokenCount(view.tokenUsage.total.reasoningOutputTokens)}</dd>
+                <dt>Last turn</dt>
+                <dd>{formatTokenCount(view.tokenUsage.last.totalTokens)}</dd>
+                {view.tokenUsage.modelContextWindow ? (
+                  <>
+                    <dt>Context window</dt>
+                    <dd>{formatTokenCount(view.tokenUsage.modelContextWindow)}</dd>
+                  </>
+                ) : null}
+              </dl>
+              <p className="hint">Live totals reported by the selected Codex thread.</p>
+            </section>
+          ) : (
+            <p className="hint">Token usage appears after this thread runs its next turn.</p>
+          )}
         </aside>
       </div>
     </section>

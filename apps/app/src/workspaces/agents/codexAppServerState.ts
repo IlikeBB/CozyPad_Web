@@ -30,11 +30,26 @@ export type CodexThreadItem = {
   [key: string]: unknown;
 };
 
+export type CodexTokenUsageBreakdown = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+};
+
+export type CodexTokenUsage = {
+  total: CodexTokenUsageBreakdown;
+  last: CodexTokenUsageBreakdown;
+  modelContextWindow: number | null;
+};
+
 export type CodexStructuredState = {
   threadId: string;
   turnId: string;
   turnStatus: string;
   items: CodexThreadItem[];
+  tokenUsage: CodexTokenUsage | null;
   error: string;
 };
 
@@ -43,11 +58,43 @@ export const EMPTY_CODEX_STRUCTURED_STATE: CodexStructuredState = {
   turnId: '',
   turnStatus: 'idle',
   items: [],
+  tokenUsage: null,
   error: '',
 };
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function tokenCount(value: unknown): number {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : 0;
+}
+
+function tokenBreakdown(value: unknown): CodexTokenUsageBreakdown {
+  const usage = record(value);
+  return {
+    inputTokens: tokenCount(usage.inputTokens ?? usage.input_tokens),
+    cachedInputTokens: tokenCount(usage.cachedInputTokens ?? usage.cached_input_tokens),
+    outputTokens: tokenCount(usage.outputTokens ?? usage.output_tokens),
+    reasoningOutputTokens: tokenCount(
+      usage.reasoningOutputTokens ?? usage.reasoning_output_tokens,
+    ),
+    totalTokens: tokenCount(usage.totalTokens ?? usage.total_tokens),
+  };
+}
+
+export function codexTokenUsageFrom(value: unknown): CodexTokenUsage | null {
+  const usage = record(value);
+  if (!Object.keys(usage).length) return null;
+  const contextWindowValue = usage.modelContextWindow ?? usage.model_context_window;
+  const contextWindow = Number(contextWindowValue);
+  return {
+    total: tokenBreakdown(usage.total),
+    last: tokenBreakdown(usage.last),
+    modelContextWindow:
+      Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+  };
 }
 
 function itemFrom(value: unknown): CodexThreadItem | null {
@@ -84,7 +131,10 @@ function settleInProgressItems(items: CodexThreadItem[], turnStatus: string): Co
   );
 }
 
-export function structuredStateFromThread(thread: CodexThreadSummary): CodexStructuredState {
+export function structuredStateFromThread(
+  thread: CodexThreadSummary,
+  tokenUsage: CodexTokenUsage | null = null,
+): CodexStructuredState {
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   const lastTurn = turns[turns.length - 1];
   return {
@@ -92,6 +142,7 @@ export function structuredStateFromThread(thread: CodexThreadSummary): CodexStru
     turnId: lastTurn?.id || '',
     turnStatus: lastTurn?.status || 'idle',
     items: turns.flatMap((turn) => (Array.isArray(turn.items) ? turn.items : [])),
+    tokenUsage,
     error: '',
   };
 }
@@ -126,6 +177,10 @@ export function reduceCodexRuntimeEvent(
       turnStatus,
       items: settleInProgressItems(state.items, turnStatus),
     };
+  }
+  if (event.method === 'thread/tokenUsage/updated') {
+    const tokenUsage = codexTokenUsageFrom(params.tokenUsage ?? params.token_usage);
+    return tokenUsage ? { ...state, tokenUsage } : state;
   }
   if (event.method === 'item/started' || event.method === 'item/completed') {
     const item = itemFrom(params.item);

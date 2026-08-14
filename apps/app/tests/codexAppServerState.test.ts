@@ -76,4 +76,47 @@ describe('reduceCodexRuntimeEvent', () => {
     expect(interrupted.turnStatus).toBe('interrupted');
     expect(interrupted.items[0]).toMatchObject({ id: 'cmd-1', status: 'interrupted' });
   });
+
+  it('records app-server token usage updates for the selected thread', () => {
+    const state = reduceCodexRuntimeEvent(
+      { ...EMPTY_CODEX_STRUCTURED_STATE, threadId: 'thread-1' },
+      event('thread/tokenUsage/updated', {
+        tokenUsage: {
+          total: {
+            inputTokens: 12_000,
+            cachedInputTokens: 8_000,
+            outputTokens: 2_000,
+            reasoningOutputTokens: 500,
+            totalTokens: 14_000,
+          },
+          last: {
+            inputTokens: 2_500,
+            cachedInputTokens: 2_000,
+            outputTokens: 600,
+            reasoningOutputTokens: 200,
+            totalTokens: 3_100,
+          },
+          modelContextWindow: 200_000,
+        },
+      }),
+    );
+
+    expect(state.tokenUsage).toEqual({
+      total: {
+        inputTokens: 12_000,
+        cachedInputTokens: 8_000,
+        outputTokens: 2_000,
+        reasoningOutputTokens: 500,
+        totalTokens: 14_000,
+      },
+      last: {
+        inputTokens: 2_500,
+        cachedInputTokens: 2_000,
+        outputTokens: 600,
+        reasoningOutputTokens: 200,
+        totalTokens: 3_100,
+      },
+      modelContextWindow: 200_000,
+    });
+  });
 });
