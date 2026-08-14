@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { ConnectionProfile } from '@cozypad/contracts';
+import {
+  createMarkdownComponents,
+  linkifyRemotePathLines,
+} from '../../components/markdownComponents';
 import type { LegacySshServer } from './legacySshApi';
 import {
   readCodexCwd,
@@ -130,14 +134,28 @@ function readableItemText(item: CodexThreadItem): string {
   return String(item.text || '');
 }
 
-function CodexItemCard({ item }: { item: CodexThreadItem }) {
+function CodexItemCard({
+  item,
+  serverId,
+  onOpenFilesPath,
+}: {
+  item: CodexThreadItem;
+  serverId: string;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
+}) {
   const text = item.type === 'userMessage' ? itemTextContent(item) : readableItemText(item);
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(onOpenFilesPath, { serverId }),
+    [onOpenFilesPath, serverId],
+  );
   if (item.type === 'agentMessage' || item.type === 'userMessage') {
     return (
       <article className={`codex-app-item codex-app-item-${item.type}`}>
         <header>{itemTitle(item)}</header>
         <div className="legacy-codex-markdown">
-          <ReactMarkdown>{text || '…'}</ReactMarkdown>
+          <ReactMarkdown components={markdownComponents}>
+            {linkifyRemotePathLines(text || '…', serverId)}
+          </ReactMarkdown>
         </div>
       </article>
     );
@@ -741,7 +759,14 @@ export function CodexAppServerPanel({
                 element.scrollHeight - element.scrollTop - element.clientHeight < 160;
             }}
           >
-            {view.items.map((item) => <CodexItemCard key={item.id} item={item} />)}
+            {view.items.map((item) => (
+              <CodexItemCard
+                key={item.id}
+                item={item}
+                serverId={serverId}
+                onOpenFilesPath={onOpenFilesPath}
+              />
+            ))}
             {!view.items.length ? (
               <div className="codex-app-empty">Start a structured Codex thread on this server.</div>
             ) : null}

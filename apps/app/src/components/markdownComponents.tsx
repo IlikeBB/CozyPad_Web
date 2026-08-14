@@ -483,34 +483,28 @@ function createCodeComponent(serverId = '', onOpenFilesPath?: OpenFilePathHandle
   return Code;
 }
 
-function createAnchorComponent(onOpenFilesPath?: OpenFilePathHandler) {
+function createAnchorComponent(serverId = '', onOpenFilesPath?: OpenFilePathHandler) {
   function Anchor(props: ComponentProps<'a'>) {
   const { href = '', onClick, children, ...rest } = props;
+  const target = fileTargetFromHref(href) || (
+    serverId.trim() && isRemotePathLike(href)
+      ? { serverId: serverId.trim(), path: href.trim() }
+      : null
+  );
   const handleClick: ComponentProps<'a'>['onClick'] = (event) => {
-    if (href.startsWith(FILE_PATH_LINK_PREFIX)) {
+    if (target) {
       event.preventDefault();
       event.stopPropagation();
-      try {
-        const query = href.includes('?') ? href.slice(href.indexOf('?') + 1) : '';
-        const params = new URLSearchParams(query);
-        const target = {
-          serverId: params.get('serverId') || '',
-          path: params.get('path') || '',
-        };
-        if (onOpenFilesPath) {
-          onOpenFilesPath(target);
-        } else {
-          dispatchOpenFilePath(target.serverId, target.path);
-        }
-      } catch {
-        // Ignore malformed internal links; they should never leave the page.
+      if (onOpenFilesPath) {
+        onOpenFilesPath(target);
+      } else {
+        dispatchOpenFilePath(target.serverId, target.path);
       }
       return;
     }
     onClick?.(event);
   };
 
-  const target = fileTargetFromHref(href);
   if (target) {
     return (
       <a
@@ -577,7 +571,7 @@ export function createMarkdownComponents(
   options: { serverId?: string } = {},
 ): Components {
   return {
-    a: createAnchorComponent(onOpenFilesPath),
+    a: createAnchorComponent(options.serverId || '', onOpenFilesPath),
     code: createCodeComponent(options.serverId || '', onOpenFilesPath),
     img: createImageComponent(options.serverId || '', onOpenFilesPath),
   };
