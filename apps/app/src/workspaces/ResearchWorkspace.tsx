@@ -38,8 +38,11 @@ const INACCESSIBLE_BAILIAN_MODELS = new Set(['deepseek-v4-pro', 'deepseek-v4-pro
 const RESEARCH_MD_ANALYSIS_TIMEOUT_MS = 6 * 60 * 1000;
 const RESEARCH_AGENT_DRAW_TIMEOUT_MS = 4 * 60 * 1000;
 
+type ResearchVariant = 'standard' | 'proBeta';
+
 interface ResearchWorkspaceProps {
   connected?: boolean;
+  variant?: ResearchVariant;
 }
 
 type PipelineNodeKind = 'source' | 'operation' | 'model' | 'command' | 'output' | 'application';
@@ -206,6 +209,10 @@ type GraphPoint = {
   x: number;
   y: number;
 };
+
+function scopedResearchStorageKey(baseKey: string, variant: ResearchVariant): string {
+  return variant === 'standard' ? baseKey : `${baseKey}.${variant}`;
+}
 
 type CodexDiagramDraft = {
   nodes: PipelineNode[];
@@ -534,6 +541,162 @@ const DEFAULT_PIPELINE_EDGES: PipelineEdge[] = [
   { id: 'evaluate-metrics', from: 'evaluate', to: 'metrics' },
 ];
 
+function proBetaConsensusPrompt(nodeId: string): string {
+  const sharedRules = [
+    '所有輸出都必須使用繁體中文，並以可追蹤、可重現、可驗收為核心。',
+    '不得直接開始訓練；必須先確認資料、模型、評估、環境、風險與使用者授權。',
+    '若任一關鍵資訊缺失，請標記為 blocker，並提出最小可行補齊方式。',
+  ];
+  const prompts: Record<string, string> = {
+    'abc-goal': [
+      '請把使用者的自然語言訓練需求轉成研究目標與任務邊界。',
+      '必須列出任務類型、輸入模態、輸出目標、資料來源、模型來源、可接受成果與不可接受風險。',
+      '若是多輸入或多輸出任務，請明確描述每個輸入與輸出的對應關係。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-plan': [
+      '請提出可執行的訓練流程草案，從資料檢查、前處理、模型設定、訓練、評估到產物保存逐步規劃。',
+      '每一步都必須包含輸入、輸出、驗收標準、可能失敗原因與必要 log / metric / artifact。',
+      '流程必須支援單模態、多模態、單輸出與多輸出，不可把所有任務硬套成同一種模型。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-critic': [
+      '你是反駁者。請專門找出此訓練流程的漏洞、資料洩漏、不可重現設定、過度樂觀評估與資源風險。',
+      '請檢查 split policy、label consistency、baseline、seed、GPU/conda 環境、checkpoint 與 early stopping 是否足夠嚴謹。',
+      '你的輸出必須包含「不能開始訓練的理由」與「解除 blocker 的必要條件」。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-advocate': [
+      '你是支持者。請說明此訓練流程為何值得執行，並提出能提升成功率的具體做法。',
+      '請補強 baseline、ablation、metric、資料品質檢查、訓練穩定性、結果保存與論文式報告架構。',
+      '你的支持必須建立在可驗證證據上，不可只給鼓勵或泛用建議。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-planner': [
+      '你是整合建議者。請整合反駁者與支持者的意見，整理成最小可執行訓練計畫。',
+      '請明確列出必做檢查、可延後項目、必須先問使用者的問題，以及 Start Training 前的允許條件。',
+      '輸出需能直接被 MD.md 彙整成訓練排程 prompt。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-consensus': [
+      '你是共識閘門。只有當 A 反駁者、B 支持者、C 整合建議者都達成最低共識時，才允許進入 Start Training。',
+      '最低共識條件：資料路徑與 split 明確、模型或權重來源明確、conda/GPU/環境可檢查、指標與產物明確、失敗回復策略明確、使用者已授權。',
+      '若共識不足，請輸出 blocked 並列出缺失；若共識足夠，請輸出 approved 並列出訓練前最後檢查清單。',
+      ...sharedRules,
+    ].join('\n'),
+    'abc-training': [
+      '請依照共識閘門核准後的 MD.md 內容啟動訓練。',
+      '訓練必須在遠端 server 上執行，使用 screen/tmux 或等效背景工作保存 log，並回報 PID/session、輸出目錄、metric、checkpoint 與錯誤原因。',
+      '訓練結束或失敗時，必須整理可驗證的結果與下一步建議。',
+      ...sharedRules,
+    ].join('\n'),
+  };
+  return prompts[nodeId] || sharedRules.join('\n');
+}
+
+function withProBetaConsensusPrompt(node: PipelineNode): PipelineNode {
+  return withNodeStorageDefaults({
+    ...node,
+    agentPrompt: proBetaConsensusPrompt(node.id),
+  });
+}
+
+function createProBetaConsensusFlowchart(): ResearchFlowchart {
+  const rawNodes: PipelineNode[] = [
+    {
+      id: 'abc-goal',
+      kind: 'source',
+      title: '研究需求輸入',
+      subtitle: '任務、資料、模型與輸出目標',
+      role: 'input',
+      x: 10,
+      y: 44,
+    },
+    {
+      id: 'abc-plan',
+      kind: 'operation',
+      title: '流程草案',
+      subtitle: '可執行訓練流程',
+      role: 'control',
+      x: 25,
+      y: 44,
+    },
+    {
+      id: 'abc-critic',
+      kind: 'operation',
+      title: 'A 反駁者',
+      subtitle: '找出 blocker 與風險',
+      role: 'factor',
+      x: 44,
+      y: 22,
+    },
+    {
+      id: 'abc-advocate',
+      kind: 'operation',
+      title: 'B 支持者',
+      subtitle: '補強成功條件',
+      role: 'factor',
+      x: 44,
+      y: 44,
+    },
+    {
+      id: 'abc-planner',
+      kind: 'operation',
+      title: 'C 建議者',
+      subtitle: '整合成執行計畫',
+      role: 'factor',
+      x: 44,
+      y: 66,
+    },
+    {
+      id: 'abc-consensus',
+      kind: 'operation',
+      title: '共識閘門',
+      subtitle: 'ABC 一致後才核准',
+      role: 'control',
+      x: 65,
+      y: 44,
+    },
+    {
+      id: 'abc-training',
+      kind: 'command',
+      title: 'Start Training',
+      subtitle: '遠端訓練與監控',
+      role: 'runner',
+      x: 84,
+      y: 44,
+    },
+  ];
+  const nodes = rawNodes.map(withProBetaConsensusPrompt);
+  const edges: PipelineEdge[] = [
+    { id: edgeId('abc-goal', 'abc-plan'), from: 'abc-goal', to: 'abc-plan', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-plan', 'abc-critic'), from: 'abc-plan', to: 'abc-critic', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-plan', 'abc-advocate'), from: 'abc-plan', to: 'abc-advocate', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-plan', 'abc-planner'), from: 'abc-plan', to: 'abc-planner', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-critic', 'abc-consensus'), from: 'abc-critic', to: 'abc-consensus', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-advocate', 'abc-consensus'), from: 'abc-advocate', to: 'abc-consensus', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-planner', 'abc-consensus'), from: 'abc-planner', to: 'abc-consensus', fromSide: 'right', toSide: 'left' },
+    { id: edgeId('abc-consensus', 'abc-training'), from: 'abc-consensus', to: 'abc-training', fromSide: 'right', toSide: 'left' },
+  ];
+  return {
+    id: createResearchFlowchartId(),
+    title: 'ABC Consensus Gate',
+    nodes,
+    edges,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function applyProBetaConsensusPrompts(flowchart: ResearchFlowchart): ResearchFlowchart {
+  if (!flowchart.nodes.some((node) => node.id.startsWith('abc-'))) return flowchart;
+  return {
+    ...flowchart,
+    nodes: flowchart.nodes.map((node) =>
+      node.id.startsWith('abc-') ? withProBetaConsensusPrompt(node) : node,
+    ),
+  };
+}
+
 const NODE_MIN_X = 8;
 const NODE_MAX_X = 92;
 const NODE_MIN_Y = 8;
@@ -549,6 +712,36 @@ function nodeById(nodes: PipelineNode[], id: string): PipelineNode | undefined {
 
 function edgeId(from: string, to: string, fromSide: PipelinePortSide = 'right', toSide: PipelinePortSide = 'left'): string {
   return `${from}-${fromSide}-${to}-${toSide}`;
+}
+
+function portDirection(side: PipelinePortSide): GraphPoint {
+  if (side === 'top') return { x: 0, y: -1 };
+  if (side === 'right') return { x: 1, y: 0 };
+  if (side === 'bottom') return { x: 0, y: 1 };
+  return { x: -1, y: 0 };
+}
+
+function researchEdgePath(
+  start: GraphPoint,
+  end: GraphPoint,
+  fromSide: PipelinePortSide,
+  toSide: PipelinePortSide,
+): string {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const curve = clamp(distance * 0.42, 54, 180);
+  const fromDirection = portDirection(fromSide);
+  const toDirection = portDirection(toSide);
+  const c1 = {
+    x: start.x + fromDirection.x * curve,
+    y: start.y + fromDirection.y * curve,
+  };
+  const c2 = {
+    x: end.x + toDirection.x * curve,
+    y: end.y + toDirection.y * curve,
+  };
+  return `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
 }
 
 function isPipelineNodeKind(value: unknown): value is PipelineNodeKind {
@@ -975,9 +1168,9 @@ function isEditableKeyTarget(target: EventTarget | null): boolean {
   );
 }
 
-function readResearchMarkdown(): string {
+function readResearchMarkdown(variant: ResearchVariant = 'standard'): string {
   try {
-    return window.localStorage.getItem(RESEARCH_MARKDOWN_STORAGE_KEY) || '';
+    return window.localStorage.getItem(scopedResearchStorageKey(RESEARCH_MARKDOWN_STORAGE_KEY, variant)) || '';
   } catch {
     return '';
   }
@@ -995,10 +1188,15 @@ function normalizeFlowchartMarkdownEntry(value: unknown): FlowchartMarkdownEntry
   };
 }
 
-function readResearchMarkdownByFlowchart(activeFlowchartId: string): FlowchartMarkdownStore {
+function readResearchMarkdownByFlowchart(
+  activeFlowchartId: string,
+  variant: ResearchVariant = 'standard',
+): FlowchartMarkdownStore {
   const byFlowchart: FlowchartMarkdownStore = {};
   try {
-    const raw = window.localStorage.getItem(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
+    const raw = window.localStorage.getItem(
+      scopedResearchStorageKey(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY, variant),
+    );
     const parsed = raw ? JSON.parse(raw) : {};
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       for (const [flowchartId, value] of Object.entries(parsed)) {
@@ -1011,7 +1209,7 @@ function readResearchMarkdownByFlowchart(activeFlowchartId: string): FlowchartMa
   }
 
   if (activeFlowchartId && !byFlowchart[activeFlowchartId]) {
-    const legacyMarkdown = readResearchMarkdown();
+    const legacyMarkdown = readResearchMarkdown(variant);
     if (legacyMarkdown) {
       byFlowchart[activeFlowchartId] = {
         markdown: legacyMarkdown,
@@ -1525,6 +1723,7 @@ function buildAgentDiagramJsonPrompt(
   prompt: string,
   nodes: PipelineNode[],
   edges: PipelineEdge[],
+  variant: ResearchVariant = 'standard',
 ): string {
   return [
     'You are a JSON-only diagram generator for CozyPad.',
@@ -1539,6 +1738,14 @@ function buildAgentDiagramJsonPrompt(
     'Each edge must include from and to, referencing node ids.',
     'Use short lowercase ASCII node ids.',
     'Prefer a readable left-to-right workflow. Keep x/y between 8 and 92.',
+    ...(variant === 'proBeta'
+      ? [
+          'For Research Pro Beta, design a consensus-based research planning workflow.',
+          'Use the ABC triangle when appropriate: A critic/refuter, B advocate/supporter, C planner/advisor, then a consensus gate before Start Training.',
+          'The consensus gate must not connect to Start Training until data split, baseline, metrics, artifacts, environment, risks, and user approval are represented or explicitly deferred.',
+          'Support single-modal, multimodal, multi-input, and multi-output training plans. Do not force every task into a DeepFake-only or multimodal-only layout.',
+        ]
+      : []),
     'If the request is ambiguous, still return a reasonable diagram JSON object.',
     '',
     'Example response shape:',
@@ -2068,9 +2275,9 @@ async function runResearchCodexStreamPrompt(options: {
   });
 }
 
-function readPipelineNodes(): PipelineNode[] {
+function readPipelineNodes(variant: ResearchVariant = 'standard'): PipelineNode[] {
   try {
-    const raw = window.localStorage.getItem(PIPELINE_NODES_STORAGE_KEY);
+    const raw = window.localStorage.getItem(scopedResearchStorageKey(PIPELINE_NODES_STORAGE_KEY, variant));
     if (!raw) return PIPELINE_NODES;
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return PIPELINE_NODES;
@@ -2175,10 +2382,10 @@ function readPipelineNodes(): PipelineNode[] {
   }
 }
 
-function readPipelineEdges(nodes: PipelineNode[]): PipelineEdge[] {
+function readPipelineEdges(nodes: PipelineNode[], variant: ResearchVariant = 'standard'): PipelineEdge[] {
   const nodeIds = new Set(nodes.map((node) => node.id));
   try {
-    const raw = window.localStorage.getItem(PIPELINE_EDGES_STORAGE_KEY);
+    const raw = window.localStorage.getItem(scopedResearchStorageKey(PIPELINE_EDGES_STORAGE_KEY, variant));
     if (!raw) {
       return DEFAULT_PIPELINE_EDGES.filter(
         (edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to),
@@ -2305,13 +2512,16 @@ function normalizeStoredPipelineEdges(value: unknown, nodes: PipelineNode[]): Pi
     .filter((edge): edge is PipelineEdge => edge !== null);
 }
 
-function defaultResearchFlowchart(): ResearchFlowchart {
-  const nodes = readPipelineNodes();
+function defaultResearchFlowchart(variant: ResearchVariant = 'standard'): ResearchFlowchart {
+  if (variant === 'proBeta') {
+    return createProBetaConsensusFlowchart();
+  }
+  const nodes = readPipelineNodes(variant);
   return {
     id: createResearchFlowchartId(),
     title: 'Flowchart 1',
     nodes,
-    edges: readPipelineEdges(nodes),
+    edges: readPipelineEdges(nodes, variant),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -2321,10 +2531,10 @@ function sanitizeFlowchartTitle(value: unknown, fallback: string): string {
   return title || fallback;
 }
 
-function readResearchFlowchartLibrary(): ResearchFlowchartLibrary {
+function readResearchFlowchartLibrary(variant: ResearchVariant = 'standard'): ResearchFlowchartLibrary {
   let flowcharts: ResearchFlowchart[] = [];
   try {
-    const raw = window.localStorage.getItem(RESEARCH_FLOWCHARTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(scopedResearchStorageKey(RESEARCH_FLOWCHARTS_STORAGE_KEY, variant));
     const parsed = raw ? JSON.parse(raw) : [];
     if (Array.isArray(parsed)) {
       const used = new Set<string>();
@@ -2350,18 +2560,22 @@ function readResearchFlowchartLibrary(): ResearchFlowchartLibrary {
         })
         .filter((flowchart): flowchart is ResearchFlowchart => flowchart !== null)
         .slice(0, MAX_RESEARCH_FLOWCHARTS);
+      if (variant === 'proBeta') {
+        flowcharts = flowcharts.map(applyProBetaConsensusPrompts);
+      }
     }
   } catch {
     flowcharts = [];
   }
 
   if (flowcharts.length === 0) {
-    flowcharts = [defaultResearchFlowchart()];
+    flowcharts = [defaultResearchFlowchart(variant)];
   }
 
   let activeFlowchartId = '';
   try {
-    activeFlowchartId = window.localStorage.getItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY) || '';
+    activeFlowchartId =
+      window.localStorage.getItem(scopedResearchStorageKey(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY, variant)) || '';
   } catch {
     activeFlowchartId = '';
   }
@@ -2371,9 +2585,9 @@ function readResearchFlowchartLibrary(): ResearchFlowchartLibrary {
   return { flowcharts, activeFlowchartId };
 }
 
-export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps) {
+export function ResearchWorkspace({ connected = false, variant = 'standard' }: ResearchWorkspaceProps) {
   const [flowchartLibrary, setFlowchartLibrary] = useState<ResearchFlowchartLibrary>(() =>
-    readResearchFlowchartLibrary(),
+    readResearchFlowchartLibrary(variant),
   );
   const initialFlowchart =
     flowchartLibrary.flowcharts.find((flowchart) => flowchart.id === flowchartLibrary.activeFlowchartId) ||
@@ -2381,13 +2595,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   const initialFlowchartId = initialFlowchart?.id || '';
   const [nodes, setNodes] = useState<PipelineNode[]>(() => initialFlowchart?.nodes || []);
   const [markdownByFlowchart, setMarkdownByFlowchart] = useState<FlowchartMarkdownStore>(() =>
-    readResearchMarkdownByFlowchart(initialFlowchartId),
+    readResearchMarkdownByFlowchart(initialFlowchartId, variant),
   );
   const [remoteMarkdown, setRemoteMarkdown] = useState(() =>
-    markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).markdown,
+    markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId, variant), initialFlowchartId).markdown,
   );
   const [remoteMarkdownUserDraft, setRemoteMarkdownUserDraft] = useState(
-    () => markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId), initialFlowchartId).userDraft,
+    () => markdownEntryForFlowchart(readResearchMarkdownByFlowchart(initialFlowchartId, variant), initialFlowchartId).userDraft,
   );
   const [markdownAnalysis, setMarkdownAnalysis] = useState<MarkdownAnalysisState>({
     status: 'idle',
@@ -2447,10 +2661,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const serializedEdges = serializePipelineEdges(edges);
     try {
       window.localStorage.setItem(
-        PIPELINE_NODES_STORAGE_KEY,
+        scopedResearchStorageKey(PIPELINE_NODES_STORAGE_KEY, variant),
         JSON.stringify(serializedNodes),
       );
-      window.localStorage.setItem(PIPELINE_EDGES_STORAGE_KEY, JSON.stringify(serializedEdges));
+      window.localStorage.setItem(
+        scopedResearchStorageKey(PIPELINE_EDGES_STORAGE_KEY, variant),
+        JSON.stringify(serializedEdges),
+      );
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2472,10 +2689,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        RESEARCH_FLOWCHARTS_STORAGE_KEY,
+        scopedResearchStorageKey(RESEARCH_FLOWCHARTS_STORAGE_KEY, variant),
         JSON.stringify(flowchartLibrary.flowcharts.slice(0, MAX_RESEARCH_FLOWCHARTS)),
       );
-      window.localStorage.setItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY, flowchartLibrary.activeFlowchartId);
+      window.localStorage.setItem(
+        scopedResearchStorageKey(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY, variant),
+        flowchartLibrary.activeFlowchartId,
+      );
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2545,7 +2765,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       };
     });
     try {
-      window.localStorage.setItem(RESEARCH_MARKDOWN_STORAGE_KEY, remoteMarkdown);
+      window.localStorage.setItem(scopedResearchStorageKey(RESEARCH_MARKDOWN_STORAGE_KEY, variant), remoteMarkdown);
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2554,7 +2774,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
+        scopedResearchStorageKey(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY, variant),
         JSON.stringify(markdownByFlowchart),
       );
     } catch {
@@ -3214,7 +3434,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
         const server = await resolveAnalysisServer();
         const raw = await runResearchCodexStreamPrompt({
           serverId: server.id,
-          prompt: buildAgentDiagramJsonPrompt(prompt, nodes, edges),
+          prompt: buildAgentDiagramJsonPrompt(prompt, nodes, edges, variant),
           remotePath: server.defaultPath || '~',
           model: readResearchAgentModel('codex'),
           signal: abortController.signal,
@@ -3229,7 +3449,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       }
 
       const raw = await runSelectedTextAnalysisAgent(
-        buildAgentDiagramJsonPrompt(prompt, nodes, edges),
+        buildAgentDiagramJsonPrompt(prompt, nodes, edges, variant),
         abortController.signal,
         canParseDiagramDraft,
       );
@@ -3710,8 +3930,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                     const to = nodeById(nodes, edge.to);
                     if (!from || !to) return null;
                     const selected = selectedEdgeId === edge.id;
-                    const start = portPoint(from, edge.fromSide ?? autoPortSide(from, to, 'from'));
-                    const end = portPoint(to, edge.toSide ?? autoPortSide(from, to, 'to'));
+                    const fromSide = edge.fromSide ?? autoPortSide(from, to, 'from');
+                    const toSide = edge.toSide ?? autoPortSide(from, to, 'to');
+                    const start = portPoint(from, fromSide);
+                    const end = portPoint(to, toSide);
+                    const path = researchEdgePath(start, end, fromSide, toSide);
                     return (
                       <g
                         key={edge.id}
@@ -3726,19 +3949,13 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                           }
                         }}
                       >
-                        <line
+                        <path
                           className="research-edge-target"
-                          x1={start.x}
-                          y1={start.y}
-                          x2={end.x}
-                          y2={end.y}
+                          d={path}
                         />
-                        <line
+                        <path
                           className={selected ? 'research-edge research-edge-selected' : 'research-edge'}
-                          x1={start.x}
-                          y1={start.y}
-                          x2={end.x}
-                          y2={end.y}
+                          d={path}
                           markerEnd={
                             selected ? 'url(#research-edge-arrow-selected)' : 'url(#research-edge-arrow)'
                           }
@@ -3749,13 +3966,16 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
                   {connectionDraft ? (() => {
                     const from = nodeById(nodes, connectionDraft.from);
                     if (!from) return null;
+                    const start = portPoint(from, connectionDraft.fromSide);
+                    const end = {
+                      x: (connectionDraft.x / 100) * graphSize.width,
+                      y: (connectionDraft.y / 100) * graphSize.height,
+                    };
+                    const path = researchEdgePath(start, end, connectionDraft.fromSide, 'left');
                     return (
-                      <line
+                      <path
                         className="research-edge research-edge-draft"
-                        x1={portPoint(from, connectionDraft.fromSide).x}
-                        y1={portPoint(from, connectionDraft.fromSide).y}
-                        x2={(connectionDraft.x / 100) * graphSize.width}
-                        y2={(connectionDraft.y / 100) * graphSize.height}
+                        d={path}
                         markerEnd="url(#research-edge-arrow-draft)"
                       />
                     );

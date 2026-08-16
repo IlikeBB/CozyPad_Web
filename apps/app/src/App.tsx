@@ -54,6 +54,7 @@ import {
 type WorkspaceId =
   | 'agents'
   | 'research'
+  | 'researchPro'
   | 'work'
   | 'terminal'
   | 'files'
@@ -63,6 +64,7 @@ type WorkspaceId =
 
 const NAV_ITEMS: { id: WorkspaceId; label: string; icon: () => React.ReactElement }[] = [
   { id: 'research', label: 'Research', icon: () => <ResearchIcon /> },
+  { id: 'researchPro', label: 'Research (Pro Beta)', icon: () => <ResearchIcon /> },
   { id: 'agents', label: 'Agents', icon: () => <AgentsIcon /> },
   { id: 'terminal', label: 'Terminal', icon: () => <TerminalIcon /> },
   { id: 'files', label: 'File', icon: () => <FilesIcon /> },
@@ -625,7 +627,10 @@ export function App() {
             />
           </section>
           <section className="workspace-page" hidden={workspace !== 'research'}>
-            <ResearchWorkspace connected={state === 'connected'} />
+            <ResearchWorkspace key="research-standard" connected={state === 'connected'} variant="standard" />
+          </section>
+          <section className="workspace-page" hidden={workspace !== 'researchPro'}>
+            <ResearchWorkspace key="research-pro" connected={state === 'connected'} variant="proBeta" />
           </section>
           <section className="workspace-page" hidden={workspace !== 'work'}>
             <WorkWorkspace active={workspace === 'work'} onOpenRun={handleOpenWorkRun} />
