@@ -39,6 +39,8 @@ import { WorkWorkspace } from './workspaces/WorkWorkspace';
 import type { WorkRun } from './workspaces/workRuns';
 import { reconnectDelayMs } from './reconnectPolicy';
 import {
+  closeAllLegacySshRuntime,
+  connectLegacySsh,
   getLegacySession,
   listLegacyServers,
   logoutLegacy,
@@ -47,8 +49,8 @@ import {
 import type { LegacyAuthUser, LegacySshServer } from './workspaces/agents/legacySshApi';
 import { subscribeCodexTrainingTasks } from './workspaces/agents/codexTaskQueue';
 import {
-  readLastSelectedLegacyServerId,
   rememberLastSelectedLegacyServerId,
+  subscribeLastSelectedLegacyServerId,
 } from './workspaces/sshServerPreference';
 
 type WorkspaceId =
@@ -211,11 +213,14 @@ export function App() {
   const refreshProfiles = useCallback(async () => {
     const list = await bridge.listProfiles();
     setProfiles(list);
-    setSelectedId((current) =>
-      current !== null && (bridge.kind === 'mock' || list.some((profile) => profile.id === current))
+    setSelectedId((current) => {
+      // The browser bridge exposes a development-only mock profile. Keep the
+      // production selector empty until the user explicitly chooses an SSH host.
+      if (bridge.kind === 'mock') return current;
+      return current !== null && list.some((profile) => profile.id === current)
         ? current
-        : (list[0]?.id ?? null),
-    );
+        : null;
+    });
   }, [bridge]);
 
   useEffect(() => {
@@ -239,15 +244,7 @@ export function App() {
         setSelectedId((current) => {
           const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);
           if (currentProfile && canUseLegacyProfile(currentProfile)) return currentProfile.id;
-          const rememberedId = readLastSelectedLegacyServerId();
-          const remembered = nextLegacyProfiles.find(
-            (profile) => profile.id === rememberedId && canUseLegacyProfile(profile),
-          );
-          if (remembered) return remembered.id;
-          const remote = nextLegacyProfiles.find(
-            (profile) => profile.id !== 'system:localhost' && canUseLegacyProfile(profile),
-          );
-          return remote?.id ?? current ?? nextLegacyProfiles[0]?.id ?? null;
+          return null;
         });
       })
       .catch(() => {
@@ -258,6 +255,20 @@ export function App() {
       active = false;
     };
   }, [authState, bridge.kind]);
+
+  useEffect(
+    () =>
+      subscribeLastSelectedLegacyServerId((serverId) => {
+        if (!serverId) {
+          setSelectedId(null);
+          return;
+        }
+        if (legacyProfileOptions.some((profile) => profile.id === serverId)) {
+          setSelectedId(serverId);
+        }
+      }),
+    [legacyProfileOptions],
+  );
 
   useEffect(() => bridge.onHostKeyPrompt(setHostKeyPrompt), [bridge]);
 
@@ -280,8 +291,12 @@ export function App() {
       connectInFlight.current = true;
       manualDisconnect.current = false;
       setError(null);
-      void bridge
-        .connect({ profileId })
+      const legacyProfile = legacyProfileOptions.some((profile) => profile.id === profileId);
+      const connectRequest =
+        bridge.kind === 'mock' && legacyProfile
+          ? connectLegacySsh(profileId).then(() => bridge.connect({ profileId }))
+          : bridge.connect({ profileId });
+      void connectRequest
         .then(() => {
           connectInFlight.current = false;
         })
@@ -292,7 +307,7 @@ export function App() {
           scheduleRef.current(profileId);
         });
     },
-    [bridge],
+    [bridge, legacyProfileOptions],
   );
 
   const scheduleReconnect = useCallback(
@@ -372,13 +387,16 @@ export function App() {
     });
   }, [bridge, clearTimers]);
 
-  const profileOptions = useMemo(
-    () => mergeProfileOptions(profiles, legacyProfileOptions),
-    [legacyProfileOptions, profiles],
-  );
+  const profileOptions = useMemo(() => {
+    const visibleProfiles =
+      bridge.kind === 'mock'
+        ? profiles.filter((profile) => profile.id !== 'mock-local' && profile.host !== 'mock.local')
+        : profiles;
+    return mergeProfileOptions(visibleProfiles, legacyProfileOptions);
+  }, [bridge.kind, legacyProfileOptions, profiles]);
   const selectedProfile = profileOptions.find((profile) => profile.id === selectedId) ?? null;
   const selectedLegacyProfile = legacyProfileOptions.some((profile) => profile.id === selectedId);
-  const effectiveMockData = mockData && !selectedLegacyProfile;
+  const effectiveMockData = mockData && selectedProfile?.id === 'mock-local' && !selectedLegacyProfile;
 
   const handleConnect = () => {
     if (!selectedProfile) return;
@@ -400,7 +418,15 @@ export function App() {
     connectInFlight.current = false;
     clearTimers();
     setReconnect(null);
-    if (selectedId !== null) void bridge.disconnect({ profileId: selectedId });
+    if (selectedId !== null) {
+      if (bridge.kind === 'mock' && legacyProfileOptions.some((profile) => profile.id === selectedId)) {
+        void closeAllLegacySshRuntime()
+          .catch(() => undefined)
+          .finally(() => bridge.disconnect({ profileId: selectedId }));
+      } else {
+        void bridge.disconnect({ profileId: selectedId });
+      }
+    }
   };
 
   const handleLogout = async () => {
@@ -530,14 +556,18 @@ export function App() {
           value={selectedId ?? ''}
           onChange={(event) => {
             const nextId = event.target.value;
-            setSelectedId(nextId);
+            setSelectedId(nextId || null);
+            if (!nextId) {
+              rememberLastSelectedLegacyServerId('');
+              return;
+            }
             if (legacyProfileOptions.some((profile) => profile.id === nextId)) {
               rememberLastSelectedLegacyServerId(nextId);
             }
           }}
           disabled={state === 'connected' || state === 'connecting'}
         >
-          {profileOptions.length === 0 ? <option value="">（無連線設定）</option> : null}
+          <option value="">（請選擇 SSH 主機）</option>
           {profileOptions.map((profile) => (
             <option key={profile.id} value={profile.id}>
               {profile.name}

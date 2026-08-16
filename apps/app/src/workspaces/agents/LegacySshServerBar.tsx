@@ -195,7 +195,10 @@ export function LegacySshServerBar({
   useEffect(
     () =>
       subscribeLastSelectedLegacyServerId((serverId) => {
-        if (!serverId) return;
+        if (!serverId) {
+          onServerChange(null);
+          return;
+        }
         const server = servers.find((item) => item.id === serverId);
         if (server) onServerChange(server);
       }),

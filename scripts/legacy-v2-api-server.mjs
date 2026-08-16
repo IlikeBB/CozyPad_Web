@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import os from "node:os";
@@ -12,6 +12,10 @@ import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { Client as SshClient } from "ssh2";
+import {
+  CodexRuntimeManager,
+  normalizeCodexRuntimeMode,
+} from "./lib/codex-runtime-manager.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -42,6 +46,7 @@ const GOOGLE_ALLOWED_EMAILS = parseCsvSet(process.env.COZYPAD_GOOGLE_ALLOWED_EMA
 const GOOGLE_ALLOWED_DOMAINS = parseCsvSet(process.env.COZYPAD_GOOGLE_ALLOWED_DOMAINS);
 const GOOGLE_ADMIN_EMAILS = parseCsvSet(process.env.COZYPAD_GOOGLE_ADMIN_EMAILS);
 const GOOGLE_USER_MAP = parseUserMap(process.env.COZYPAD_GOOGLE_USER_MAP);
+const TWO_FACTOR_ENABLED = process.env.COZYPAD_ENABLE_2FA !== "false";
 const TWO_FACTOR_ISSUER = String(process.env.COZYPAD_2FA_ISSUER || "CozyPad").trim() || "CozyPad";
 const TWO_FACTOR_CHALLENGE_TTL_MS = Number(
   process.env.COZYPAD_2FA_CHALLENGE_TTL_MS || 5 * 60 * 1000,
@@ -127,6 +132,9 @@ const FLOWCHART_MARKDOWN_MAX_EDGES = Math.max(
   Number(process.env.COZYPAD_FLOWCHART_MARKDOWN_MAX_EDGES || 240) || 240,
 );
 const CODEX_FEATURE_ENABLED = process.env.COZYPAD_ENABLE_CODEX !== "false";
+const CODEX_RUNTIME_MODE = normalizeCodexRuntimeMode(
+  process.env.COZYPAD_CODEX_RUNTIME || "legacy",
+);
 const BAILIAN_BASE_URL = normalizeBailianBaseUrl(
   process.env.COZYPAD_BAILIAN_BASE_URL ||
     process.env.BAILIAN_BASE_URL ||
@@ -425,6 +433,16 @@ const DEFAULT_CODEX_ARGS = [
   "--dangerously-bypass-approvals-and-sandbox",
   "{prompt}",
 ];
+const codexAppServerRuntimeManager = new CodexRuntimeManager({
+  mode: CODEX_RUNTIME_MODE,
+  startTransport: startCodexAppServerTransport,
+  maxReplayEvents: Number(process.env.COZYPAD_CODEX_APP_SERVER_REPLAY_EVENTS || 2_000),
+  maxRestartAttempts: Number(process.env.COZYPAD_CODEX_APP_SERVER_RESTART_ATTEMPTS || 2),
+  restartBaseDelayMs: Number(process.env.COZYPAD_CODEX_APP_SERVER_RESTART_DELAY_MS || 1_000),
+  serverRequestTimeoutMs: Number(
+    process.env.COZYPAD_CODEX_APP_SERVER_REQUEST_TIMEOUT_MS || 5 * 60_000,
+  ),
+});
 let cfAccessJwks = null;
 let googleJwks = null;
 let dominUpdateProcess = null;
@@ -1500,6 +1518,20 @@ function createLoginChallengePayload(user) {
       otpauthUrl: createOtpAuthUrl(user, secretBase32),
     },
   };
+}
+
+async function sendLoginResponse(response, user, extra = {}) {
+  if (TWO_FACTOR_ENABLED) {
+    sendJson(response, 200, { ...createLoginChallengePayload(user), ...extra });
+    return;
+  }
+
+  sendJson(
+    response,
+    200,
+    { ok: true, user: publicUser(user), ...extra },
+    { "set-cookie": await createSessionCookie(user) },
+  );
 }
 
 async function verifyTwoFactorChallenge(challengeId, code) {
@@ -9132,7 +9164,7 @@ except Exception as error:
   ].join("; ");
 }
 
-function createFileMutationCommand(action, primaryPath, name = "") {
+function createFileMutationCommand(action, primaryPath, name = "", destinationPath = "") {
   const script = String.raw`
 import json
 import os
@@ -9142,6 +9174,7 @@ import sys
 action = sys.argv[1] if len(sys.argv) > 1 else ""
 primary = sys.argv[2] if len(sys.argv) > 2 else ""
 name = sys.argv[3] if len(sys.argv) > 3 else ""
+destination = sys.argv[4] if len(sys.argv) > 4 else ""
 
 def fail(message, code=2):
     print(json.dumps({"ok": False, "action": action, "error": message}, ensure_ascii=False))
@@ -9172,6 +9205,18 @@ try:
         os.mkdir(target)
         result_path = target
         parent = directory
+    elif action == "touch":
+        directory = resolve(primary)
+        file_name = validate_name(name)
+        if not os.path.isdir(directory):
+            fail(f"Not a directory: {directory}")
+        target = os.path.join(directory, file_name)
+        if os.path.lexists(target):
+            fail(f"Already exists: {target}")
+        with open(target, "x", encoding="utf-8"):
+            pass
+        result_path = target
+        parent = directory
     elif action == "rename":
         source = resolve(primary)
         new_name = validate_name(name)
@@ -9199,6 +9244,35 @@ try:
         else:
             os.unlink(target)
         result_path = target
+    elif action in {"copy", "move"}:
+        source = resolve(primary)
+        directory = resolve(destination)
+        if not os.path.lexists(source):
+            fail(f"Path does not exist: {source}")
+        if not os.path.isdir(directory):
+            fail(f"Not a directory: {directory}")
+        target = os.path.join(directory, os.path.basename(source))
+        if os.path.lexists(target):
+            fail(f"Destination already exists: {target}")
+        source_real = os.path.realpath(source)
+        directory_real = os.path.realpath(directory)
+        home = os.path.realpath(os.path.expanduser("~"))
+        if source_real in {"/", home}:
+            fail("Refusing to copy or move root or home directory.")
+        if os.path.isdir(source) and not os.path.islink(source) and (
+            directory_real == source_real or directory_real.startswith(source_real + os.sep)
+        ):
+            fail("Cannot copy or move a directory into itself.")
+        if action == "move":
+            shutil.move(source, target)
+        elif os.path.islink(source):
+            os.symlink(os.readlink(source), target)
+        elif os.path.isdir(source):
+            shutil.copytree(source, target, symlinks=True)
+        else:
+            shutil.copy2(source, target)
+        result_path = target
+        parent = directory
     else:
         fail("Unsupported file action")
 
@@ -9214,7 +9288,7 @@ except Exception as error:
 
   return `if command -v python3 >/dev/null 2>&1; then _cozypad_py=python3; elif command -v python >/dev/null 2>&1; then _cozypad_py=python; else echo '{"ok":false,"error":"python3/python not found on remote host"}'; exit 127; fi; "$_cozypad_py" - ${shellQuote(
     action,
-  )} ${shellQuote(primaryPath || "")} ${shellQuote(name || "")} <<'PY'\n${script}\nPY`;
+  )} ${shellQuote(primaryPath || "")} ${shellQuote(name || "")} ${shellQuote(destinationPath || "")} <<'PY'\n${script}\nPY`;
 }
 
 const LOCAL_TEXT_EXTENSIONS = new Set([
@@ -9423,7 +9497,7 @@ async function previewLocalFile(localPath, maxBytes = FILE_PREVIEW_MAX_BYTES) {
   };
 }
 
-async function mutateLocalFile(action, primaryPath, name = "") {
+async function mutateLocalFile(action, primaryPath, name = "", destinationPath = "") {
   const primary = resolveLocalPath(primaryPath);
   let resultPath = primary;
   let parent = path.dirname(primary);
@@ -9439,6 +9513,13 @@ async function mutateLocalFile(action, primaryPath, name = "") {
       throw new Error(`Already exists: ${resultPath}`);
     }
     await mkdir(resultPath);
+    parent = primary;
+  } else if (action === "touch") {
+    const fileName = validateLocalFileName(name);
+    const directoryInfo = await stat(primary);
+    if (!directoryInfo.isDirectory()) throw new Error(`Not a directory: ${primary}`);
+    resultPath = path.join(primary, fileName);
+    await writeFile(resultPath, "", { flag: "wx" });
     parent = primary;
   } else if (action === "rename") {
     const newName = validateLocalFileName(name);
@@ -9462,6 +9543,36 @@ async function mutateLocalFile(action, primaryPath, name = "") {
       throw new Error("Refusing to delete root or home directory.");
     }
     await rm(primary, { recursive: true, force: false });
+  } else if (action === "copy" || action === "move") {
+    const destination = resolveLocalPath(destinationPath);
+    const destinationInfo = await stat(destination);
+    if (!destinationInfo.isDirectory()) throw new Error(`Not a directory: ${destination}`);
+    resultPath = path.join(destination, path.basename(primary));
+    if (existsSync(resultPath)) throw new Error(`Destination already exists: ${resultPath}`);
+    const sourceInfo = await stat(primary);
+    const normalizedSource = path.resolve(primary).toLowerCase();
+    if (
+      normalizedSource === path.resolve(path.parse(primary).root).toLowerCase() ||
+      normalizedSource === path.resolve(os.homedir()).toLowerCase()
+    ) {
+      throw new Error("Refusing to copy or move root or home directory.");
+    }
+    const relative = path.relative(primary, destination);
+    if (sourceInfo.isDirectory() && (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)))) {
+      throw new Error("Cannot copy or move a directory into itself.");
+    }
+    if (action === "move") {
+      try {
+        await rename(primary, resultPath);
+      } catch (error) {
+        if (error?.code !== "EXDEV") throw error;
+        await cp(primary, resultPath, { recursive: sourceInfo.isDirectory(), errorOnExist: true });
+        await rm(primary, { recursive: sourceInfo.isDirectory(), force: false });
+      }
+    } else {
+      await cp(primary, resultPath, { recursive: sourceInfo.isDirectory(), errorOnExist: true });
+    }
+    parent = destination;
   } else {
     throw new Error("Unsupported file action");
   }
@@ -9790,6 +9901,73 @@ async function createSsh2ExecChild(owner, server, remoteCommand, gateOptions = {
   }
 }
 
+function getCodexAppServerHostFingerprint(server) {
+  if (!server) return "";
+  if (isSystemLocalServer(server)) {
+    return crypto
+      .createHash("sha256")
+      .update(`local\0${os.hostname()}\0${appRoot}`)
+      .digest("hex");
+  }
+  return getSshGateKey(server);
+}
+
+function getCodexAppServerIdentity(session, server) {
+  const owner = getTerminalOwner(session);
+  if (!owner) throw new Error("Codex app-server requires an authenticated owner");
+  return {
+    owner,
+    connectionProfileId: String(server?.id || ""),
+    remoteHostFingerprint: getCodexAppServerHostFingerprint(server),
+    codexHomeNamespace: `cozypad-${toSafeServerSlug(owner) || "user"}`,
+  };
+}
+
+function buildRemoteCodexAppServerCommand(owner) {
+  const ownerSlug = toSafeServerSlug(owner) || "user";
+  return [
+    "set +u",
+    ...remoteCodexBootstrapLines(),
+    "set -u",
+    `CODEX_HOME="$HOME/.cozypad/users/${ownerSlug}/codex-home"`,
+    "export CODEX_HOME",
+    'mkdir -p "$CODEX_HOME"',
+    // Keep runtime/history isolated per CozyPad user while reusing the SSH
+    // account's existing Codex login. The credential stays on the remote host.
+    'if [ ! -s "$CODEX_HOME/auth.json" ] && [ -r "$HOME/.codex/auth.json" ]; then rm -f "$CODEX_HOME/auth.json"; ln -s "$HOME/.codex/auth.json" "$CODEX_HOME/auth.json"; fi',
+    'if ! command -v codex >/dev/null 2>&1; then printf "[CozyPad] remote Codex CLI not found on this SSH server.\\n" >&2; exit 127; fi',
+    "exec codex -c features.goals=true app-server",
+  ].join("; ");
+}
+
+async function startCodexAppServerTransport(identity, context) {
+  const session = context?.session;
+  const server = context?.server;
+  if (!session || !server) throw new Error("Codex app-server transport context is incomplete");
+
+  if (isSystemLocalServer(server)) {
+    await ensureUserCodexHome(session);
+    const cli = await getCodexCliStatus(session);
+    if (!cli.available) throw new Error(cli.error || "Codex CLI was not found");
+    return spawn(cli.command, [...cli.args, "-c", "features.goals=true", "app-server"], {
+      cwd: server.defaultPath || appRoot,
+      env: getCodexEnv(session),
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  if (!canUseSsh2Broker(server)) {
+    throw new Error(ssh2RequiredMessage(server, "Codex app-server"));
+  }
+  return createSsh2ExecChild(
+    identity.owner,
+    server,
+    buildRemoteCodexAppServerCommand(identity.owner),
+    { confirmAfterMs: 0, opensshFallback: false },
+  );
+}
+
 async function createRemoteWorkerChild(owner, server, remoteCommand, purpose, gateOptions = {}) {
   if (!canUseSsh2Broker(server)) {
     if (opensshFallbackAllowed(server)) {
@@ -10084,7 +10262,23 @@ function resizeTerminalSession(terminalSession, dimensions = {}) {
   }
 }
 
-async function createTerminalSession(id, owner, server, dimensions = {}, gateOptions = {}) {
+function initialTerminalCwdCommand(server, cwd) {
+  const clean = String(cwd || "").trim();
+  if (!clean) return "";
+  if (isSystemLocalServer(server)) {
+    const target = clean === "~" ? "$HOME" : `'${clean.replace(/'/g, "''")}'`;
+    return `Set-Location -LiteralPath ${target}\r`;
+  }
+  const target =
+    clean === "~"
+      ? '"$HOME"'
+      : clean.startsWith("~/")
+        ? `"$HOME"/${shellQuote(clean.slice(2))}`
+        : shellQuote(clean);
+  return `cd -- ${target} || printf '[CozyPad] unable to enter requested cwd\\n'\r`;
+}
+
+async function createTerminalSession(id, owner, server, dimensions = {}, gateOptions = {}, cwd = "") {
   const child = await createTerminalChild(owner, server, dimensions, gateOptions);
   const now = Date.now();
   const terminalSession = {
@@ -10105,6 +10299,7 @@ async function createTerminalSession(id, owner, server, dimensions = {}, gateOpt
     lastAttachedAt: now,
     lastOutputAt: now,
     ended: false,
+    cwd: String(cwd || "").trim() || server.defaultPath || "~",
   };
 
   terminalSessions.set(id, terminalSession);
@@ -10128,6 +10323,9 @@ async function createTerminalSession(id, owner, server, dimensions = {}, gateOpt
     );
     terminateTerminalSession(terminalSession, "ended");
   });
+
+  const cwdCommand = initialTerminalCwdCommand(server, terminalSession.cwd);
+  if (cwdCommand) child.stdin.write(cwdCommand);
 
   return terminalSession;
 }
@@ -10165,6 +10363,7 @@ function publicTerminalSession(session) {
     agentBusy: Boolean(session.activeAgentJob && !session.activeAgentJob.closed),
     agentJobId: session.activeAgentJob?.id || "",
     agent: session.activeAgentJob?.agent || "",
+    cwd: session.cwd || "",
   };
 }
 
@@ -10791,7 +10990,10 @@ function closeSshRuntimeForUser(session, reason = "page closed") {
     remoteCodexWorkers: 0,
     monitorStreams: 0,
     ssh2Brokers: 0,
+    codexAppServerRuntimes: 0,
   };
+
+  counts.codexAppServerRuntimes = codexAppServerRuntimeManager.closeOwner(owner, reason);
 
   for (const terminalSession of Array.from(terminalSessions.values())) {
     if (terminalSession.owner === owner && terminateTerminalSession(terminalSession, reason)) {
@@ -15530,6 +15732,7 @@ async function handleTerminalUpgrade(request, socket) {
   const serverId = url.searchParams.get("serverId");
   const terminalId = normalizeTerminalSessionId(url.searchParams.get("terminalId"));
   const reuseOnly = url.searchParams.get("reuse") === "1";
+  const requestedCwd = String(url.searchParams.get("cwd") || "").trim();
   const terminalDimensions = {
     cols: normalizeTerminalDimension(url.searchParams.get("cols"), 140, 80, 240),
     rows: normalizeTerminalDimension(url.searchParams.get("rows"), 36, 24, 80),
@@ -15565,7 +15768,14 @@ async function handleTerminalUpgrade(request, socket) {
   }
 
   if (!terminalSession) {
-    terminalSession = await createTerminalSession(terminalId, owner, server, terminalDimensions);
+    terminalSession = await createTerminalSession(
+      terminalId,
+      owner,
+      server,
+      terminalDimensions,
+      {},
+      requestedCwd || server.defaultPath || "~",
+    );
   }
 
   socket.write(
@@ -15704,6 +15914,173 @@ async function handleCodexUpgrade(request, socket) {
       },
     );
   });
+}
+
+const CODEX_APP_SERVER_RPC_METHODS = new Set([
+  "model/list",
+  "collaborationMode/list",
+  "skills/list",
+  "thread/start",
+  "thread/resume",
+  "thread/read",
+  "thread/list",
+  "thread/archive",
+  "thread/name/set",
+  "thread/goal/set",
+  "thread/goal/get",
+  "thread/goal/clear",
+  "fs/readFile",
+  "turn/start",
+  "turn/steer",
+  "turn/interrupt",
+]);
+
+function sendCodexAppServerSocketJson(socket, payload) {
+  sendWebSocketText(socket, JSON.stringify(payload));
+}
+
+async function handleCodexAppServerUpgrade(request, socket) {
+  const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+  if (url.pathname !== "/api/codex/app-server/session") {
+    rejectSocket(socket, 404, "Not Found");
+    return;
+  }
+  if (!CODEX_FEATURE_ENABLED || CODEX_RUNTIME_MODE === "legacy") {
+    rejectSocket(socket, 410, "Codex app-server runtime is disabled");
+    return;
+  }
+  if (!isAllowedWebSocketOrigin(request)) {
+    rejectSocket(socket, 403, "Forbidden");
+    return;
+  }
+  const access = await verifyCloudflareAccess(request);
+  if (!access.ok) {
+    rejectSocket(socket, access.status || 403, access.error || "Forbidden");
+    return;
+  }
+  const session = getSession(request);
+  if (!session) {
+    rejectSocket(socket, 401, "Unauthorized");
+    return;
+  }
+  const serverId = url.searchParams.get("serverId");
+  const server = serverId ? await findServer(serverId, session) : null;
+  const websocketKey = request.headers["sec-websocket-key"];
+  if (!server || !websocketKey) {
+    rejectSocket(socket, 400, "A valid serverId and WebSocket key are required");
+    return;
+  }
+
+  const identity = getCodexAppServerIdentity(session, server);
+  const runtime = await codexAppServerRuntimeManager.acquire(identity, { session, server });
+  socket.write(
+    [
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${websocketAccept(websocketKey)}`,
+      "\r\n",
+    ].join("\r\n"),
+  );
+
+  let closed = false;
+  const seenServerRequestIds = new Set();
+  const frameState = { buffer: Buffer.alloc(0) };
+  const unsubscribe = runtime.subscribe((message) => {
+    if (closed) return;
+    if (message.type === "server_request") seenServerRequestIds.add(message.request.id);
+    sendCodexAppServerSocketJson(socket, message);
+  });
+  const afterSequence = Math.max(0, Number(url.searchParams.get("afterSequence") || 0));
+  sendCodexAppServerSocketJson(socket, { type: "runtime_status", runtime: runtime.snapshot() });
+  for (const event of runtime.replay(afterSequence)) {
+    sendCodexAppServerSocketJson(socket, { type: "event", event, replayed: true });
+  }
+  for (const request of runtime.pendingServerRequests()) {
+    seenServerRequestIds.add(request.id);
+    sendCodexAppServerSocketJson(socket, { type: "server_request", request, replayed: true });
+  }
+
+  const pingTimer = setInterval(() => sendWebSocketPing(socket), TERMINAL_WS_PING_MS);
+  pingTimer.unref?.();
+  function closeClient() {
+    if (closed) return;
+    closed = true;
+    clearInterval(pingTimer);
+    unsubscribe();
+    closeWebSocket(socket);
+  }
+
+  socket.on("data", (chunk) => {
+    readWebSocketFrames(
+      frameState,
+      chunk,
+      (payload) => {
+        let message;
+        try {
+          message = JSON.parse(payload.toString("utf8"));
+        } catch {
+          sendCodexAppServerSocketJson(socket, { type: "protocol_error", error: "Invalid JSON" });
+          return;
+        }
+
+        if (message?.type === "rpc") {
+          const requestId = String(message.requestId || "").slice(0, 160);
+          const method = String(message.method || "");
+          if (!requestId || !CODEX_APP_SERVER_RPC_METHODS.has(method)) {
+            sendCodexAppServerSocketJson(socket, {
+              type: "rpc_result",
+              requestId,
+              error: { message: "Unsupported Codex app-server method" },
+            });
+            return;
+          }
+          void runtime.call(method, message.params || {}).then(
+            (result) => sendCodexAppServerSocketJson(socket, { type: "rpc_result", requestId, result }),
+            (error) =>
+              sendCodexAppServerSocketJson(socket, {
+                type: "rpc_result",
+                requestId,
+                error: {
+                  message: error instanceof Error ? error.message : "Codex app-server request failed",
+                  ...(error?.code !== undefined ? { code: error.code } : {}),
+                },
+              }),
+          );
+          return;
+        }
+
+        if (message?.type === "server_request_result") {
+          const appServerRequestId = message.appServerRequestId;
+          if (!seenServerRequestIds.has(appServerRequestId)) {
+            sendCodexAppServerSocketJson(socket, {
+              type: "protocol_error",
+              error: "Unknown or already resolved Codex app-server request",
+            });
+            return;
+          }
+          seenServerRequestIds.delete(appServerRequestId);
+          try {
+            runtime.respond(appServerRequestId, message.result, message.error);
+          } catch (error) {
+            sendCodexAppServerSocketJson(socket, {
+              type: "protocol_error",
+              error: error instanceof Error ? error.message : "Approval response failed",
+            });
+          }
+          return;
+        }
+
+        sendCodexAppServerSocketJson(socket, {
+          type: "protocol_error",
+          error: "Unsupported Web Agent message",
+        });
+      },
+      closeClient,
+    );
+  });
+  socket.on("close", closeClient);
+  socket.on("error", closeClient);
 }
 
 async function handleClaudeUpgrade(request, socket) {
@@ -16248,7 +16625,7 @@ async function handleRequest(request, response) {
 
     if (user && verifyPassword(body.password, user)) {
       clearAuthRateLimit(rateLimit.key);
-      sendJson(response, 200, createLoginChallengePayload(user));
+      await sendLoginResponse(response, user);
       return;
     }
 
@@ -16299,7 +16676,7 @@ async function handleRequest(request, response) {
       }
 
       clearAuthRateLimit(rateLimit.key);
-      sendJson(response, 200, { ...createLoginChallengePayload(user), email });
+      await sendLoginResponse(response, user, { email });
     } catch (error) {
       sendJson(response, 401, {
         ok: false,
@@ -16329,6 +16706,24 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "GET" && pathname === "/api/codex/app-server/status") {
+    const serverId = String(url.searchParams.get("serverId") || "");
+    const selectedServer = serverId ? await findServer(serverId, session) : null;
+    if (serverId && !selectedServer) {
+      sendJson(response, 404, { ok: false, error: "Server not found" });
+      return;
+    }
+    sendJson(response, 200, {
+      ok: true,
+      enabled: CODEX_FEATURE_ENABLED && CODEX_RUNTIME_MODE !== "legacy",
+      mode: CODEX_RUNTIME_MODE,
+      runtimes: codexAppServerRuntimeManager.list(getTerminalOwner(session)).filter((runtime) =>
+        selectedServer ? runtime.identity.connectionProfileId === selectedServer.id : true,
+      ),
+    });
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/auth/login-records") {
     sendJson(
       response,
@@ -16352,6 +16747,22 @@ async function handleRequest(request, response) {
     const body = await readBody(request);
     const closed = closeTerminalSessionForUser(session, body.terminalId);
     sendJson(response, 200, { ok: true, closed });
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/ssh/connect") {
+    const body = await readBody(request);
+    const selectedServer = body?.serverId ? await findServer(body.serverId, session) : null;
+    if (!selectedServer || isSystemLocalServer(selectedServer)) {
+      sendJson(response, 400, { ok: false, error: "A remote SSH server is required" });
+      return;
+    }
+    const broker = await getSsh2Broker(session, selectedServer);
+    sendJson(response, 200, {
+      ok: true,
+      serverId: selectedServer.id,
+      status: broker.status,
+    });
     return;
   }
 
@@ -17397,19 +17808,20 @@ async function handleRequest(request, response) {
 
     const fileAction = String(body.action || "").trim();
     const primaryPath =
-      fileAction === "mkdir"
+      fileAction === "mkdir" || fileAction === "touch"
         ? String(body.directory || "")
         : String(body.path || "");
     const fileName = String(body.name || "");
+    const destinationPath = String(body.destination || "");
 
-    if (!["mkdir", "rename", "delete"].includes(fileAction)) {
+    if (!["mkdir", "touch", "rename", "delete", "copy", "move"].includes(fileAction)) {
       sendJson(response, 400, { ok: false, error: "Unsupported file action" });
       return;
     }
 
     if (isSystemLocalServer(server)) {
       try {
-        sendJson(response, 200, await mutateLocalFile(fileAction, primaryPath, fileName));
+        sendJson(response, 200, await mutateLocalFile(fileAction, primaryPath, fileName, destinationPath));
       } catch (error) {
         sendJson(response, 400, {
           ok: false,
@@ -17423,8 +17835,8 @@ async function handleRequest(request, response) {
     const result = await runRemoteCommand(
       session,
       server,
-      createFileMutationCommand(fileAction, primaryPath, fileName),
-      fileAction === "delete" ? 45000 : 15000,
+      createFileMutationCommand(fileAction, primaryPath, fileName, destinationPath),
+      ["delete", "copy", "move"].includes(fileAction) ? 45000 : 15000,
       { controlMaster: false },
     );
     if (!result.ok && !result.stdout.trim()) {
@@ -17557,13 +17969,18 @@ server.on("upgrade", (request, socket) => {
     url.pathname = `/api/${url.pathname.slice("/cozypad-agent/".length)}`;
     request.url = `${url.pathname}${url.search}`;
   }
-  if (!CODEX_FEATURE_ENABLED && url.pathname === "/api/codex/session") {
+  if (
+    !CODEX_FEATURE_ENABLED &&
+    (url.pathname === "/api/codex/session" || url.pathname === "/api/codex/app-server/session")
+  ) {
     rejectSocket(socket, 410, "Codex feature is disabled");
     return;
   }
 
   const handler =
-    url.pathname === "/api/codex/session"
+    url.pathname === "/api/codex/app-server/session"
+      ? handleCodexAppServerUpgrade
+      : url.pathname === "/api/codex/session"
       ? handleCodexUpgrade
       : url.pathname === "/api/claude/session"
         ? handleClaudeUpgrade

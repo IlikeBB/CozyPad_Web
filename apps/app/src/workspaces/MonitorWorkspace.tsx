@@ -139,6 +139,7 @@ function resolveMonitorServerId(
   preferredId: string | null | undefined,
   currentId = '',
 ) {
+  if (preferredId === null) return '';
   if (preferredId && servers.some((server) => server.id === preferredId)) {
     return preferredId;
   }
@@ -588,7 +589,11 @@ export function MonitorWorkspace({
   useEffect(
     () =>
       subscribeLastSelectedLegacyServerId((serverId) => {
-        if (!serverId || !availableServers.some((server) => server.id === serverId)) return;
+        if (!serverId) {
+          setSelectedServerId('');
+          return;
+        }
+        if (!availableServers.some((server) => server.id === serverId)) return;
         setSelectedServerId(serverId);
       }),
     [availableServers],

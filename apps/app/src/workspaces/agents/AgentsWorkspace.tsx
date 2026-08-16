@@ -15,7 +15,7 @@ import {
 import { ChatComposer } from './ChatComposer';
 import { ChatTimeline } from './ChatTimeline';
 import { LegacyAgyPanel } from './LegacyAgyPanel';
-import { LegacyCodexPanel } from './LegacyCodexPanel';
+import { CodexPanel } from './CodexPanel';
 import { applyAcpSessionUpdateToChatItems } from './acpChatAdapter';
 import { subscribeCodexTrainingTasks } from './codexTaskQueue';
 import { listLegacyServers } from './legacySshApi';
@@ -429,7 +429,7 @@ export function AgentsWorkspace({
       </div>
 
       {agent === 'codex' ? (
-        <LegacyCodexPanel
+        <CodexPanel
           selectedProfile={selectedProfile}
           connected={connected}
           legacyServer={remoteServer}
