@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   contextRemainingPercent,
+  contextUsageDetail,
   mergeCodexUsageStats,
   parseCodexUsage,
 } from '../src/workspaces/agents/codexUsage';
@@ -64,5 +65,15 @@ describe('parseCodexUsage', () => {
     expect(merged.currentContext).toBe(171600);
     expect(merged.contextLimit).toBe(246400);
     expect(contextRemainingPercent(merged)).toBe(30);
+  });
+
+  it('distinguishes missing context fields from missing usage', () => {
+    const stats = parseCodexUsage(
+      '[CozyPad] usage total=15444 input=15418 cached_input=10624 output=26 reasoning=19',
+    );
+
+    expect(stats.hasData).toBe(true);
+    expect(contextRemainingPercent(stats)).toBeNull();
+    expect(contextUsageDetail(stats, false)).toBe('CLI did not include context data');
   });
 });
