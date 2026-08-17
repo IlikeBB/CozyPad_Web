@@ -37,18 +37,28 @@ import { SettingsWorkspace } from './workspaces/SettingsWorkspace';
 import { TerminalWorkspace } from './workspaces/TerminalWorkspace';
 import { WorkWorkspace } from './workspaces/WorkWorkspace';
 import type { WorkRun } from './workspaces/workRuns';
-import { reconnectDelayMs } from './reconnectPolicy';
+import {
+  reconnectDelayMs,
+  shouldEnterReconnectFlow,
+  type ConnectionAttemptOrigin,
+} from './reconnectPolicy';
 import {
   closeAllLegacySshRuntime,
   connectLegacySsh,
+  createLegacyServer,
+  deleteLegacyServer,
   getLegacySession,
   listLegacyServers,
   logoutLegacy,
+  provisionLegacyServer,
   setLegacySshExecutionEnabled,
+  updateLegacyServer,
 } from './workspaces/agents/legacySshApi';
 import type { LegacyAuthUser, LegacySshServer } from './workspaces/agents/legacySshApi';
+import { activateUserStorage, deactivateUserStorage } from './platform/userStorage';
 import { subscribeCodexTrainingTasks } from './workspaces/agents/codexTaskQueue';
 import {
+  readLastSelectedLegacyServerId,
   rememberLastSelectedLegacyServerId,
   subscribeLastSelectedLegacyServerId,
 } from './workspaces/sshServerPreference';
@@ -62,6 +72,17 @@ type WorkspaceId =
   | 'monitor'
   | 'public'
   | 'settings';
+
+type SuiteHealthState = 'checking' | 'ready' | 'partial' | 'offline';
+
+type SuiteHealthResponse = {
+  ready?: boolean;
+  services?: {
+    web?: boolean;
+    api?: boolean;
+    localCmd?: boolean;
+  };
+};
 
 const NAV_ITEMS: { id: WorkspaceId; label: string; icon: () => React.ReactElement }[] = [
   { id: 'research', label: 'Research', icon: () => <ResearchIcon /> },
@@ -94,10 +115,12 @@ function isLocalLegacyServer(server: LegacySshServer): boolean {
   return (
     server.localOnly === true ||
     (server.source === 'system' && server.id === 'system:localhost') ||
-    host === 'localhost' ||
-    host === '::1' ||
-    host === 'mock.local' ||
-    host.startsWith('127.')
+    (server.source === 'system' && (
+      host === 'localhost' ||
+      host === '::1' ||
+      host === 'mock.local' ||
+      host.startsWith('127.')
+    ))
   );
 }
 
@@ -146,6 +169,7 @@ export function App() {
   const [filesOpenTarget, setFilesOpenTarget] = useState<FilesOpenTarget | null>(null);
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [legacyProfileOptions, setLegacyProfileOptions] = useState<ConnectionProfile[]>([]);
+  const [legacyProfileStatuses, setLegacyProfileStatuses] = useState<Map<string, string>>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [state, setState] = useState<ConnectionState>('disconnected');
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +179,8 @@ export function App() {
   const [mockData, setMockData] = useState(false);
   const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus | null>(null);
   const [tmuxPromptDismissed, setTmuxPromptDismissed] = useState(false);
+  const [suiteHealth, setSuiteHealth] = useState<SuiteHealthState>('checking');
+  const [suiteHealthDetail, setSuiteHealthDetail] = useState('Checking local services…');
   const [reconnect, setReconnect] = useState<{
     attempt: number;
     secondsLeft: number;
@@ -167,10 +193,62 @@ export function App() {
   const reconnectScheduled = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTicker = useRef<ReturnType<typeof setInterval> | null>(null);
+  const connectionAttemptOrigin = useRef<ConnectionAttemptOrigin>(null);
+
+  const acceptAuthenticatedUser = useCallback((user: LegacyAuthUser) => {
+    activateUserStorage(user.username, user.role);
+    setCurrentUser(user);
+    setWorkspace('agents');
+    setAgentTaskOpenTarget(null);
+    setFilesOpenTarget(null);
+    setSelectedId(null);
+    setProfiles([]);
+    setLegacyProfileOptions([]);
+    setLegacyProfileStatuses(new Map());
+    setManagerOpen(false);
+    setCredentialPrompt(null);
+    setHostKeyPrompt(null);
+    setError(null);
+    setAuthState('authenticated');
+  }, []);
 
   useEffect(() => {
     setLegacySshExecutionEnabled(state === 'connected');
   }, [state]);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refreshSuiteHealth = async () => {
+      try {
+        const response = await fetch('/api/suite/health', {
+          credentials: 'include',
+          headers: { 'x-cozypad-request': 'app' },
+        });
+        const body = await response.json().catch(() => ({})) as SuiteHealthResponse;
+        if (!active) return;
+        const services = body.services || {};
+        const values = [services.web, services.api, services.localCmd];
+        const ready = response.ok && body.ready === true && values.every(Boolean);
+        setSuiteHealth(ready ? 'ready' : values.some(Boolean) ? 'partial' : 'offline');
+        setSuiteHealthDetail(
+          `Web ${services.web ? 'ready' : 'down'} · API ${services.api ? 'ready' : 'down'} · `
+          + `Local command ${services.localCmd ? 'ready' : 'down'}`,
+        );
+      } catch {
+        if (!active) return;
+        setSuiteHealth('offline');
+        setSuiteHealthDetail('The CozyPad API is not responding.');
+      } finally {
+        if (active) timer = setTimeout(refreshSuiteHealth, 4_000);
+      }
+    };
+    void refreshSuiteHealth();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -179,14 +257,15 @@ export function App() {
         const session = await getLegacySession();
         if (!active) return;
         if (session.authenticated && session.user) {
-          setCurrentUser(session.user);
-          setAuthState('authenticated');
+          acceptAuthenticatedUser(session.user);
         } else {
+          deactivateUserStorage();
           setCurrentUser(null);
           setAuthState('anonymous');
         }
       } catch {
         if (!active) return;
+        deactivateUserStorage();
         setCurrentUser(null);
         setAuthState('anonymous');
       }
@@ -196,7 +275,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [acceptAuthenticatedUser]);
 
   useEffect(() => subscribeCodexTrainingTasks(() => setWorkspace('agents')), []);
 
@@ -225,34 +304,49 @@ export function App() {
     void refreshProfiles();
   }, [refreshProfiles]);
 
-  useEffect(() => {
+  const refreshLegacyProfiles = useCallback(async (refresh = false) => {
     if (bridge.kind !== 'mock' || authState !== 'authenticated') {
       setLegacyProfileOptions([]);
-      return;
+      setLegacyProfileStatuses(new Map());
+      return 0;
     }
 
-    let active = true;
-    void listLegacyServers(false)
-      .then((servers) => {
-        if (!active) return;
-        const nextLegacyProfiles = servers
-          .filter((server) => !isLocalLegacyServer(server))
-          .map(legacyServerToConnectionProfile);
-        setLegacyProfileOptions(nextLegacyProfiles);
-        setSelectedId((current) => {
-          const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);
-          if (currentProfile && canUseLegacyProfile(currentProfile)) return currentProfile.id;
-          return null;
-        });
-      })
-      .catch(() => {
-        if (active) setLegacyProfileOptions([]);
-      });
+    const servers = await listLegacyServers(refresh);
+    const nextLegacyProfiles = servers
+      .filter((server) => !isLocalLegacyServer(server))
+      .map(legacyServerToConnectionProfile);
+    const rememberedId = readLastSelectedLegacyServerId();
+    setLegacyProfileOptions(nextLegacyProfiles);
+    setLegacyProfileStatuses(new Map(
+      servers.map((server) => [
+        server.id,
+        server.provisioningStatus
+          || (server.source === 'ssh-config'
+            ? 'imported'
+            : server.identityFileReady
+              ? 'ready'
+              : 'not-provisioned'),
+      ]),
+    ));
+    setSelectedId((current) => {
+      const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);
+      if (currentProfile && canUseLegacyProfile(currentProfile)) return currentProfile.id;
+      const rememberedProfile = nextLegacyProfiles.find((profile) => profile.id === rememberedId);
+      if (rememberedProfile && canUseLegacyProfile(rememberedProfile)) return rememberedProfile.id;
+      return null;
+    });
+    return nextLegacyProfiles.length;
+  }, [authState, bridge.kind]);
 
+  useEffect(() => {
+    let active = true;
+    void refreshLegacyProfiles().catch(() => {
+      if (active) setLegacyProfileOptions([]);
+    });
     return () => {
       active = false;
     };
-  }, [authState, bridge.kind]);
+  }, [refreshLegacyProfiles]);
 
   useEffect(
     () =>
@@ -284,9 +378,10 @@ export function App() {
   );
 
   const doConnect = useCallback(
-    (profileId: string) => {
+    (profileId: string, origin: Exclude<ConnectionAttemptOrigin, null> = 'manual') => {
       if (connectInFlight.current) return;
       connectInFlight.current = true;
+      connectionAttemptOrigin.current = origin;
       manualDisconnect.current = false;
       setError(null);
       const legacyProfile = legacyProfileOptions.some((profile) => profile.id === profileId);
@@ -297,15 +392,23 @@ export function App() {
       void connectRequest
         .then(() => {
           connectInFlight.current = false;
+          connectionAttemptOrigin.current = null;
         })
         .catch((err: unknown) => {
           connectInFlight.current = false;
+          connectionAttemptOrigin.current = null;
           setState('error');
-          setError(String(err));
-          scheduleRef.current(profileId);
+          setError(err instanceof Error ? err.message : String(err));
+          if (origin === 'reconnect' && wasConnected.current) {
+            scheduleRef.current(profileId);
+          } else {
+            manualDisconnect.current = true;
+            clearTimers();
+            setReconnect(null);
+          }
         });
     },
-    [bridge, legacyProfileOptions],
+    [bridge, clearTimers, legacyProfileOptions],
   );
 
   const scheduleReconnect = useCallback(
@@ -348,7 +451,7 @@ export function App() {
         reconnectTimer.current = null;
         reconnectScheduled.current = false;
         setReconnect(null);
-        doConnect(profileId);
+        doConnect(profileId, 'reconnect');
       }, delayMs);
       reconnectTimer.current = timer;
     },
@@ -364,6 +467,7 @@ export function App() {
       setError(event.error ?? null);
       if (event.state === 'connected') {
         connectInFlight.current = false;
+        connectionAttemptOrigin.current = null;
         wasConnected.current = true;
         attempts.current = 0;
         clearTimers();
@@ -371,14 +475,21 @@ export function App() {
       }
       if (event.state === 'error') {
         connectInFlight.current = false;
-        if (!manualDisconnect.current && wasConnected.current) {
+        if (shouldEnterReconnectFlow({
+          attemptOrigin: connectionAttemptOrigin.current,
+          manualDisconnect: manualDisconnect.current,
+          wasConnected: wasConnected.current,
+        })) {
           scheduleRef.current(event.profileId);
         }
       }
       if (
         event.state === 'disconnected' &&
-        !manualDisconnect.current &&
-        wasConnected.current
+        shouldEnterReconnectFlow({
+          attemptOrigin: connectionAttemptOrigin.current,
+          manualDisconnect: manualDisconnect.current,
+          wasConnected: wasConnected.current,
+        })
       ) {
         scheduleRef.current(event.profileId);
       }
@@ -412,6 +523,7 @@ export function App() {
 
   const handleDisconnect = () => {
     manualDisconnect.current = true;
+    connectionAttemptOrigin.current = null;
     wasConnected.current = false;
     connectInFlight.current = false;
     clearTimers();
@@ -434,7 +546,16 @@ export function App() {
     } catch {
       // The local session may already be gone. The UI should still leave the app shell.
     } finally {
+      deactivateUserStorage();
       setCurrentUser(null);
+      setWorkspace('agents');
+      setProfiles([]);
+      setLegacyProfileOptions([]);
+      setLegacyProfileStatuses(new Map());
+      setSelectedId(null);
+      setManagerOpen(false);
+      setCredentialPrompt(null);
+      setHostKeyPrompt(null);
       setAuthState('anonymous');
     }
   };
@@ -537,10 +658,7 @@ export function App() {
   if (authState === 'anonymous') {
     return (
       <LoginScreen
-        onAuthenticated={(user) => {
-          setCurrentUser(user);
-          setAuthState('authenticated');
-        }}
+        onAuthenticated={acceptAuthenticatedUser}
       />
     );
   }
@@ -579,7 +697,21 @@ export function App() {
         >
           ⚙
         </button>
-        <span className={`status status-${state}`}>{state}</span>
+        <span
+          className={`status suite-status status-${
+            suiteHealth === 'ready'
+              ? 'connected'
+              : suiteHealth === 'checking'
+                ? 'connecting'
+                : 'error'
+          }`}
+          title={suiteHealthDetail}
+        >
+          Services · {suiteHealth}
+        </span>
+        <span className={`status status-${state}`} title={`SSH · ${state}`}>
+          SSH · {state}
+        </span>
         <span className={`mode-tag${effectiveMockData ? ' mode-mock' : ' mode-ssh'}`}>
           {effectiveMockData ? 'MOCK 資料' : 'SSH'}
         </span>
@@ -595,7 +727,9 @@ export function App() {
         ) : (
           <button
             onClick={handleConnect}
-            disabled={!selectedProfile || state === 'connecting'}
+            disabled={
+              !selectedProfile || state === 'connecting' || suiteHealth !== 'ready'
+            }
           >
             {state === 'connecting' ? 'Connecting…' : 'Connect'}
           </button>
@@ -613,7 +747,7 @@ export function App() {
             onClick={() => {
               clearTimers();
               setReconnect(null);
-              if (selectedId !== null) doConnect(selectedId);
+              if (selectedId !== null) doConnect(selectedId, 'reconnect');
             }}
           >
             立即重連
@@ -632,7 +766,12 @@ export function App() {
       {error !== null && !reconnect ? <div className="error-banner">{error}</div> : null}
       <div className="shell">
         <nav className="nav-rail">
-          {NAV_ITEMS.map((item) => (
+          {NAV_ITEMS.filter((item) => {
+            if (item.id !== 'public') return true;
+            return currentUser?.capabilities?.some(
+              (capability) => capability === 'public.read' || capability === 'public.manage',
+            );
+          }).map((item) => (
             <button
               key={item.id}
               className={`nav-item${workspace === item.id ? ' nav-item-active' : ''}`}
@@ -691,15 +830,61 @@ export function App() {
               bridgeKind={bridge.kind}
               mockData={effectiveMockData}
               connected={state === 'connected'}
+              allowDeveloperTools={currentUser?.capabilities?.includes('developer.simulate-drop')}
             />
           </section>
         </main>
       </div>
       {managerOpen ? (
         <ConnectionManager
-          profiles={profiles}
+          profiles={profileOptions}
+          managedProfileIds={new Set(legacyProfileOptions.map((profile) => profile.id))}
+          managedProfileStatuses={legacyProfileStatuses}
           onClose={() => setManagerOpen(false)}
-          onChanged={refreshProfiles}
+          onChanged={() => Promise.all([refreshProfiles(), refreshLegacyProfiles()]).then(() => undefined)}
+          onImportSshConfig={
+            currentUser?.capabilities?.includes('ssh.import-system-config')
+              ? () => refreshLegacyProfiles(true)
+              : undefined
+          }
+          onSaveManagedProfile={async (profile) => {
+            if (profile.id) {
+              const updated = await updateLegacyServer(profile.id, {
+                name: profile.name,
+                host: profile.host,
+                user: profile.username,
+                port: profile.port,
+                defaultPath: '~',
+              });
+              if (selectedId === profile.id) rememberLastSelectedLegacyServerId(updated.id);
+              return { id: updated.id };
+            }
+            if (profile.authMethod !== 'password') {
+              throw new Error('Import private-key profiles through ~/.ssh/config. New managed profiles use a one-time SSH password to install a generated key.');
+            }
+            const created = await createLegacyServer({
+              name: profile.name,
+              host: profile.host,
+              user: profile.username,
+              port: profile.port,
+              password: profile.password,
+              defaultPath: '~',
+            });
+            rememberLastSelectedLegacyServerId(created.id);
+            return { id: created.id };
+          }}
+          onProvisionManagedProfile={async (profileId, password, expectedHostFingerprint) => {
+            const result = await provisionLegacyServer(profileId, {
+              password,
+              expectedHostFingerprint,
+            });
+            rememberLastSelectedLegacyServerId(result.server.id);
+          }}
+          onDeleteManagedProfile={async (profileId) => {
+            await deleteLegacyServer(profileId);
+            if (selectedId === profileId) rememberLastSelectedLegacyServerId('');
+          }}
+          mutationsDisabled={state === 'connected' || state === 'connecting'}
         />
       ) : null}
       {credentialPrompt ? (

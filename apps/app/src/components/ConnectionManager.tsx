@@ -5,12 +5,35 @@ import type {
   HostKeyPromptEvent,
 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
+import { validateConnectionFields } from './connectionManagerValidation';
+import { LegacyApiError, type LegacySshProvisioningStage } from '../workspaces/agents/legacySshApi';
 
 interface ConnectionManagerProps {
   profiles: ConnectionProfile[];
+  managedProfileIds?: ReadonlySet<string>;
+  managedProfileStatuses?: ReadonlyMap<string, string>;
   onClose(): void;
   onChanged(): void | Promise<void>;
+  onImportSshConfig?(): Promise<number>;
+  onSaveManagedProfile?(profile: ManagedConnectionProfileDraft): Promise<{ id: string }>;
+  onProvisionManagedProfile?(
+    profileId: string,
+    password: string,
+    expectedHostFingerprint?: string,
+  ): Promise<void>;
+  onDeleteManagedProfile?(profileId: string): Promise<void>;
+  mutationsDisabled?: boolean;
 }
+
+export type ManagedConnectionProfileDraft = {
+  id?: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: AuthenticationMethod;
+  password: string;
+};
 
 interface FormState {
   id?: string;
@@ -48,23 +71,110 @@ const hasCredential = (
     ? profile.hasPrivateKey === true
     : profile.hasPassword === true;
 
-export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionManagerProps) {
+function provisioningErrorMessage(error: unknown): string {
+  if (!(error instanceof LegacyApiError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const messages: Record<string, string> = {
+    HOST_UNREACHABLE: 'Cannot reach the SSH host. Check the host, port, VPN, and firewall, then retry.',
+    HOST_KEY_UNKNOWN: 'Confirm the SSH host fingerprint before continuing.',
+    HOST_KEY_CHANGED: 'The SSH host key changed. Verify it with the server administrator before retrying.',
+    SSH_AUTH_FAILED: 'SSH password authentication failed. Check the username and password, then retry.',
+    KEY_GENERATION_FAILED: 'Could not generate the local SSH key. Check local permissions and retry.',
+    KEY_INSTALL_FAILED: 'The key could not be installed remotely. No password was saved.',
+    KEY_VERIFICATION_FAILED: 'The key was installed but verification failed; CozyPad attempted rollback.',
+    PROFILE_COMMIT_FAILED: 'The SSH key worked, but the profile could not be saved; CozyPad attempted rollback.',
+    CLEANUP_FAILED: 'Provisioning failed and cleanup needs manual attention.',
+    DUPLICATE_PROFILE: 'This profile or provisioning operation already exists.',
+    INVALID_INPUT: 'Check the SSH profile fields and retry.',
+  };
+  const base = error.code ? messages[error.code] : '';
+  const cleanup = error.cleanup === 'required'
+    ? ' Remote cleanup is still required.'
+    : error.cleanup === 'complete'
+      ? ' Rollback completed.'
+      : '';
+  return `${base || error.message}${cleanup}`;
+}
+
+export function ConnectionManager({
+  profiles,
+  managedProfileIds = new Set<string>(),
+  managedProfileStatuses = new Map<string, string>(),
+  onClose,
+  onChanged,
+  onImportSshConfig,
+  onSaveManagedProfile,
+  onProvisionManagedProfile,
+  onDeleteManagedProfile,
+  mutationsDisabled = false,
+}: ConnectionManagerProps) {
   const bridge = getBridge();
   const [form, setForm] = useState<FormState | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [provisioningStage, setProvisioningStage] = useState<LegacySshProvisioningStage | null>(null);
+  const [pendingProvision, setPendingProvision] = useState<{
+    profileId: string;
+    password: string;
+    confirmation: { fingerprintSha256: string; host: string; port: number; keyType?: string };
+  } | null>(null);
 
   const set = (patch: Partial<FormState>) =>
     setForm((current) => (current ? { ...current, ...patch } : current));
 
-  const save = async () => {
+  const closeForm = () => {
+    setForm(null);
+    setError(null);
+    setProvisioningStage(null);
+    setPendingProvision(null);
+  };
+
+  const provision = async (profileId: string, password: string, expectedHostFingerprint?: string) => {
+    if (!onProvisionManagedProfile) return;
+    setBusy(true);
+    if (expectedHostFingerprint) setPendingProvision(null);
+    setProvisioningStage(expectedHostFingerprint ? 'generating-key' : 'verifying-host');
+    try {
+      await onProvisionManagedProfile(profileId, password, expectedHostFingerprint);
+      setProvisioningStage('ready');
+      await onChanged();
+      setPendingProvision(null);
+      setForm(null);
+    } catch (err: unknown) {
+      if (err instanceof LegacyApiError && err.code === 'HOST_KEY_UNKNOWN' && err.confirmation) {
+        await onChanged();
+        setProvisioningStage('verifying-host');
+        setPendingProvision({
+          profileId,
+          password,
+          confirmation: err.confirmation as {
+            fingerprintSha256: string;
+            host: string;
+            port: number;
+            keyType?: string;
+          },
+        });
+        return;
+      }
+      if (err instanceof LegacyApiError && err.stage) setProvisioningStage(err.stage);
+      await onChanged();
+      setError(provisioningErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async (connectAfterSave = false) => {
     if (!form) return;
-    const port = Number(form.port);
-    if (!form.name || !form.host || !form.username || !Number.isInteger(port)) {
-      setError('name / host / port / username 為必填');
+    const validationError = validateConnectionFields(form);
+    if (validationError) {
+      setError(validationError);
       return;
     }
+    const port = Number(form.port);
     const existing = form.id
       ? profiles.find((profile) => profile.id === form.id)
       : undefined;
@@ -82,7 +192,8 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
       form.authMethod === 'privateKey'
         ? form.privateKey.trim() !== ''
         : form.password !== '';
-    if (!suppliedCredential && !keepsExistingCredential) {
+    const editsManagedProfile = Boolean(form.id && managedProfileIds.has(form.id));
+    if (connectAfterSave && !suppliedCredential && !keepsExistingCredential && !editsManagedProfile) {
       setError(form.authMethod === 'privateKey' ? '請選取或貼上 SSH 私鑰' : '請輸入密碼');
       return;
     }
@@ -97,28 +208,46 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
     setBusy(true);
     setError(null);
     try {
-      await bridge.saveProfile({
-        ...(form.id === undefined ? {} : { id: form.id }),
-        name: form.name,
-        host: form.host,
-        port,
-        username: form.username,
-        authMethod: form.authMethod,
-        ...(form.authMethod !== 'password' || form.password === ''
-          ? {}
-          : { password: form.password }),
-        ...(form.authMethod !== 'privateKey' || form.privateKey.trim() === ''
-          ? {}
-          : {
-              privateKey: form.privateKey,
-              ...(form.passphrase === '' ? {} : { passphrase: form.passphrase }),
-            }),
-        rememberCredential: form.rememberCredential,
-      });
+      const managed = form.id === undefined || managedProfileIds.has(form.id);
+      if (managed && onSaveManagedProfile) {
+        const saved = await onSaveManagedProfile({
+          ...(form.id === undefined ? {} : { id: form.id }),
+          name: form.name.trim(),
+          host: form.host.trim(),
+          port,
+          username: form.username.trim(),
+          authMethod: form.authMethod,
+          password: form.password,
+        });
+        if (connectAfterSave) {
+          set({ id: saved.id });
+          await provision(saved.id, form.password);
+          return;
+        }
+      } else {
+        await bridge.saveProfile({
+          ...(form.id === undefined ? {} : { id: form.id }),
+          name: form.name.trim(),
+          host: form.host.trim(),
+          port,
+          username: form.username.trim(),
+          authMethod: form.authMethod,
+          ...(form.authMethod !== 'password' || form.password === ''
+            ? {}
+            : { password: form.password }),
+          ...(form.authMethod !== 'privateKey' || form.privateKey.trim() === ''
+            ? {}
+            : {
+                privateKey: form.privateKey,
+                ...(form.passphrase === '' ? {} : { passphrase: form.passphrase }),
+              }),
+          rememberCredential: form.rememberCredential,
+        });
+      }
       await onChanged();
       setForm(null);
     } catch (err: unknown) {
-      setError(String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -126,10 +255,32 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
 
   const remove = async (profileId: string) => {
     setBusy(true);
+    setError(null);
     try {
-      await bridge.deleteProfile({ profileId });
+      if (managedProfileIds.has(profileId) && onDeleteManagedProfile) {
+        await onDeleteManagedProfile(profileId);
+      } else {
+        await bridge.deleteProfile({ profileId });
+      }
       await onChanged();
       setConfirmDelete(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importSshConfig = async () => {
+    if (!onImportSshConfig) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const count = await onImportSshConfig();
+      setNotice(`Imported ${count} SSH host${count === 1 ? '' : 's'} from ~/.ssh/config.`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -137,7 +288,7 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
+      <div className="modal connection-manager-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <h2>連線管理</h2>
           <button className="modal-close" onClick={onClose}>
@@ -145,11 +296,24 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
           </button>
         </div>
 
+        <div className="connection-manager-body">
         {form === null ? (
           <>
+            {mutationsDisabled ? (
+              <p className="hint" role="status">
+                Disconnect SSH before importing, adding, editing, or deleting connection settings.
+              </p>
+            ) : null}
             <div className="profile-list">
               {profiles.map((profile) => (
-                <div key={profile.id} className="profile-row">
+                <div
+                  key={profile.id}
+                  className="profile-row"
+                  data-provisioning-status={managedProfileStatuses.get(profile.id)}
+                  title={managedProfileStatuses.get(profile.id)
+                    ? `SSH profile status: ${managedProfileStatuses.get(profile.id)}`
+                    : undefined}
+                >
                   <div className="profile-row-main">
                     <span className="profile-row-name">
                       {profile.name}
@@ -170,8 +334,15 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
                       {profile.username}@{profile.host}:{profile.port} ·{' '}
                       {profileAuthMethod(profile) === 'privateKey' ? 'Key' : 'Password'}
                     </span>
+                    {managedProfileStatuses.get(profile.id) ? (
+                      <span className="hint">Status · {managedProfileStatuses.get(profile.id)}</span>
+                    ) : null}
+                    {managedProfileIds.has(profile.id) ? (
+                      <span className="hint">SSH config · managed by the backend</span>
+                    ) : null}
                   </div>
                   <button
+                    disabled={mutationsDisabled}
                     onClick={() =>
                       setForm({
                         id: profile.id,
@@ -198,7 +369,7 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
                       確定刪除
                     </button>
                   ) : (
-                    <button onClick={() => setConfirmDelete(profile.id)}>刪除</button>
+                    <button disabled={mutationsDisabled} onClick={() => setConfirmDelete(profile.id)}>刪除</button>
                   )}
                 </div>
               ))}
@@ -206,7 +377,14 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
                 <p className="hint">還沒有連線，先新增一個。</p>
               ) : null}
             </div>
-            <button className="primary" onClick={() => setForm({ ...EMPTY_FORM })}>
+            {notice ? <p className="hint" role="status">{notice}</p> : null}
+            {error ? <p className="error-banner" role="alert">{error}</p> : null}
+            {onImportSshConfig ? (
+              <button disabled={busy || mutationsDisabled} onClick={() => void importSshConfig()}>
+                {busy ? 'Importing…' : 'Import ~/.ssh'}
+              </button>
+            ) : null}
+            <button className="primary" disabled={mutationsDisabled} onClick={() => setForm({ ...EMPTY_FORM })}>
               ＋ 新增連線
             </button>
           </>
@@ -321,14 +499,43 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
               以 OS 安全儲存保留驗證資料（關閉時只保留到 app 結束）
             </label>
             {error ? <p className="form-error">{error}</p> : null}
+            {provisioningStage ? (
+              <p className="hint" role="status">SSH provisioning · {provisioningStage}</p>
+            ) : null}
+            {pendingProvision ? (
+              <div className="hostkey-fp" role="alertdialog" aria-label="Confirm SSH host key">
+                <strong>Confirm this host before the password is sent</strong>
+                <span className="hint">
+                  {pendingProvision.confirmation.host}:{pendingProvision.confirmation.port} · SHA256
+                </span>
+                <code className="mono">{pendingProvision.confirmation.fingerprintSha256}</code>
+                <div className="form-actions">
+                  <button onClick={() => {
+                    setPendingProvision(null);
+                    setProvisioningStage(null);
+                  }}>Cancel</button>
+                  <button className="primary" onClick={() => void provision(
+                    pendingProvision.profileId,
+                    form?.password || pendingProvision.password,
+                    pendingProvision.confirmation.fingerprintSha256,
+                  )}>Trust &amp; continue</button>
+                </div>
+              </div>
+            ) : null}
             <div className="form-actions">
-              <button onClick={() => setForm(null)}>取消</button>
-              <button className="primary" disabled={busy} onClick={() => void save()}>
-                儲存
+              <button onClick={closeForm}>取消</button>
+              <button className="save-without-connect" disabled={busy} onClick={() => void save(false)}>
+                {form.id ? 'Save changes' : 'Save without connecting'}
               </button>
+              {form.authMethod === 'password' && onProvisionManagedProfile ? (
+                <button className="primary" disabled={busy} onClick={() => void save(true)}>
+                  Add &amp; Connect
+                </button>
+              ) : null}
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );
