@@ -43,6 +43,24 @@ function browserLocalStorage(): Storage | null {
   }
 }
 
+function normalizeBrowserStorageOwner(owner: string | null | undefined): string {
+  return (
+    String(owner || 'anonymous')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80) || 'anonymous'
+  );
+}
+
+function browserProfilesStorageKey(owner: string): string {
+  const normalizedOwner = normalizeBrowserStorageOwner(owner);
+  return normalizedOwner === 'anonymous'
+    ? V4_STORAGE_KEYS.connections.browserProfiles
+    : `${V4_STORAGE_KEYS.connections.browserProfiles}.${normalizedOwner}`;
+}
+
 function sanitizeStoredBrowserProfile(profile: ConnectionProfile): ConnectionProfile {
   return {
     ...profile,
@@ -53,11 +71,11 @@ function sanitizeStoredBrowserProfile(profile: ConnectionProfile): ConnectionPro
   };
 }
 
-function readStoredBrowserProfiles(): ConnectionProfile[] {
+function readStoredBrowserProfiles(owner: string): ConnectionProfile[] {
   const storage = browserLocalStorage();
   if (storage === null) return [];
   try {
-    const raw = storage.getItem(V4_STORAGE_KEYS.connections.browserProfiles);
+    const raw = storage.getItem(browserProfilesStorageKey(owner));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const profiles: ConnectionProfile[] = [];
@@ -72,7 +90,7 @@ function readStoredBrowserProfiles(): ConnectionProfile[] {
   }
 }
 
-function writeStoredBrowserProfiles(profiles: ConnectionProfile[]): void {
+function writeStoredBrowserProfiles(owner: string, profiles: ConnectionProfile[]): void {
   const storage = browserLocalStorage();
   if (storage === null) return;
   try {
@@ -80,12 +98,19 @@ function writeStoredBrowserProfiles(profiles: ConnectionProfile[]): void {
       .filter((profile) => profile.id !== MOCK_PROFILE.id)
       .map(sanitizeStoredBrowserProfile);
     storage.setItem(
-      V4_STORAGE_KEYS.connections.browserProfiles,
+      browserProfilesStorageKey(owner),
       JSON.stringify(serializable),
     );
   } catch {
     // Browser storage is best-effort.
   }
+}
+
+function nextBrowserProfileCounter(profiles: ConnectionProfile[]): number {
+  return profiles.reduce((maxId, profile) => {
+    const match = profile.id.match(/^mock-p(\d+)$/);
+    return match ? Math.max(maxId, Number(match[1]) + 1) : maxId;
+  }, 1);
 }
 
 const MOCK_TMUX_STATUS: TmuxStatus = {
@@ -107,6 +132,7 @@ function delay(ms: number): Promise<void> {
 export interface MockBridgeExtras {
   /** 模擬非預期斷線，供重連機制的 UI 驗證用。 */
   simulateDrop(): void;
+  setBrowserStorageOwner(owner: string | null): void;
 }
 
 /** 純瀏覽器模式的 PlatformBridge：讓 UI 開發完全不需要 Electron 或真實主機。 */
@@ -118,12 +144,13 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
   const terminals = new Map<string, MockPtyEngine>();
   const remoteFs = new MockRemoteFs();
   const telemetry = new MockTelemetryGenerator();
-  let profiles: ConnectionProfile[] = [MOCK_PROFILE, ...readStoredBrowserProfiles()];
+  let browserStorageOwner = normalizeBrowserStorageOwner(null);
+  let profiles: ConnectionProfile[] = [MOCK_PROFILE, ...readStoredBrowserProfiles(browserStorageOwner)];
   const passwords = new Map<string, string>([[MOCK_PROFILE.id, 'mock']]);
   const privateKeys = new Map<string, string>();
   let connectedProfileId: string | null = null;
   let nextTerminalId = 1;
-  let nextProfileId = 1;
+  let nextProfileId = nextBrowserProfileCounter(profiles);
   let remoteSettings: RemoteSettings = { tmuxMouseMode: true, tmuxSocket: 'default' };
   let fallbackClipboard = '';
 
@@ -145,8 +172,25 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
     terminals.clear();
   };
 
+  const resetCredentialsForOwner = (): void => {
+    passwords.clear();
+    passwords.set(MOCK_PROFILE.id, 'mock');
+    privateKeys.clear();
+  };
+
   return {
     kind: 'mock',
+
+    setBrowserStorageOwner(owner) {
+      const nextOwner = normalizeBrowserStorageOwner(owner);
+      if (nextOwner === browserStorageOwner) return;
+      closeAllTerminals();
+      connectedProfileId = null;
+      browserStorageOwner = nextOwner;
+      profiles = [MOCK_PROFILE, ...readStoredBrowserProfiles(browserStorageOwner)];
+      nextProfileId = nextBrowserProfileCounter(profiles);
+      resetCredentialsForOwner();
+    },
 
     getAppInfo: () => Promise.resolve({ mockData: true }),
 
@@ -175,7 +219,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
           (passwords.has(id) || privateKeys.has(id)),
       };
       profiles = [...profiles.filter((entry) => entry.id !== id), profile];
-      writeStoredBrowserProfiles(profiles);
+      writeStoredBrowserProfiles(browserStorageOwner, profiles);
       return Promise.resolve(profile);
     },
 
@@ -183,7 +227,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
       profiles = profiles.filter((profile) => profile.id !== profileId);
       passwords.delete(profileId);
       privateKeys.delete(profileId);
-      writeStoredBrowserProfiles(profiles);
+      writeStoredBrowserProfiles(browserStorageOwner, profiles);
       return Promise.resolve();
     },
 
@@ -207,7 +251,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
         profiles = [...profiles.filter((item) => item.id !== id), profile];
         importedIds.add(id);
       }
-      writeStoredBrowserProfiles(profiles);
+      writeStoredBrowserProfiles(browserStorageOwner, profiles);
       return Promise.resolve({
         source: request.sourcePath,
         imported: importedIds.size,

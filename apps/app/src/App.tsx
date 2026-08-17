@@ -273,6 +273,17 @@ export function App() {
   }, [refreshProfiles]);
 
   useEffect(() => {
+    if (bridge.kind !== 'mock') return;
+    const scopedBridge = bridge as typeof bridge & {
+      setBrowserStorageOwner?: (owner: string | null) => void;
+    };
+    scopedBridge.setBrowserStorageOwner?.(
+      authState === 'authenticated' ? currentUser?.username ?? null : null,
+    );
+    void refreshProfiles();
+  }, [authState, bridge, currentUser?.username, refreshProfiles]);
+
+  useEffect(() => {
     if (bridge.kind !== 'mock' || authState !== 'authenticated') {
       setLegacyServers([]);
       setLegacyProfileOptions([]);

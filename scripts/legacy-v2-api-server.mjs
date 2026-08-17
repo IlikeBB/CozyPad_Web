@@ -1894,18 +1894,17 @@ function getUserDataDir(session) {
   return path.join(DATA_DIR, "users", username);
 }
 
+function getUserScopedDataDir(session) {
+  const username = normalizeUsername(session?.username) || normalizeUsername(ADMIN_USERNAME);
+  return path.join(DATA_DIR, "users", username);
+}
+
 function getUserKnownHostsFile(session) {
   return path.join(getUserDataDir(session), "known_hosts");
 }
 
 function getProjectSshConfigFile(session) {
-  const username = normalizeUsername(session?.username);
-
-  if (!username || username === normalizeUsername(ADMIN_USERNAME)) {
-    return SSH_CONFIG_FILE;
-  }
-
-  return path.join(getUserDataDir(session), "ssh-config");
+  return path.join(getUserScopedDataDir(session), "ssh-config");
 }
 
 function stripSensitiveServerFields(server) {
@@ -4534,6 +4533,16 @@ async function ensureProjectSshConfigFile(session) {
 
   const username = normalizeUsername(session?.username);
   const canImportLegacyConfig = !username || username === normalizeUsername(ADMIN_USERNAME);
+
+  if (canImportLegacyConfig && configFile !== SSH_CONFIG_FILE && existsSync(SSH_CONFIG_FILE)) {
+    try {
+      const raw = await readFile(SSH_CONFIG_FILE, "utf8");
+      await writeFile(configFile, raw, "utf8");
+      return;
+    } catch {
+      // Fall through to the user's local OpenSSH config import.
+    }
+  }
 
   if (!canImportLegacyConfig) {
     await writeFile(

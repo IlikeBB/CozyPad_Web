@@ -112,6 +112,42 @@ describe('createMockBridge', () => {
     });
   });
 
+  it('keeps imported SSH config profiles isolated per browser user scope', async () => {
+    vi.stubGlobal('window', { localStorage: createMemoryStorage() });
+
+    const aliceBridge = createMockBridge();
+    aliceBridge.setBrowserStorageOwner('alice');
+    await aliceBridge.importSshConfig({
+      rawConfig: [
+        'Host alice-box',
+        '  HostName 10.0.0.10',
+        '  User alice',
+      ].join('\n'),
+      sourcePath: 'alice-config',
+    });
+
+    const bobBridge = createMockBridge();
+    bobBridge.setBrowserStorageOwner('bob');
+    expect((await bobBridge.listProfiles()).some((profile) => profile.id === 'ssh-config:alice-box')).toBe(
+      false,
+    );
+
+    await bobBridge.importSshConfig({
+      rawConfig: [
+        'Host bob-box',
+        '  HostName 10.0.0.20',
+        '  User bob',
+      ].join('\n'),
+      sourcePath: 'bob-config',
+    });
+
+    const aliceRefresh = createMockBridge();
+    aliceRefresh.setBrowserStorageOwner('alice');
+    const aliceProfiles = await aliceRefresh.listProfiles();
+    expect(aliceProfiles.some((profile) => profile.id === 'ssh-config:alice-box')).toBe(true);
+    expect(aliceProfiles.some((profile) => profile.id === 'ssh-config:bob-box')).toBe(false);
+  });
+
   it('walks connecting → connected on connect', async () => {
     const bridge = createMockBridge();
     const states: ConnectionStateChanged['state'][] = [];
