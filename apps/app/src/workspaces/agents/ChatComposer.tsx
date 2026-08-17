@@ -23,6 +23,7 @@ interface ChatComposerProps {
   onSend(text: string): void;
   onAttach?(): void;
   onFilesAttached?(files: File[]): void;
+  onLargeTextPaste?(text: string): boolean;
   onRemoveAttachment?(id: string): void;
 }
 
@@ -40,6 +41,7 @@ export function ChatComposer({
   onAttach,
   showAttachButton = Boolean(onAttach),
   onFilesAttached,
+  onLargeTextPaste,
   onRemoveAttachment,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -134,8 +136,12 @@ export function ChatComposer({
             <div className="composer-attachment" key={attachment.id}>
               {attachment.previewUrl ? (
                 <img src={attachment.previewUrl} alt={attachment.name} />
-              ) : null}
-              <span>{attachment.name}</span>
+              ) : (
+                <span className="composer-text-file-icon" aria-hidden="true">TXT</span>
+              )}
+              <span title={`${attachment.name} · ${attachment.size.toLocaleString()} bytes`}>
+                {attachment.name}
+              </span>
               <button
                 type="button"
                 title="移除附件"
@@ -156,6 +162,11 @@ export function ChatComposer({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           onPaste={(event) => {
+            const pastedText = event.clipboardData.getData('text/plain');
+            if (pastedText && onLargeTextPaste?.(pastedText)) {
+              event.preventDefault();
+              return;
+            }
             if (addFiles(event.clipboardData.files)) {
               event.preventDefault();
             }

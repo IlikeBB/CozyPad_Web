@@ -14,6 +14,7 @@ import {
   linkifyRemotePathLines,
 } from '../../components/markdownComponents';
 import { createLegacyWebSocketUrl } from '../../platform/legacyApiRoutes';
+import { userStorage } from '../../platform/userStorage';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
 import { EditSentMessageDialog } from './EditSentMessageDialog';
@@ -24,6 +25,16 @@ import {
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
 import { commonAgentSlashCommands } from './slashCommands';
+import {
+  CODEX_PASTED_TEXT_MAX_ATTACHMENTS,
+  CODEX_PASTED_TEXT_MAX_BYTES,
+  appendPastedTextFiles,
+  createPastedTextAttachment,
+  pastedTextFallbackPrompt,
+  pastedTextTranscript,
+  shouldConvertPastedText,
+  type CodexPastedTextAttachment,
+} from './codexPastedText';
 import {
   createLegacyCodexHistory,
   deleteLegacyCodexWorkflow,
@@ -118,6 +129,8 @@ type SendPayload = {
 type StartTaskOptions = {
   title?: string;
   remotePath?: string;
+  displayPrompt?: string;
+  transcriptPrompt?: string;
 };
 
 type CodexImageAttachment = ChatComposerAttachment & {
@@ -257,7 +270,7 @@ function parseStandaloneCwdChangeRequest(prompt: string): string {
 
 function readStoredCodexModel(): string {
   try {
-    return normalizeCodexModel(window.localStorage.getItem(CODEX_MODEL_STORAGE_KEY) || '');
+    return normalizeCodexModel(userStorage.getItem(CODEX_MODEL_STORAGE_KEY) || '');
   } catch {
     return '';
   }
@@ -266,7 +279,7 @@ function readStoredCodexModel(): string {
 function readStoredCodexReasoningEffort(): LegacyCodexReasoningEffort {
   try {
     return normalizeCodexReasoningEffort(
-      window.localStorage.getItem(CODEX_EFFORT_STORAGE_KEY) || '',
+      userStorage.getItem(CODEX_EFFORT_STORAGE_KEY) || '',
     );
   } catch {
     return '';
@@ -275,7 +288,7 @@ function readStoredCodexReasoningEffort(): LegacyCodexReasoningEffort {
 
 function readStoredComposerDraft(): string {
   try {
-    return window.localStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) || '';
+    return userStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) || '';
   } catch {
     return '';
   }
@@ -284,9 +297,9 @@ function readStoredComposerDraft(): string {
 function writeStoredComposerDraft(value: string): void {
   try {
     if (value.trim()) {
-      window.localStorage.setItem(COMPOSER_DRAFT_STORAGE_KEY, value);
+      userStorage.setItem(COMPOSER_DRAFT_STORAGE_KEY, value);
     } else {
-      window.localStorage.removeItem(COMPOSER_DRAFT_STORAGE_KEY);
+      userStorage.removeItem(COMPOSER_DRAFT_STORAGE_KEY);
     }
   } catch {
     // Browser storage is best-effort.
@@ -592,7 +605,7 @@ function isResearchOnlyCodexTask(task: Pick<CodexTask, 'id' | 'title' | 'prompt'
 
 function readStoredTasks(): CodexTask[] {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = userStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const tasks = parsed
@@ -635,7 +648,7 @@ function writeStoredTasks(tasks: CodexTask[]): void {
         status: task.running ? 'running' : task.status,
         output: task.output.slice(-MAX_OUTPUT_LENGTH),
       }));
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+    userStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     window.dispatchEvent(new Event(RESEARCH_REFRESH_EVENT));
   } catch {
     // Codex task restore is best-effort browser state.
@@ -1587,6 +1600,7 @@ export function LegacyCodexPanel({
   const [cwdInput, setCwdInput] = useState('~');
   const [composerText, setComposerText] = useState(() => readStoredComposerDraft());
   const [imageAttachments, setImageAttachments] = useState<CodexImageAttachment[]>([]);
+  const [pastedTextAttachments, setPastedTextAttachments] = useState<CodexPastedTextAttachment[]>([]);
   const [creatingNewTask, setCreatingNewTask] = useState(false);
   const [taskFilter, setTaskFilter] = useState('');
   const [loadingWorkflows, setLoadingWorkflows] = useState(false);
@@ -1612,6 +1626,7 @@ export function LegacyCodexPanel({
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dialogueScrollRef = useRef<HTMLDivElement>(null);
   const imageAttachmentsRef = useRef<CodexImageAttachment[]>([]);
+  const pastedTextAttachmentsRef = useRef<CodexPastedTextAttachment[]>([]);
   const composerTextRef = useRef(composerText);
   const drainingTrainingQueueRef = useRef(false);
 
@@ -1711,8 +1726,8 @@ export function LegacyCodexPanel({
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(CODEX_MODEL_STORAGE_KEY, codexRunOptions.model);
-      window.localStorage.setItem(CODEX_EFFORT_STORAGE_KEY, codexRunOptions.reasoningEffort);
+      userStorage.setItem(CODEX_MODEL_STORAGE_KEY, codexRunOptions.model);
+      userStorage.setItem(CODEX_EFFORT_STORAGE_KEY, codexRunOptions.reasoningEffort);
     } catch {
       // Browser storage is best effort.
     }
@@ -1721,6 +1736,10 @@ export function LegacyCodexPanel({
   useEffect(() => {
     imageAttachmentsRef.current = imageAttachments;
   }, [imageAttachments]);
+
+  useEffect(() => {
+    pastedTextAttachmentsRef.current = pastedTextAttachments;
+  }, [pastedTextAttachments]);
 
   useEffect(() => {
     composerTextRef.current = composerText;
@@ -1907,6 +1926,31 @@ export function LegacyCodexPanel({
       return current.filter((image) => image.id !== imageId);
     });
   }, []);
+
+  const addPastedText = useCallback((text: string): boolean => {
+    if (!shouldConvertPastedText(text)) return false;
+    const attachment = createPastedTextAttachment(text);
+    if (attachment.size > CODEX_PASTED_TEXT_MAX_BYTES) {
+      setHelperError('Pasted text is larger than 1 MB. Save it as a file and open it from the File panel.');
+      return true;
+    }
+    if (pastedTextAttachmentsRef.current.length >= CODEX_PASTED_TEXT_MAX_ATTACHMENTS) {
+      setHelperError(`A prompt can contain at most ${CODEX_PASTED_TEXT_MAX_ATTACHMENTS} pasted-text files.`);
+      return true;
+    }
+    setPastedTextAttachments((current) => [...current, attachment]);
+    setHelperError('');
+    return true;
+  }, []);
+
+  const removeComposerAttachment = useCallback((attachmentId: string) => {
+    if (imageAttachmentsRef.current.some((attachment) => attachment.id === attachmentId)) {
+      removeImageAttachment(attachmentId);
+      return;
+    }
+    setPastedTextAttachments((current) =>
+      current.filter((attachment) => attachment.id !== attachmentId));
+  }, [removeImageAttachment]);
 
   const addImageFiles = useCallback(async (files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith('image/'));
@@ -2205,6 +2249,8 @@ export function LegacyCodexPanel({
   ) => {
     const prompt = promptText.trim() || (images.length > 0 ? '請根據附上的圖片進行協助。' : '');
     if (!prompt || !codexReady) return false;
+    const displayPrompt = options.displayPrompt?.trim() || prompt;
+    const visibleTranscriptPrompt = options.transcriptPrompt?.trim() || displayPrompt;
     if (!legacyServer) {
       setHelperError('請先選擇 SSH server。');
       return false;
@@ -2222,8 +2268,8 @@ export function LegacyCodexPanel({
     }
     const now = new Date().toISOString();
     const attachmentPayload = payloadFromImages(images);
-    const transcriptPrompt = formatPromptForTranscript(prompt, attachmentPayload);
-    const title = options.title?.trim() || titleFromPrompt(prompt || images[0]?.name || '圖片任務');
+    const transcriptPrompt = formatPromptForTranscript(visibleTranscriptPrompt, attachmentPayload);
+    const title = options.title?.trim() || titleFromPrompt(displayPrompt || images[0]?.name || '圖片任務');
     let historyId = '';
     try {
       const history = await createLegacyCodexHistory(legacyServer.id, title);
@@ -2238,7 +2284,7 @@ export function LegacyCodexPanel({
     const task: CodexTask = {
       id: createTaskId(),
       title,
-      prompt,
+      prompt: displayPrompt,
       output: `${USER_TRANSCRIPT_MARKER}\n${transcriptPrompt}\n${CODEX_TRANSCRIPT_MARKER}\n[CozyPad] codex started; opening stream\n`,
       status: 'running',
       running: true,
@@ -2287,7 +2333,7 @@ export function LegacyCodexPanel({
     ) {
       return;
     }
-    if (composerTextRef.current.trim()) {
+    if (composerTextRef.current.trim() || pastedTextAttachmentsRef.current.length) {
       return;
     }
 
@@ -2328,9 +2374,16 @@ export function LegacyCodexPanel({
     }
   }, [composerText, drainQueuedTrainingTasks]);
 
-  const continueTask = async (promptText: string, images: CodexImageAttachment[] = []) => {
+  const continueTask = async (
+    promptText: string,
+    images: CodexImageAttachment[] = [],
+    displayPromptText = promptText,
+    transcriptPromptText = displayPromptText,
+  ) => {
     const prompt = promptText.trim() || (images.length > 0 ? '請根據附上的圖片進行協助。' : '');
     if (!prompt || !activeTask || !codexReady) return false;
+    const displayPrompt = displayPromptText.trim() || prompt;
+    const visibleTranscriptPrompt = transcriptPromptText.trim() || displayPrompt;
     if (!legacyServer) {
       setHelperError('請先選擇 SSH server。');
       return false;
@@ -2364,7 +2417,7 @@ export function LegacyCodexPanel({
       }
     }
     const attachmentPayload = payloadFromImages(images);
-    const transcriptPrompt = formatPromptForTranscript(prompt, attachmentPayload);
+    const transcriptPrompt = formatPromptForTranscript(visibleTranscriptPrompt, attachmentPayload);
     const taskRemotePath = normalizeRemotePath(cwdInput || activeTask.remotePath || legacyServer.defaultPath || '~');
     const payload: SendPayload = {
       prompt,
@@ -2377,7 +2430,7 @@ export function LegacyCodexPanel({
       ...task,
       running: true,
       status: 'running',
-      prompt,
+      prompt: displayPrompt,
       remotePath: taskRemotePath,
       model: codexRunOptions.model,
       reasoningEffort: codexRunOptions.reasoningEffort,
@@ -2402,11 +2455,18 @@ export function LegacyCodexPanel({
   };
 
   const sendComposerText = async (text: string) => {
-    const attachments = imageAttachmentsRef.current;
-    const ok = activeTask ? await continueTask(text, attachments) : await startTask(text, attachments);
+    const imageFiles = imageAttachmentsRef.current;
+    const textFiles = pastedTextAttachmentsRef.current;
+    const displayPrompt = text.trim() || pastedTextFallbackPrompt(textFiles);
+    const wirePrompt = appendPastedTextFiles(displayPrompt, textFiles);
+    const transcriptPrompt = pastedTextTranscript(displayPrompt, textFiles);
+    const ok = activeTask
+      ? await continueTask(wirePrompt, imageFiles, displayPrompt, transcriptPrompt)
+      : await startTask(wirePrompt, imageFiles, { displayPrompt, transcriptPrompt });
     if (ok) {
       setComposerText('');
       clearImageAttachments();
+      setPastedTextAttachments([]);
     }
   };
 
@@ -2667,7 +2727,7 @@ export function LegacyCodexPanel({
             agentLabel="Codex"
             value={composerText}
             commands={commonAgentSlashCommands}
-            attachments={imageAttachments}
+            attachments={[...imageAttachments, ...pastedTextAttachments]}
             disabled={!codexReady || loadingWorkflows}
             attachDisabled={false}
             attachTitle="新增 Codex 工作"
@@ -2688,7 +2748,8 @@ export function LegacyCodexPanel({
             onChange={setComposerText}
             onSend={(text) => void sendComposerText(text)}
             onFilesAttached={(files) => void addImageFiles(files)}
-            onRemoveAttachment={removeImageAttachment}
+            onLargeTextPaste={addPastedText}
+            onRemoveAttachment={removeComposerAttachment}
           />
         </section>
 
@@ -2757,23 +2818,22 @@ export function LegacyCodexPanel({
                 ))}
               </select>
             </label>
-            <div className="legacy-codex-setting">
+            <label className="legacy-codex-setting">
               <span>Effort</span>
-              <div className="legacy-codex-segmented" role="group" aria-label="Codex effort">
+              <select
+                aria-label="Codex effort"
+                value={codexRunOptions.reasoningEffort}
+                onChange={(event) => setCodexReasoningEffort(
+                  event.target.value as LegacyCodexReasoningEffort,
+                )}
+              >
                 {CODEX_EFFORT_OPTIONS.map((option) => (
-                  <button
-                    className={
-                      option.value === codexRunOptions.reasoningEffort ? 'active' : undefined
-                    }
-                    type="button"
-                    key={option.value || 'auto'}
-                    onClick={() => setCodexReasoningEffort(option.value)}
-                  >
+                  <option value={option.value} key={option.value || 'auto'}>
                     {option.label}
-                  </button>
+                  </option>
                 ))}
-              </div>
-            </div>
+              </select>
+            </label>
           </div>
           <h3>Workflow</h3>
           <p className="hint">

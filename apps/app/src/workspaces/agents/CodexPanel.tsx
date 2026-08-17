@@ -5,8 +5,6 @@ import { LegacyCodexPanel } from './LegacyCodexPanel';
 import { getCodexAppServerStatus } from './codexAppServerClient';
 import type { LegacySshServer } from './legacySshApi';
 
-const AUTO_OPT_IN_KEY = 'cozypad.codexAppServer.autoOptIn.v1';
-
 export function CodexPanel({
   selectedProfile,
   connected,
@@ -23,24 +21,23 @@ export function CodexPanel({
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const serverId = legacyServer?.id || selectedProfile?.id || '';
-  const [useAppServer, setUseAppServer] = useState(false);
+  const [useAppServer, setUseAppServer] = useState(true);
   const [forcedLegacy, setForcedLegacy] = useState(false);
 
   useEffect(() => {
     setForcedLegacy(false);
-    setUseAppServer(false);
+    setUseAppServer(true);
     if (!serverId) return;
     let active = true;
     void getCodexAppServerStatus(serverId)
       .then((status) => {
         if (!active) return;
-        const autoOptIn = window.localStorage.getItem(AUTO_OPT_IN_KEY) === 'true';
-        setUseAppServer(
-          status.enabled && (status.mode === 'app-server' || (status.mode === 'auto' && autoOptIn)),
-        );
+        setUseAppServer(status.enabled && status.mode !== 'legacy');
       })
       .catch(() => {
-        if (active) setUseAppServer(false);
+        // Keep the structured Codex UI visible while disconnected or while the
+        // backend status endpoint is temporarily unavailable.
+        if (active) setUseAppServer(true);
       });
     return () => {
       active = false;

@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { ConnectionProfile } from '@cozypad/contracts';
+import { userStorage } from '../../platform/userStorage';
 import {
   createMarkdownComponents,
   linkifyRemotePathLines,
@@ -48,11 +49,29 @@ import {
   normalizeCodexSkills,
   type CodexSkill,
 } from './codexSkillManager';
+import {
+  CODEX_PASTED_TEXT_MAX_ATTACHMENTS,
+  CODEX_PASTED_TEXT_MAX_BYTES,
+  createPastedTextAttachment,
+  pastedTextFallbackPrompt,
+  pastedTextInputItems,
+  shouldConvertPastedText,
+  type CodexPastedTextAttachment,
+} from './codexPastedText';
 
 type ThreadListResponse = { data?: CodexThreadSummary[] };
 type ThreadResponse = {
   thread?: CodexThreadSummary;
   instructionSources?: string[];
+  model?: string;
+  modelProvider?: string;
+  reasoningEffort?: string | null;
+};
+type ConfirmedThreadRuntime = {
+  threadId: string;
+  model: string;
+  modelProvider: string;
+  effort: string;
 };
 type InstructionRule = { path: string; content: string };
 type FsReadFileResponse = { dataBase64?: string };
@@ -75,6 +94,11 @@ type ThreadGoal = {
   timeUsedSeconds?: number;
 };
 type ThreadGoalResponse = { goal?: ThreadGoal | null };
+type ThreadContextMenu = {
+  thread: CodexThreadSummary;
+  x: number;
+  y: number;
+};
 type ReviewPermissionMode = 'ask' | 'autoReview' | 'fullAccess';
 type ReviewPermissionSettings = {
   approvalPolicy: 'on-request' | 'never';
@@ -161,7 +185,7 @@ function tokenUsageStorageKey(serverId: string, threadId: string): string {
 function readTokenUsage(serverId: string, threadId: string): CodexTokenUsage | null {
   if (!serverId || !threadId) return null;
   try {
-    const value = window.localStorage.getItem(tokenUsageStorageKey(serverId, threadId));
+    const value = userStorage.getItem(tokenUsageStorageKey(serverId, threadId));
     return value ? codexTokenUsageFrom(JSON.parse(value)) : null;
   } catch {
     return null;
@@ -174,7 +198,7 @@ function rememberTokenUsage(
   tokenUsage: CodexTokenUsage,
 ): void {
   if (!serverId || !threadId) return;
-  window.localStorage.setItem(
+  userStorage.setItem(
     tokenUsageStorageKey(serverId, threadId),
     JSON.stringify(tokenUsage),
   );
@@ -182,7 +206,7 @@ function rememberTokenUsage(
 
 function readGoalPolicy(): ManagedGoalPolicy {
   try {
-    const value = window.localStorage.getItem(CODEX_GOAL_POLICY_STORAGE_KEY);
+    const value = userStorage.getItem(CODEX_GOAL_POLICY_STORAGE_KEY);
     return normalizeManagedGoalPolicy(value ? JSON.parse(value) : DEFAULT_MANAGED_GOAL_POLICY);
   } catch {
     return DEFAULT_MANAGED_GOAL_POLICY;
@@ -196,7 +220,7 @@ function goalRuntimeStorageKey(serverId: string, threadId: string): string {
 function readGoalRuntime(serverId: string, threadId: string): ManagedGoalRuntime | null {
   if (!serverId || !threadId) return null;
   try {
-    const value = window.localStorage.getItem(goalRuntimeStorageKey(serverId, threadId));
+    const value = userStorage.getItem(goalRuntimeStorageKey(serverId, threadId));
     return value ? JSON.parse(value) as ManagedGoalRuntime : null;
   } catch {
     return null;
@@ -210,8 +234,8 @@ function rememberGoalRuntime(
 ): void {
   if (!serverId || !threadId) return;
   const key = goalRuntimeStorageKey(serverId, threadId);
-  if (runtime) window.localStorage.setItem(key, JSON.stringify(runtime));
-  else window.localStorage.removeItem(key);
+  if (runtime) userStorage.setItem(key, JSON.stringify(runtime));
+  else userStorage.removeItem(key);
 }
 
 function isMissingRolloutError(error: unknown): boolean {
@@ -260,7 +284,15 @@ function itemTitle(item: CodexThreadItem): string {
   }
 }
 
-function readableItemText(item: CodexThreadItem): string {
+function markdownCodeBlock(value: unknown, language = ''): string {
+  const text = String(value || '').trimEnd();
+  if (!text) return '';
+  const longestFence = Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longestFence + 1));
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+
+export function readableItemText(item: CodexThreadItem): string {
   if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') {
     return String(item.review || 'Code review');
   }
@@ -273,6 +305,29 @@ function readableItemText(item: CodexThreadItem): string {
         }).filter(Boolean)
       : [];
     return [...summary, ...content, String(item.text || '')].filter(Boolean).join('\n\n');
+  }
+  if (item.type === 'commandExecution') {
+    const exitCode = item.exitCode ?? item.exit_code;
+    return [
+      item.command ? `**Command**\n\n${markdownCodeBlock(item.command, 'shell')}` : '',
+      item.cwd ? `**Working directory:** ${String(item.cwd)}` : '',
+      item.status ? `**Status:** ${String(item.status)}` : '',
+      exitCode !== undefined && exitCode !== null ? `**Exit code:** ${String(exitCode)}` : '',
+      item.aggregatedOutput
+        ? `**Output**\n\n${markdownCodeBlock(item.aggregatedOutput, 'text')}`
+        : '',
+    ].filter(Boolean).join('\n\n');
+  }
+  if (item.type === 'fileChange') {
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    return changes.map((change) => {
+      const value = change && typeof change === 'object'
+        ? change as Record<string, unknown>
+        : {};
+      const operation = String(value.kind || value.type || value.status || 'Changed');
+      const path = String(value.path || value.filePath || value.file || '').trim();
+      return path ? `${operation}: ${path}` : operation;
+    }).filter(Boolean).join('\n');
   }
   if (item.type === 'mcpToolCall') {
     return [
@@ -293,6 +348,241 @@ function readableItemText(item: CodexThreadItem): string {
       .join('\n\n');
   }
   return String(item.text || '');
+}
+
+export function visibleCodexActivityItems(items: CodexThreadItem[]): CodexThreadItem[] {
+  return items.filter((item) => {
+    if (item.type === 'commandExecution') {
+      return Boolean(
+        String(item.command || '').trim()
+        || String(item.cwd || '').trim()
+        || String(item.status || '').trim()
+        || item.exitCode !== undefined
+        || item.exit_code !== undefined
+        || String(item.aggregatedOutput || '').trim(),
+      );
+    }
+    if (item.type === 'reasoning') {
+      const summary = Array.isArray(item.summary) ? item.summary : [];
+      const content = Array.isArray(item.content) ? item.content : [];
+      return Boolean(
+        String(item.text || '').trim()
+        || summary.some((entry) => String(entry || '').trim())
+        || content.some((entry) => {
+          const value = entry && typeof entry === 'object'
+            ? entry as Record<string, unknown>
+            : {};
+          return Boolean(String(value.text || value.summary || '').trim());
+        }),
+      );
+    }
+    if (item.type === 'fileChange') return Array.isArray(item.changes) && item.changes.length > 0;
+    if (item.type === 'mcpToolCall') {
+      return Boolean(item.server || item.arguments || item.result || item.error);
+    }
+    if (item.type === 'webSearch') return Boolean(item.query || item.results);
+    if (item.type === 'collabToolCall') return Boolean(item.prompt || item.agentStatus);
+    if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') return true;
+    return Boolean(String(item.text || '').trim());
+  });
+}
+
+const CODEX_ACTIVITY_SUMMARY_CHARS = 220;
+const CODEX_FOLLOW_LATEST_THRESHOLD_PX = 48;
+
+function compactActivitySummary(value: unknown): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= CODEX_ACTIVITY_SUMMARY_CHARS) return text;
+  return `${text.slice(0, CODEX_ACTIVITY_SUMMARY_CHARS - 1)}…`;
+}
+
+export function codexActivitySummary(item: CodexThreadItem): string {
+  if (item.type === 'commandExecution') {
+    const command = compactActivitySummary(item.command);
+    const status = compactActivitySummary(item.status);
+    if (command && status) return compactActivitySummary(`${status} · ${command}`);
+    return command || status || 'Command output';
+  }
+  return compactActivitySummary(readableItemText(item));
+}
+
+export function codexActivityKindLabel(item: CodexThreadItem, running = false): string {
+  if (item.type === 'commandExecution') return running ? 'Running command' : 'Command';
+  if (item.type === 'fileChange') return running ? 'Editing files' : 'File changes';
+  if (item.type === 'reasoning') return running ? 'Thinking' : 'Reasoning';
+  if (item.type === 'webSearch') return running ? 'Searching' : 'Web search';
+  if (item.type === 'mcpToolCall') return running ? 'Using tool' : 'Tool call';
+  if (item.type === 'collabToolCall') return running ? 'Coordinating' : 'Agent activity';
+  if (item.type === 'enteredReviewMode' || item.type === 'exitedReviewMode') return 'Review';
+  return running ? 'Working' : 'Codex activity';
+}
+
+export type CodexExecutionSnapshot = {
+  label: string;
+  detail: string;
+  tone: 'idle' | 'running' | 'waiting' | 'success' | 'error' | 'offline';
+  active: boolean;
+  commands: number;
+  files: number;
+  tools: number;
+};
+
+export function codexExecutionSnapshot({
+  items,
+  turnStatus,
+  busy,
+  approvalCount,
+  connected,
+  runtimeStatus,
+}: {
+  items: CodexThreadItem[];
+  turnStatus: string;
+  busy: boolean;
+  approvalCount: number;
+  connected: boolean;
+  runtimeStatus?: CodexAppServerRuntimeStatus['status'];
+}): CodexExecutionSnapshot {
+  let startIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.type === 'userMessage') {
+      startIndex = index;
+      break;
+    }
+  }
+  const roundItems = items.slice(startIndex + 1);
+  const activityItems = visibleCodexActivityItems(roundItems);
+  const latest = activityItems[activityItems.length - 1];
+  const commands = roundItems.filter((item) => item.type === 'commandExecution').length;
+  const files = roundItems
+    .filter((item) => item.type === 'fileChange')
+    .reduce((count, item) => count + (Array.isArray(item.changes) ? item.changes.length : 0), 0);
+  const tools = roundItems.filter((item) =>
+    item.type === 'mcpToolCall' || item.type === 'webSearch' || item.type === 'collabToolCall').length;
+  const active = busy || /progress|running/i.test(turnStatus);
+  const base = { active, commands, files, tools };
+
+  if (!connected) {
+    return { ...base, active: false, label: 'SSH disconnected', detail: 'Connect SSH before starting Codex.', tone: 'offline' };
+  }
+  if (runtimeStatus !== 'ready') {
+    return {
+      ...base,
+      active: false,
+      label: runtimeStatus === 'reconnecting' ? 'Runtime reconnecting' : 'Runtime unavailable',
+      detail: 'Codex app-server is not ready to accept work.',
+      tone: runtimeStatus === 'reconnecting' || runtimeStatus === 'starting' ? 'waiting' : 'error',
+    };
+  }
+  if (approvalCount > 0) {
+    return {
+      ...base,
+      label: 'Waiting for approval',
+      detail: `${approvalCount} request${approvalCount === 1 ? '' : 's'} need your response.`,
+      tone: 'waiting',
+    };
+  }
+  if (/fail|error/i.test(turnStatus)) {
+    return { ...base, active: false, label: 'Turn failed', detail: 'Open the latest activity for the error details.', tone: 'error' };
+  }
+  if (/interrupt|cancel/i.test(turnStatus)) {
+    return { ...base, active: false, label: 'Interrupted', detail: 'The current Codex turn was stopped.', tone: 'error' };
+  }
+  if (!active) {
+    return {
+      ...base,
+      label: /complete|success/i.test(turnStatus) ? 'Turn completed' : 'Ready',
+      detail: latest ? `Last confirmed: ${codexActivitySummary(latest)}` : 'No Codex turn is running.',
+      tone: /complete|success/i.test(turnStatus) ? 'success' : 'idle',
+    };
+  }
+  if (!latest) {
+    return { ...base, label: 'Starting Codex', detail: 'Waiting for the first app-server event.', tone: 'running' };
+  }
+  if (latest.type === 'commandExecution') {
+    const commandRunning = /progress|running/i.test(String(latest.status || ''));
+    return {
+      ...base,
+      label: commandRunning ? 'Running command' : 'Command finished',
+      detail: compactActivitySummary(latest.command || latest.aggregatedOutput || 'Command activity'),
+      tone: 'running',
+    };
+  }
+  if (latest.type === 'fileChange') {
+    return { ...base, label: 'Files changed', detail: codexActivitySummary(latest), tone: 'running' };
+  }
+  return {
+    ...base,
+    label: codexActivityKindLabel(latest, true),
+    detail: codexActivitySummary(latest) || 'Codex is working.',
+    tone: 'running',
+  };
+}
+
+function formatCodexDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes ? `${minutes}:${String(remainder).padStart(2, '0')}` : `${remainder}s`;
+}
+
+const CodexExecutionStrip = memo(function CodexExecutionStrip({
+  snapshot,
+  runtimeStatus,
+  turnStartedAt,
+  lastActivityAt,
+}: {
+  snapshot: CodexExecutionSnapshot;
+  runtimeStatus?: CodexAppServerRuntimeStatus['status'];
+  turnStartedAt: number | null;
+  lastActivityAt: number | null;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!snapshot.active) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [snapshot.active, lastActivityAt, turnStartedAt]);
+  const eventAge = lastActivityAt === null ? null : Math.max(0, now - lastActivityAt);
+  const elapsed = turnStartedAt === null ? null : Math.max(0, now - turnStartedAt);
+
+  return (
+    <section className="codex-execution-strip" data-tone={snapshot.tone} aria-live="polite">
+      <span className="codex-execution-indicator" aria-hidden="true" />
+      <div className="codex-execution-current">
+        <strong>{snapshot.label}</strong>
+        <span title={snapshot.detail}>{snapshot.detail}</span>
+      </div>
+      <div className="codex-execution-metrics">
+        <span title="Codex app-server connection">CLI · {runtimeStatus || 'stopped'}</span>
+        {elapsed !== null ? <span title="Elapsed turn time">Time · {formatCodexDuration(elapsed)}</span> : null}
+        {eventAge !== null ? (
+          <span title="Time since the latest app-server event">
+            Event · {eventAge < 1_000 ? 'now' : `${formatCodexDuration(eventAge)} ago`}
+          </span>
+        ) : null}
+        <span title="Confirmed activity in this turn">
+          {snapshot.commands} cmd · {snapshot.files} files · {snapshot.tools} tools
+        </span>
+      </div>
+    </section>
+  );
+});
+
+export type CodexDiffLineKind = 'addition' | 'deletion' | 'metadata' | 'context';
+
+export function codexDiffLineKind(line: string): CodexDiffLineKind {
+  if (
+    line.startsWith('+++')
+    || line.startsWith('---')
+    || line.startsWith('@@')
+    || line.startsWith('diff ')
+    || line.startsWith('index ')
+    || line.startsWith('\\ No newline')
+  ) return 'metadata';
+  if (line.startsWith('+')) return 'addition';
+  if (line.startsWith('-')) return 'deletion';
+  return 'context';
 }
 
 type CodexDisplayEntry =
@@ -325,53 +615,269 @@ export function groupCodexActivity(items: CodexThreadItem[]): CodexDisplayEntry[
   return entries;
 }
 
-function CodexActivityGroup({
+const CodexActivityGroup = memo(function CodexActivityGroup({
   items,
   serverId,
+  running,
   onOpenFilesPath,
 }: {
   items: CodexThreadItem[];
   serverId: string;
+  running: boolean;
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
+  const followFeedLatestRef = useRef(true);
   const markdownComponents = useMemo(
     () => createMarkdownComponents(onOpenFilesPath, { serverId }),
     [onOpenFilesPath, serverId],
   );
-  const latestText = [...items]
-    .reverse()
-    .map((item) => readableItemText(item).replace(/\s+/g, ' ').trim())
-    .find(Boolean) || 'Working';
+  const visibleItems = useMemo(() => visibleCodexActivityItems(items), [items]);
+  const latestItem = visibleItems[visibleItems.length - 1];
+  const activityLabel = latestItem
+    ? codexActivityKindLabel(latestItem, running)
+    : running ? 'Working' : 'Codex activity';
+  let latestText = 'Working';
+  for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
+    const summary = codexActivitySummary(visibleItems[index]!);
+    if (!summary) continue;
+    latestText = summary;
+    break;
+  }
+
+  useLayoutEffect(() => {
+    const feed = feedRef.current;
+    if (!expanded || !feed || !followFeedLatestRef.current) return;
+    const bottom = Math.max(0, feed.scrollHeight - feed.clientHeight);
+    if (Math.abs(feed.scrollTop - bottom) > 1) feed.scrollTop = bottom;
+  }, [expanded, visibleItems]);
+
+  if (!visibleItems.length) return null;
 
   return (
-    <section className="codex-app-activity-group" data-open={expanded ? 'true' : 'false'}>
+    <section
+      className="codex-app-activity-group"
+      data-open={expanded ? 'true' : 'false'}
+      data-running={running ? 'true' : 'false'}
+    >
       <button
         type="button"
         className="codex-app-activity-toggle"
         aria-expanded={expanded}
-        onClick={() => setExpanded((current) => !current)}
+        aria-label={`${expanded ? 'Collapse' : 'Expand'} Codex activity: ${activityLabel}`}
+        onClick={() => setExpanded((current) => {
+          if (!current) followFeedLatestRef.current = true;
+          return !current;
+        })}
       >
         <span className="codex-app-activity-chevron" aria-hidden="true">›</span>
-        <strong>Codex activity</strong>
+        <span className="codex-app-activity-state">
+          <span className="codex-app-activity-dot" aria-hidden="true" />
+          <strong>{activityLabel}</strong>
+        </span>
         <code>{latestText}</code>
-        <small>{items.length} {items.length === 1 ? 'update' : 'updates'}</small>
+        <small title={`${visibleItems.length} activity updates`}>{visibleItems.length}</small>
       </button>
-      {expanded ? <div className="codex-app-activity-feed">
-        {items.map((item) => {
-          const text = readableItemText(item);
+      {expanded ? <div
+        className="codex-app-activity-feed"
+        ref={feedRef}
+        onWheel={(event) => {
+          if (event.deltaY < 0) followFeedLatestRef.current = false;
+        }}
+        onScroll={(event) => {
+          const feed = event.currentTarget;
+          followFeedLatestRef.current =
+            feed.scrollHeight - feed.scrollTop - feed.clientHeight
+              < CODEX_FOLLOW_LATEST_THRESHOLD_PX;
+        }}
+      >
+        {visibleItems.map((item) => (
+          <CodexActivityEntry
+            key={item.id}
+            item={item}
+            serverId={serverId}
+            markdownComponents={markdownComponents}
+            onOpenFilesPath={onOpenFilesPath}
+          />
+        ))}
+      </div> : null}
+    </section>
+  );
+}, (previous, next) => (
+  previous.serverId === next.serverId
+  && previous.running === next.running
+  && previous.onOpenFilesPath === next.onOpenFilesPath
+  && previous.items.length === next.items.length
+  && previous.items.every((item, index) => item === next.items[index])
+));
+
+const CodexActivityEntry = memo(function CodexActivityEntry({
+  item,
+  serverId,
+  markdownComponents,
+  onOpenFilesPath,
+}: {
+  item: CodexThreadItem;
+  serverId: string;
+  markdownComponents: ReturnType<typeof createMarkdownComponents>;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
+}) {
+  if (item.type === 'commandExecution') {
+    return <CodexCommandActivityEntry item={item} />;
+  }
+  if (item.type === 'fileChange') {
+    return (
+      <CodexFileChangeActivityEntry
+        item={item}
+        serverId={serverId}
+        onOpenFilesPath={onOpenFilesPath}
+      />
+    );
+  }
+  return (
+    <CodexMarkdownActivityEntry
+      item={item}
+      serverId={serverId}
+      markdownComponents={markdownComponents}
+    />
+  );
+});
+
+function CodexMarkdownActivityEntry({
+  item,
+  serverId,
+  markdownComponents,
+}: {
+  item: CodexThreadItem;
+  serverId: string;
+  markdownComponents: ReturnType<typeof createMarkdownComponents>;
+}) {
+  const [showFullText, setShowFullText] = useState(false);
+  const text = readableItemText(item);
+  const displayedText = codexDisplayText(text, showFullText);
+
+  return (
+    <section className="codex-app-activity-entry">
+      <header>{item.type === 'agentMessage' ? 'Commentary' : itemTitle(item)}</header>
+      <div className="legacy-codex-markdown">
+        <ReactMarkdown components={markdownComponents}>
+          {linkifyRemotePathLines(displayedText, serverId)}
+        </ReactMarkdown>
+      </div>
+      {text.length > CODEX_DISPLAY_TEXT_PREVIEW_CHARS ? (
+        <button
+          type="button"
+          className="codex-app-expand-content"
+          onClick={() => setShowFullText((current) => !current)}
+        >
+          {showFullText ? 'Show less' : 'Show full output'}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function CodexCommandActivityEntry({ item }: { item: CodexThreadItem }) {
+  const [showFullOutput, setShowFullOutput] = useState(false);
+  const output = String(item.aggregatedOutput || '');
+  const displayedOutput = codexDisplayText(output, showFullOutput);
+  const exitCode = item.exitCode ?? item.exit_code;
+
+  return (
+    <section className="codex-app-activity-entry codex-app-command-activity">
+      <header>Command</header>
+      <div className="codex-app-activity-detail">
+        <div className="codex-app-command-head">
+          <code>{String(item.command || 'Command')}</code>
+          {item.status ? <span>{String(item.status)}</span> : null}
+        </div>
+        {item.cwd || exitCode !== undefined ? (
+          <div className="codex-app-command-meta">
+            {item.cwd ? <small>cwd · {String(item.cwd)}</small> : null}
+            {exitCode !== undefined && exitCode !== null
+              ? <small>exit · {String(exitCode)}</small>
+              : null}
+          </div>
+        ) : null}
+        {displayedOutput ? <pre>{displayedOutput}</pre> : null}
+        {output.length > CODEX_DISPLAY_TEXT_PREVIEW_CHARS ? (
+          <button
+            type="button"
+            className="codex-app-expand-content"
+            onClick={() => setShowFullOutput((current) => !current)}
+          >
+            {showFullOutput ? 'Show less' : 'Show full output'}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function CodexFileChangeActivityEntry({
+  item,
+  serverId,
+  onOpenFilesPath,
+}: {
+  item: CodexThreadItem;
+  serverId: string;
+  onOpenFilesPath?: (target: { serverId: string; path: string }) => void;
+}) {
+  const [showFullDiff, setShowFullDiff] = useState(false);
+  const changes = Array.isArray(item.changes)
+    ? item.changes.map((change) =>
+        change && typeof change === 'object' ? change as Record<string, unknown> : {})
+    : [];
+  const hasLongDiff = changes.some(
+    (change) => String(change.diff || '').length > CODEX_DISPLAY_TEXT_PREVIEW_CHARS,
+  );
+
+  return (
+    <section className="codex-app-activity-entry codex-app-file-activity">
+      <header>File changes</header>
+      <div className="codex-app-activity-detail codex-app-file-diffs">
+        {changes.map((change, changeIndex) => {
+          const path = String(change.path || change.filePath || change.file || '').trim();
+          const operation = String(change.kind || change.type || change.status || 'update');
+          const rawDiff = String(change.diff || '');
+          const diff = codexDisplayText(rawDiff, showFullDiff);
           return (
-            <section key={item.id} className="codex-app-activity-entry">
-              <header>{item.type === 'agentMessage' ? 'Commentary' : itemTitle(item)}</header>
-              <div className="legacy-codex-markdown">
-                <ReactMarkdown components={markdownComponents}>
-                  {linkifyRemotePathLines(text || 'No additional details.', serverId)}
-                </ReactMarkdown>
-              </div>
+            <section className="codex-app-file-diff" key={`${path || 'change'}-${changeIndex}`}>
+              <header>
+                <span>{operation}</span>
+                {path && onOpenFilesPath ? (
+                  <button type="button" onClick={() => onOpenFilesPath({ serverId, path })}>
+                    {path}
+                  </button>
+                ) : <code>{path || 'File'}</code>}
+              </header>
+              {diff ? (
+                <pre aria-label={`Diff for ${path || 'file'}`}>
+                  {diff.split('\n').map((line, lineIndex) => (
+                    <span
+                      data-kind={codexDiffLineKind(line)}
+                      key={`${lineIndex}-${line.slice(0, 24)}`}
+                    >
+                      {line || ' '}
+                    </span>
+                  ))}
+                </pre>
+              ) : <small>No textual diff was provided.</small>}
             </section>
           );
         })}
-      </div> : null}
+        {!changes.length ? <small>No file details were provided.</small> : null}
+        {hasLongDiff ? (
+          <button
+            type="button"
+            className="codex-app-expand-content"
+            onClick={() => setShowFullDiff((current) => !current)}
+          >
+            {showFullDiff ? 'Show less' : 'Show full diff'}
+          </button>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -625,18 +1131,24 @@ export function CodexAppServerPanel({
   const [view, setView] = useState<CodexStructuredState>(EMPTY_CODEX_STRUCTURED_STATE);
   const [approvals, setApprovals] = useState<CodexAppServerRequest[]>([]);
   const [draft, setDraft] = useState('');
+  const [pastedTextAttachments, setPastedTextAttachments] = useState<CodexPastedTextAttachment[]>([]);
   const [busy, setBusy] = useState(false);
+  const [runtimeSettingsBusy, setRuntimeSettingsBusy] = useState(false);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [lastActivityAt, setLastActivityAt] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [threadQuery, setThreadQuery] = useState('');
+  const [threadContextMenu, setThreadContextMenu] = useState<ThreadContextMenu | null>(null);
+  const [confirmedThreadRuntime, setConfirmedThreadRuntime] = useState<ConfirmedThreadRuntime | null>(null);
   const [goalMode, setGoalMode] = useState(false);
   const [reviewPermissionMode, setReviewPermissionMode] = useState<ReviewPermissionMode>(() => {
-    const stored = window.localStorage.getItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY);
+    const stored = userStorage.getItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY);
     return stored === 'ask' || stored === 'autoReview' || stored === 'fullAccess'
       ? stored
-      : 'autoReview';
+      : 'ask';
   });
   const [threadsCollapsed, setThreadsCollapsed] = useState(
-    () => window.localStorage.getItem(CODEX_THREADS_COLLAPSED_STORAGE_KEY) === 'true',
+    () => userStorage.getItem(CODEX_THREADS_COLLAPSED_STORAGE_KEY) === 'true',
   );
   const [instructionRules, setInstructionRules] = useState<InstructionRule[]>([]);
   const [skills, setSkills] = useState<CodexSkill[]>([]);
@@ -658,10 +1170,12 @@ export function CodexAppServerPanel({
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const followLatestRef = useRef(true);
   const lastScrolledThreadIdRef = useRef<string | null>(null);
+  const runtimeSelectionDirtyRef = useRef(false);
+  const runtimeSettingsRequestRef = useRef(0);
   const [cwd, setCwd] = useState(() => readCodexCwd(serverId, defaultCwd));
   const cwdRef = useRef(cwd);
-  const [model, setModel] = useState(() => window.localStorage.getItem(CODEX_MODEL_STORAGE_KEY) || '');
-  const [effort, setEffort] = useState(() => window.localStorage.getItem(CODEX_EFFORT_STORAGE_KEY) || '');
+  const [model, setModel] = useState(() => userStorage.getItem(CODEX_MODEL_STORAGE_KEY) || '');
+  const [effort, setEffort] = useState(() => userStorage.getItem(CODEX_EFFORT_STORAGE_KEY) || '');
   const [models, setModels] = useState<string[]>(CODEX_MODEL_FALLBACKS);
   const [collaborationMode, setCollaborationMode] = useState('default');
   const [renderedItemLimit, setRenderedItemLimit] = useState(CODEX_DISPLAY_ITEM_BATCH);
@@ -689,9 +1203,13 @@ export function CodexAppServerPanel({
     return preset ? {
       ...preset,
       model: selectedModel,
-      settings: { ...(preset.settings || {}), model: selectedModel },
+      settings: {
+        ...(preset.settings || {}),
+        model: selectedModel,
+        ...(effort ? { reasoning_effort: effort } : {}),
+      },
     } : undefined;
-  }, [collaborationMode, collaborationModes, model, models]);
+  }, [collaborationMode, collaborationModes, effort, model, models]);
   const planCollaborationMode = useMemo(
     () => collaborationModes.find((candidate) => candidate.mode === 'plan') || null,
     [collaborationModes],
@@ -710,7 +1228,23 @@ export function CodexAppServerPanel({
   );
   const { visibleItems, hiddenItemCount } = displayWindow;
   const displayEntries = useMemo(() => groupCodexActivity(visibleItems), [visibleItems]);
+  const executionSnapshot = useMemo(() => codexExecutionSnapshot({
+    items: view.items,
+    turnStatus: view.turnStatus,
+    busy: busy && turnStartedAt !== null,
+    approvalCount: approvals.length,
+    connected,
+    runtimeStatus: runtime?.status,
+  }), [approvals.length, busy, connected, runtime?.status, turnStartedAt, view.items, view.turnStatus]);
   const runtimeStatusLabel = connected ? runtime?.status || 'connecting' : 'disconnected';
+  const selectedRuntimeModel = model || 'default';
+  const selectedRuntimeEffort = effort || 'auto';
+  const runtimeSelectionPending = Boolean(
+    confirmedThreadRuntime && (
+      (model && model !== confirmedThreadRuntime.model) ||
+      (effort && effort !== confirmedThreadRuntime.effort)
+    ),
+  );
   const visibleSkills = useMemo(() => {
     const query = skillQuery.trim().toLowerCase();
     if (!query) return skills;
@@ -741,7 +1275,7 @@ export function CodexAppServerPanel({
 
   useEffect(() => {
     goalPolicyRef.current = goalPolicy;
-    window.localStorage.setItem(CODEX_GOAL_POLICY_STORAGE_KEY, JSON.stringify(goalPolicy));
+    userStorage.setItem(CODEX_GOAL_POLICY_STORAGE_KEY, JSON.stringify(goalPolicy));
   }, [goalPolicy]);
 
   useEffect(() => {
@@ -803,7 +1337,8 @@ export function CodexAppServerPanel({
     }
 
     if (threadChanged || followLatestRef.current) {
-      element.scrollTop = element.scrollHeight;
+      const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (Math.abs(element.scrollTop - bottom) > 1) element.scrollTop = bottom;
     }
   }, [view.items, view.threadId]);
 
@@ -830,24 +1365,24 @@ export function CodexAppServerPanel({
   }, [defaultCwd, serverId]);
 
   useEffect(() => {
-    if (model) window.localStorage.setItem(CODEX_MODEL_STORAGE_KEY, model);
-    else window.localStorage.removeItem(CODEX_MODEL_STORAGE_KEY);
+    if (model) userStorage.setItem(CODEX_MODEL_STORAGE_KEY, model);
+    else userStorage.removeItem(CODEX_MODEL_STORAGE_KEY);
   }, [model]);
 
   useEffect(() => {
-    window.localStorage.setItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY, reviewPermissionMode);
+    userStorage.setItem(CODEX_REVIEW_PERMISSION_STORAGE_KEY, reviewPermissionMode);
   }, [reviewPermissionMode]);
 
   useEffect(() => {
-    window.localStorage.setItem(
+    userStorage.setItem(
       CODEX_THREADS_COLLAPSED_STORAGE_KEY,
       String(threadsCollapsed),
     );
   }, [threadsCollapsed]);
 
   useEffect(() => {
-    if (effort) window.localStorage.setItem(CODEX_EFFORT_STORAGE_KEY, effort);
-    else window.localStorage.removeItem(CODEX_EFFORT_STORAGE_KEY);
+    if (effort) userStorage.setItem(CODEX_EFFORT_STORAGE_KEY, effort);
+    else userStorage.removeItem(CODEX_EFFORT_STORAGE_KEY);
   }, [effort]);
 
   const refreshThreads = async (client: CodexAppServerSocket) => {
@@ -967,6 +1502,31 @@ export function CodexAppServerPanel({
     setInstructionRules(loaded.filter((rule): rule is InstructionRule => Boolean(rule)));
   };
 
+  const recordConfirmedThreadRuntime = (
+    response: ThreadResponse,
+    fallbackThreadId = '',
+    forceSelectionSync = false,
+  ) => {
+    const threadId = response.thread?.id || fallbackThreadId;
+    const confirmedModel = String(response.model || '').trim();
+    if (!threadId || !confirmedModel) return;
+    const confirmedEffort = String(response.reasoningEffort || '').trim();
+    setModels((current) => current.includes(confirmedModel)
+      ? current
+      : [confirmedModel, ...current]);
+    if (forceSelectionSync || !runtimeSelectionDirtyRef.current) {
+      setModel(confirmedModel);
+      setEffort(confirmedEffort);
+      runtimeSelectionDirtyRef.current = false;
+    }
+    setConfirmedThreadRuntime({
+      threadId,
+      model: confirmedModel,
+      modelProvider: String(response.modelProvider || 'unknown').trim() || 'unknown',
+      effort: confirmedEffort || 'auto',
+    });
+  };
+
   const forgetUnavailableThread = (threadId: string) => {
     unavailableThreadIdsRef.current.add(threadId);
     selectedThreadIdRef.current = '';
@@ -976,7 +1536,10 @@ export function CodexAppServerPanel({
     viewRef.current = EMPTY_CODEX_STRUCTURED_STATE;
     setGoalRuntime(null);
     goalRuntimeRef.current = null;
+    setConfirmedThreadRuntime(null);
     setInstructionRules([]);
+    setTurnStartedAt(null);
+    setLastActivityAt(null);
   };
 
   const startNewThreadDraft = () => {
@@ -989,8 +1552,11 @@ export function CodexAppServerPanel({
     goalRef.current = null;
     setGoalRuntime(null);
     goalRuntimeRef.current = null;
+    setConfirmedThreadRuntime(null);
     setInstructionRules([]);
     setError('');
+    setTurnStartedAt(null);
+    setLastActivityAt(null);
   };
 
   const focusPromptWithText = (text: string) => {
@@ -1011,14 +1577,22 @@ export function CodexAppServerPanel({
     const client = clientRef.current;
     if (!client) return;
     setBusy(true);
+    setTurnStartedAt(null);
+    setLastActivityAt(null);
     setError('');
     try {
       const response = await client.call<ThreadResponse>('thread/resume', { threadId: thread.id });
       const resumed = response.thread || thread;
+      recordConfirmedThreadRuntime(response, resumed.id, true);
       setSelectedThreadId(resumed.id);
       const resumedView = structuredStateFromThread(resumed, readTokenUsage(serverId, resumed.id));
       viewRef.current = resumedView;
       setView(resumedView);
+      if (/progress|running/i.test(resumedView.turnStatus)) {
+        const observedAt = Date.now();
+        setTurnStartedAt(observedAt);
+        setLastActivityAt(observedAt);
+      }
       const savedRuntime = readGoalRuntime(serverId, resumed.id);
       goalRuntimeRef.current = savedRuntime;
       setGoalRuntime(savedRuntime);
@@ -1057,6 +1631,13 @@ export function CodexAppServerPanel({
     const client = new CodexAppServerSocket(serverId);
     clientRef.current = client;
     const unsubscribe = client.subscribe((message) => {
+      if (message.type === 'event' || message.type === 'server_request') {
+        const observedAt = Date.now();
+        setLastActivityAt(observedAt);
+        if (message.type === 'event' && message.event.method === 'turn/started') {
+          setTurnStartedAt(observedAt);
+        }
+      }
       if (message.type === 'runtime_status' || message.type === 'status') {
         setRuntime(message.runtime);
         if (message.runtime.status === 'ready') {
@@ -1069,6 +1650,7 @@ export function CodexAppServerPanel({
               .call<ThreadResponse>('thread/resume', { threadId })
               .then((response) => {
                 if (response.thread) {
+                  recordConfirmedThreadRuntime(response, response.thread.id);
                   const resumedView = structuredStateFromThread(
                     response.thread,
                     readTokenUsage(serverId, response.thread.id),
@@ -1110,6 +1692,10 @@ export function CodexAppServerPanel({
           void refreshThreads(client).catch(() => undefined);
           const threadId = selectedThreadIdRef.current;
           if (threadId) {
+            void client
+              .call<ThreadResponse>('thread/resume', { threadId })
+              .then((response) => recordConfirmedThreadRuntime(response, threadId, true))
+              .catch(() => undefined);
             void (async () => {
               try {
                 const response = await client.call<ThreadGoalResponse>('thread/goal/get', { threadId });
@@ -1248,6 +1834,7 @@ export function CodexAppServerPanel({
     });
     const thread = response.thread;
     if (!thread?.id) throw new Error('Codex did not return a thread id');
+    recordConfirmedThreadRuntime(response, thread.id, true);
     await refreshInstructionRules(client, response.instructionSources);
     setThreads((current) => [thread, ...current.filter((candidate) => candidate.id !== thread.id)]);
     setSelectedThreadId(thread.id);
@@ -1257,10 +1844,16 @@ export function CodexAppServerPanel({
     return thread.id;
   };
 
-  const runTurn = async (text: string, goalObjective = '') => {
+  const runTurn = async (
+    text: string,
+    goalObjective = '',
+    textAttachments: CodexPastedTextAttachment[] = [],
+  ): Promise<boolean> => {
     const client = clientRef.current;
-    if (!text || !client || busy) return;
+    if (!text || !client || busy) return false;
     setBusy(true);
+    setTurnStartedAt(Date.now());
+    setLastActivityAt(Date.now());
     setError('');
     try {
       let threadId = selectedThreadId || (await createThread());
@@ -1284,11 +1877,13 @@ export function CodexAppServerPanel({
       }
       const permissions = reviewPermissionSettings(reviewPermissionMode);
       const skillForTurn = selectedSkill?.enabled ? selectedSkill : null;
-      const startTurn = (targetThreadId: string) =>
-        client.call<{ turn?: { id?: string; status?: string } }>('turn/start', {
+      const startTurn = (targetThreadId: string) => {
+        const input = buildCodexSkillTurnInput(managedObjective || text, skillForTurn);
+        input.push(...pastedTextInputItems(textAttachments));
+        return client.call<{ turn?: { id?: string; status?: string } }>('turn/start', {
           threadId: targetThreadId,
           clientUserMessageId: crypto.randomUUID(),
-          input: buildCodexSkillTurnInput(managedObjective || text, skillForTurn),
+          input,
           cwd,
           approvalPolicy: permissions.approvalPolicy,
           approvalsReviewer: permissions.approvalsReviewer,
@@ -1297,6 +1892,7 @@ export function CodexAppServerPanel({
           effort: effort || undefined,
           collaborationMode: activeCollaborationMode,
         });
+      };
       let response;
       try {
         response = await startTurn(threadId);
@@ -1315,19 +1911,80 @@ export function CodexAppServerPanel({
       viewRef.current = nextView;
       setView(nextView);
       if (skillForTurn) setSelectedSkill(null);
+      return true;
     } catch (nextError) {
       setBusy(false);
+      setTurnStartedAt(null);
+      setLastActivityAt(null);
       setError(nextError instanceof Error ? nextError.message : 'Unable to start Codex turn');
+      return false;
     }
+  };
+
+  const attachLargePastedText = (text: string): boolean => {
+    if (!shouldConvertPastedText(text)) return false;
+    const attachment = createPastedTextAttachment(text);
+    if (attachment.size > CODEX_PASTED_TEXT_MAX_BYTES) {
+      setError('Pasted text is larger than 1 MB. Save it as a file and open it from the File panel.');
+      return true;
+    }
+    if (pastedTextAttachments.length >= CODEX_PASTED_TEXT_MAX_ATTACHMENTS) {
+      setError(`A prompt can contain at most ${CODEX_PASTED_TEXT_MAX_ATTACHMENTS} pasted-text files.`);
+      return true;
+    }
+    setPastedTextAttachments((current) => [...current, attachment]);
+    setError('');
+    return true;
   };
 
   const sendTurn = async (event: React.FormEvent) => {
     event.preventDefault();
-    const text = draft.trim();
-    if (!text) return;
-    setDraft('');
-    await runTurn(text, goalMode ? text : '');
-    if (goalMode) setGoalMode(false);
+    const attachments = pastedTextAttachments;
+    const text = draft.trim() || pastedTextFallbackPrompt(attachments);
+    if (!draft.trim() && !attachments.length) return;
+    const sent = await runTurn(text, goalMode ? text : '', attachments);
+    if (sent) {
+      setDraft('');
+      setPastedTextAttachments([]);
+      if (goalMode) setGoalMode(false);
+    }
+  };
+
+  const applyRuntimeSettings = async (nextModel: string, nextEffort: string) => {
+    runtimeSelectionDirtyRef.current = true;
+    setModel(nextModel);
+    setEffort(nextEffort);
+
+    const client = clientRef.current;
+    const threadId = selectedThreadIdRef.current;
+    if (!client || !threadId) return;
+
+    const requestId = runtimeSettingsRequestRef.current + 1;
+    runtimeSettingsRequestRef.current = requestId;
+    setRuntimeSettingsBusy(true);
+    setError('');
+    try {
+      await client.call<Record<string, never>>('thread/settings/update', {
+        threadId,
+        model: nextModel || null,
+        effort: nextEffort || null,
+      });
+      const response = await client.call<ThreadResponse>('thread/resume', { threadId });
+      if (requestId !== runtimeSettingsRequestRef.current) return;
+      recordConfirmedThreadRuntime(response, threadId, true);
+    } catch (nextError) {
+      if (requestId !== runtimeSettingsRequestRef.current) return;
+      if (confirmedThreadRuntime?.threadId === threadId) {
+        setModel(confirmedThreadRuntime.model);
+        setEffort(confirmedThreadRuntime.effort === 'auto' ? '' : confirmedThreadRuntime.effort);
+      }
+      runtimeSelectionDirtyRef.current = false;
+      setError(nextError instanceof Error
+        ? nextError.message
+        : 'Failed to update Codex runtime settings');
+    } finally {
+      if (requestId === runtimeSettingsRequestRef.current) setRuntimeSettingsBusy(false);
+    }
   };
 
   const selectCollaborationMode = (nextMode: string) => {
@@ -1336,7 +1993,10 @@ export function CodexAppServerPanel({
     const nextEffort = collaborationModes.find(
       (candidate) => candidate.mode === nextMode,
     )?.settings?.reasoning_effort;
-    if (typeof nextEffort === 'string') setEffort(nextEffort);
+    if (typeof nextEffort === 'string') {
+      runtimeSelectionDirtyRef.current = true;
+      setEffort(nextEffort);
+    }
   };
 
   const togglePlanMode = () => {
@@ -1395,14 +2055,36 @@ export function CodexAppServerPanel({
     }
   };
 
-  const archiveSelectedThread = async () => {
+  const renameThread = async (thread: CodexThreadSummary) => {
     const client = clientRef.current;
-    if (!client || !selectedThreadId || busy) return;
+    if (!client || busy) return;
+    const currentName = String(thread.name || thread.preview || '').trim();
+    const requestedName = window.prompt('Rename thread', currentName);
+    if (requestedName === null) return;
+    const name = requestedName.trim();
+    if (!name || name === currentName) return;
     setBusy(true);
     setError('');
     try {
-      await client.call('thread/archive', { threadId: selectedThreadId });
-      startNewThreadDraft();
+      await client.call('thread/name/set', { threadId: thread.id, name });
+      setThreads((current) => current.map((candidate) => (
+        candidate.id === thread.id ? { ...candidate, name } : candidate
+      )));
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to rename Codex thread');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archiveThread = async (threadId: string) => {
+    const client = clientRef.current;
+    if (!client || !threadId || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await client.call('thread/archive', { threadId });
+      if (threadId === selectedThreadId) startNewThreadDraft();
       await refreshThreads(client);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to archive Codex thread');
@@ -1524,6 +2206,16 @@ export function CodexAppServerPanel({
                   key={thread.id}
                   className={thread.id === selectedThreadId ? 'active' : ''}
                   onClick={() => void openThread(thread)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    const menuWidth = 220;
+                    const menuHeight = 130;
+                    setThreadContextMenu({
+                      thread,
+                      x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+                      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+                    });
+                  }}
                 >
                   <span>{thread.name || thread.preview || 'Untitled thread'}</span>
                   <small>{thread.cwd || cwd}</small>
@@ -1545,21 +2237,27 @@ export function CodexAppServerPanel({
                 Interrupt
               </button>
             ) : null}
-            {selectedThreadId && !busy ? (
-              <button type="button" className="danger" onClick={() => void archiveSelectedThread()}>
-                Archive
-              </button>
-            ) : null}
           </div>
+
+          <CodexExecutionStrip
+            snapshot={executionSnapshot}
+            runtimeStatus={runtime?.status}
+            turnStartedAt={turnStartedAt}
+            lastActivityAt={lastActivityAt}
+          />
 
           <div
             className="codex-app-items"
             ref={itemsScrollRef}
-            aria-live="polite"
+            aria-label="Codex conversation"
+            onWheel={(event) => {
+              if (event.deltaY < 0) followLatestRef.current = false;
+            }}
             onScroll={(event) => {
               const element = event.currentTarget;
               followLatestRef.current =
-                element.scrollHeight - element.scrollTop - element.clientHeight < 160;
+                element.scrollHeight - element.scrollTop - element.clientHeight
+                  < CODEX_FOLLOW_LATEST_THRESHOLD_PX;
             }}
           >
             {hiddenItemCount ? (
@@ -1586,11 +2284,15 @@ export function CodexAppServerPanel({
                 </button>
               </div>
             ) : null}
-            {displayEntries.map((entry) => entry.kind === 'activity' ? (
+            {displayEntries.map((entry, entryIndex) => entry.kind === 'activity' ? (
               <CodexActivityGroup
                 key={entry.id}
                 items={entry.items}
                 serverId={serverId}
+                running={
+                  entryIndex === displayEntries.length - 1
+                  && (busy || /progress|running/i.test(view.turnStatus))
+                }
                 onOpenFilesPath={onOpenFilesPath}
               />
             ) : (
@@ -1633,17 +2335,39 @@ export function CodexAppServerPanel({
           )}
 
           <form className="codex-app-composer" onSubmit={sendTurn}>
+            {pastedTextAttachments.length ? (
+              <div className="composer-attachments codex-app-pasted-text-attachments" aria-label="Attached pasted text files">
+                {pastedTextAttachments.map((attachment) => (
+                  <div className="composer-attachment composer-text-attachment" key={attachment.id}>
+                    <span className="composer-text-file-icon" aria-hidden="true">TXT</span>
+                    <span title={attachment.name}>{attachment.name}</span>
+                    <button
+                      type="button"
+                      title={`Remove ${attachment.name}`}
+                      onClick={() => setPastedTextAttachments((current) =>
+                        current.filter((candidate) => candidate.id !== attachment.id))}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="codex-app-prompt-row">
               <textarea
                 ref={promptRef}
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
+                onPaste={(event) => {
+                  const pastedText = event.clipboardData.getData('text/plain');
+                  if (pastedText && attachLargePastedText(pastedText)) event.preventDefault();
+                }}
                 onKeyDown={(event) => {
                   if (
                     event.key === 'Enter' &&
                     !event.shiftKey &&
                     !event.nativeEvent.isComposing &&
-                    Boolean(draft.trim()) &&
+                    Boolean(draft.trim() || pastedTextAttachments.length) &&
                     !busy &&
                     runtime?.status === 'ready'
                   ) {
@@ -1661,7 +2385,7 @@ export function CodexAppServerPanel({
               <button
                 type="submit"
                 disabled={
-                  !draft.trim() || busy ||
+                  (!draft.trim() && !pastedTextAttachments.length) || busy ||
                   runtime?.status !== 'ready'
                 }
               >
@@ -1728,14 +2452,26 @@ export function CodexAppServerPanel({
               </label>
               <label>
                 <span>Model</span>
-                <select value={model} onChange={(event) => setModel(event.target.value)}>
+                <select
+                  value={model}
+                  onChange={(event) => {
+                    void applyRuntimeSettings(event.target.value, effort);
+                  }}
+                  disabled={busy || runtimeSettingsBusy || runtime?.status !== 'ready'}
+                >
                   <option value="">default</option>
                   {models.map((option) => <option value={option} key={option}>{option}</option>)}
                 </select>
               </label>
               <label>
                 <span>Effort</span>
-                <select value={effort} onChange={(event) => setEffort(event.target.value)}>
+                <select
+                  value={effort}
+                  onChange={(event) => {
+                    void applyRuntimeSettings(model, event.target.value);
+                  }}
+                  disabled={busy || runtimeSettingsBusy || runtime?.status !== 'ready'}
+                >
                   {CODEX_EFFORT_OPTIONS.map((option) => (
                     <option value={option} key={option || 'auto'}>{option || 'auto'}</option>
                   ))}
@@ -1991,7 +2727,32 @@ export function CodexAppServerPanel({
             </div>
           </details>
           <h3>Runtime</h3>
-          <p className="hint">{model || 'default'} · effort {effort || 'auto'} · {collaborationMode}</p>
+          <div className="codex-app-runtime-config" aria-label="Codex runtime configuration">
+            <p>
+              <span>Selected</span>
+              <strong>{selectedRuntimeModel} · effort {selectedRuntimeEffort} · {collaborationMode}</strong>
+            </p>
+            {confirmedThreadRuntime ? (
+              <p>
+                <span>Confirmed</span>
+                <strong>
+                  {confirmedThreadRuntime.model} · effort {confirmedThreadRuntime.effort}
+                </strong>
+                <small title={`Provider: ${confirmedThreadRuntime.modelProvider}`}>
+                  {runtimeSettingsBusy
+                    ? 'applying…'
+                    : runtimeSelectionPending
+                      ? 'pending next turn'
+                      : `via ${confirmedThreadRuntime.modelProvider}`}
+                </small>
+              </p>
+            ) : (
+              <p>
+                <span>Confirmed</span>
+                <small>Available after a thread starts or resumes</small>
+              </p>
+            )}
+          </div>
           <h3>Workflow</h3>
           <section className="codex-app-goal" aria-label="Codex goal controls">
             <strong>Goal</strong>
@@ -2047,7 +2808,9 @@ export function CodexAppServerPanel({
               <button type="button" className="danger" onClick={() => void clearGoal()} disabled={!goal}>Clear</button>
             </div>
           </section>
-          <p className="hint">Model, effort, and cwd apply when the next thread starts.</p>
+          <p className="hint">
+            Model and effort update the current thread immediately; cwd applies when the next thread starts.
+          </p>
           <h3>Usage</h3>
           {view.tokenUsage ? (
             <section className="codex-app-usage" aria-label="Codex token usage">
@@ -2105,6 +2868,60 @@ export function CodexAppServerPanel({
           )}
         </aside>
       </div>
+
+      {threadContextMenu ? (
+        <>
+          <div
+            className="menu-backdrop"
+            aria-hidden="true"
+            onClick={() => setThreadContextMenu(null)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setThreadContextMenu(null);
+            }}
+          />
+          <div
+            className="context-menu codex-thread-context-menu"
+            role="menu"
+            aria-label="Thread actions"
+            style={{ left: threadContextMenu.x, top: threadContextMenu.y }}
+          >
+            <div className="menu-header">
+              <span className="menu-title">
+                {threadContextMenu.thread.name || threadContextMenu.thread.preview || 'Untitled thread'}
+              </span>
+              <span className="menu-subtitle">Thread</span>
+            </div>
+            <button
+              type="button"
+              className="menu-item"
+              role="menuitem"
+              disabled={busy}
+              onClick={() => {
+                const thread = threadContextMenu.thread;
+                setThreadContextMenu(null);
+                void renameThread(thread);
+              }}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="menu-item menu-item-danger menu-sep"
+              role="menuitem"
+              disabled={busy}
+              onClick={() => {
+                const threadId = threadContextMenu.thread.id;
+                setThreadContextMenu(null);
+                void archiveThread(threadId);
+              }}
+            >
+              Archive
+              <span className="menu-hint">Hide this thread without deleting its history</span>
+            </button>
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }

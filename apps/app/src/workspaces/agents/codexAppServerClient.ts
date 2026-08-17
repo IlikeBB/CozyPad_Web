@@ -35,6 +35,126 @@ type RpcResultMessage = {
   error?: { message?: string; code?: number };
 };
 
+export const CODEX_EVENT_RENDER_BATCH_MS = 100;
+
+function eventPayload(message: CodexAppServerMessage): Record<string, unknown> {
+  return message.type === 'event' && message.event.payload && typeof message.event.payload === 'object'
+    ? message.event.payload as Record<string, unknown>
+    : {};
+}
+
+function streamDeltaField(message: CodexAppServerMessage): 'delta' | 'text' | 'output' | null {
+  if (message.type !== 'event') return null;
+  const method = message.event.method.toLowerCase();
+  if (!method.includes('delta')) return null;
+  const payload = eventPayload(message);
+  if (typeof payload.delta === 'string') return 'delta';
+  if (typeof payload.text === 'string') return 'text';
+  if (typeof payload.output === 'string') return 'output';
+  return null;
+}
+
+function streamItemId(message: CodexAppServerMessage): string {
+  if (message.type !== 'event') return '';
+  const payload = eventPayload(message);
+  return String(payload.itemId || message.event.itemId || '');
+}
+
+function isStreamingEvent(message: CodexAppServerMessage): boolean {
+  return streamDeltaField(message) !== null;
+}
+
+export function coalesceCodexStreamMessages(
+  messages: CodexAppServerMessage[],
+): CodexAppServerMessage[] {
+  const result: CodexAppServerMessage[] = [];
+  for (const message of messages) {
+    const previous = result[result.length - 1];
+    const field = streamDeltaField(message);
+    const previousField = previous ? streamDeltaField(previous) : null;
+    if (
+      message.type === 'event'
+      && previous?.type === 'event'
+      && field
+      && field === previousField
+      && message.event.method === previous.event.method
+      && message.event.threadId === previous.event.threadId
+      && message.event.turnId === previous.event.turnId
+      && streamItemId(message) === streamItemId(previous)
+    ) {
+      const previousPayload = eventPayload(previous);
+      const currentPayload = eventPayload(message);
+      result[result.length - 1] = {
+        ...message,
+        event: {
+          ...message.event,
+          payload: {
+            ...currentPayload,
+            [field]: `${String(previousPayload[field] || '')}${String(currentPayload[field] || '')}`,
+          },
+        },
+      };
+      continue;
+    }
+    result.push(message);
+  }
+  return result;
+}
+
+type BatchScheduler = {
+  schedule: (callback: () => void) => number;
+  cancel: (handle: number) => void;
+};
+
+export function createCodexEventBatcher<T>(
+  deliver: (messages: T[]) => void,
+  scheduler: BatchScheduler = {
+    schedule: (callback) => window.setTimeout(callback, CODEX_EVENT_RENDER_BATCH_MS),
+    cancel: (handle) => window.clearTimeout(handle),
+  },
+): {
+  enqueue: (message: T) => void;
+  flush: () => void;
+  clear: () => void;
+} {
+  let queued: T[] = [];
+  let scheduledHandle: number | undefined;
+
+  const deliverQueued = () => {
+    scheduledHandle = undefined;
+    if (!queued.length) return;
+    const messages = queued;
+    queued = [];
+    deliver(messages);
+  };
+
+  const flush = () => {
+    if (scheduledHandle !== undefined) {
+      scheduler.cancel(scheduledHandle);
+      scheduledHandle = undefined;
+    }
+    if (!queued.length) return;
+    const messages = queued;
+    queued = [];
+    deliver(messages);
+  };
+
+  return {
+    enqueue(message) {
+      queued.push(message);
+      if (scheduledHandle === undefined) {
+        scheduledHandle = scheduler.schedule(deliverQueued);
+      }
+    },
+    flush,
+    clear() {
+      if (scheduledHandle !== undefined) scheduler.cancel(scheduledHandle);
+      scheduledHandle = undefined;
+      queued = [];
+    },
+  };
+}
+
 export async function getCodexAppServerStatus(
   serverId: string,
 ): Promise<CodexAppServerStatusResponse> {
@@ -63,6 +183,9 @@ export class CodexAppServerSocket {
   private reconnectTimer: number | undefined;
   private reconnectAttempts = 0;
   private lastSequence = 0;
+  private readonly eventBatcher = createCodexEventBatcher<CodexAppServerMessage>(
+    (messages) => this.deliverMessages(coalesceCodexStreamMessages(messages)),
+  );
 
   constructor(private readonly serverId: string) {}
 
@@ -92,6 +215,7 @@ export class CodexAppServerSocket {
       });
       socket.addEventListener('close', () => {
         if (this.socket === socket) this.socket = null;
+        this.eventBatcher.flush();
         this.rejectPending(new Error('Codex app-server connection closed'));
         if (!this.explicitlyClosed) this.scheduleReconnect();
       });
@@ -125,6 +249,7 @@ export class CodexAppServerSocket {
     this.explicitlyClosed = true;
     window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.eventBatcher.flush();
     this.socket?.close();
     this.socket = null;
     this.rejectPending(new Error('Codex app-server client closed'));
@@ -138,6 +263,7 @@ export class CodexAppServerSocket {
       return;
     }
     if (message.type === 'rpc_result') {
+      this.eventBatcher.flush();
       const pending = this.pending.get(message.requestId);
       if (!pending) return;
       this.pending.delete(message.requestId);
@@ -147,8 +273,20 @@ export class CodexAppServerSocket {
     }
     if (message.type === 'event') {
       this.lastSequence = Math.max(this.lastSequence, message.event.sequence);
+      if (isStreamingEvent(message)) {
+        this.eventBatcher.enqueue(message);
+        return;
+      }
     }
-    for (const listener of this.listeners) listener(message);
+    // Keep wire order when a status or approval request follows streamed events.
+    this.eventBatcher.flush();
+    this.deliverMessages([message]);
+  }
+
+  private deliverMessages(messages: CodexAppServerMessage[]): void {
+    for (const message of messages) {
+      for (const listener of this.listeners) listener(message);
+    }
   }
 
   private scheduleReconnect(): void {
