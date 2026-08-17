@@ -2220,6 +2220,44 @@ button.danger:hover {
   transform: translateX(0);
 }
 
+.legacy-codex-panes > .legacy-codex-sidebar .session-filter {
+  width: calc(100% - 18px);
+  min-height: 36px;
+  margin: 12px 9px 11px;
+  padding: 8px 12px;
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)),
+    color-mix(in srgb, var(--bg) 84%, var(--accent) 16%);
+  box-shadow:
+    0 10px 22px rgba(0, 0, 0, 0.32),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.legacy-codex-panes > .legacy-codex-sidebar .session-filter::placeholder {
+  color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
+}
+
+.legacy-codex-panes > .legacy-codex-sidebar .session-filter:hover,
+.legacy-codex-panes > .legacy-codex-sidebar .session-filter:focus {
+  border-color: color-mix(in srgb, var(--accent) 78%, white);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0)),
+    color-mix(in srgb, var(--bg) 74%, var(--accent) 26%);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.4),
+    0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent) 24%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+
 .legacy-codex-session-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 28px;
