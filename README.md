@@ -38,12 +38,12 @@ It is designed for users who frequently move between remote GPU servers, Linux m
 | --- | --- | --- |
 | Research | Flowcharts, node feedback, Diagram analysis, MD.md, Start Training | Nodes are draggable and connectable. Each node keeps its own documentation and agent prompt. |
 | Agents | Remote Codex, agy, and baillian panels | Supports Markdown, code highlighting, LaTeX formulas, image attachments, path deep-links, task stop, and edit-on-right-click for sent prompts. |
-| Terminal | Multi-tab SSH/local terminal | Uses xterm, quick commands, copy/paste, mobile key bar, and controlled reconnect behavior. |
+| Terminal | Multi-tab SSH/local terminal | Uses xterm, quick commands, copy/paste, narrow-screen key bar, and controlled reconnect behavior. |
 | File | Remote file browser and previewer | Supports folders, path copy, image/PDF/Markdown/text/audio/video preview, agent path deep-linking, rename, delete, and folder creation. |
 | Work | Task tracking | Agent and training jobs can link back to their related workspace. |
 | device Monitor | SSH live resource monitor | Shows CPU, RAM, disk, GPU, GPU process, temperature, and online server drawer. |
 | Public | Public service health checks | Helps diagnose API, origin, tunnel, Cloudflare security, and timeout states. |
-| Settings | Runtime and connection settings | Controls tmux, desktop/mobile behavior, remote runtime, host key, and dev options. |
+| Settings | Runtime and connection settings | Controls tmux, desktop behavior, remote runtime, host key, and dev options. |
 
 ## Research Lab
 
@@ -102,7 +102,7 @@ The Terminal workspace uses xterm and supports both remote SSH and local termina
 | SSH terminal | Opens an interactive terminal on the selected server. |
 | Local terminal | Uses local terminal mode when localhost is selected. |
 | Quick commands | Includes common commands such as `ls -la`, `pwd`, `git status`, `nvidia-smi`, `df -h`, and `tmux ls`. |
-| Mobile support | Provides a key bar and press-and-hold input behavior. |
+| Narrow-screen controls | Provides a key bar and press-and-hold input behavior. |
 | Reconnect control | Avoids aggressive automatic SSH retry loops. |
 
 ## Files
@@ -170,13 +170,16 @@ The desktop app uses Electron Builder with NSIS.
 pnpm --filter @cozypad/desktop package
 ```
 
+### Android support
+
+Android/Capacitor support is temporarily paused for V4. It is not part of the pnpm workspace, build, test, lint, or release flow.
+
 ## Repository Layout
 
 | Path | Description |
 | --- | --- |
 | `apps/app` | React + Vite web application. |
 | `apps/desktop` | Electron wrapper and Windows installer configuration. |
-| `apps/mobile` | Capacitor Android shell. |
 | `packages/contracts` | Shared contracts and types. |
 | `packages/remote-services` | Remote service and SSH/agent abstractions. |
 | `packages/tmux-runtime` | tmux runtime utilities. |

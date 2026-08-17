@@ -9,7 +9,7 @@
 ## 背景
 
 handoff 包提出 CozyPad ⇄ solution-agent（確定性 Python 任務編排器）的整合設計。
-打包時間早於 V3 定案，其中 CozyPad/Hermes 參考源碼已過時（V3 移除 Hermes），
+打包時間早於 V4 定案，其中 CozyPad/Hermes 參考源碼已過時（V4 移除 Hermes），
 但 solution-agent 側的執行層設計與 `SPEC.md` §18 Research Lab 高度互補。
 
 ## 決策
@@ -36,8 +36,8 @@ handoff 包提出 CozyPad ⇄ solution-agent（確定性 Python 任務編排器�
 
 ### 不採納／過時
 
-- 包內的 Flutter/Hermes 參考源碼（V3 已移除 Hermes，repo 內另有最新版）。
-- Phase 3「Hermes 整合」——由 V3 的 remote agent adapter（Claude/Codex）取代。
+- 包內的 Flutter/Hermes 參考源碼（V4 已移除 Hermes，repo 內另有最新版）。
+- Phase 3「Hermes 整合」——由 V4 的 remote agent adapter（Claude/Codex）取代。
 - solution-agent 以本機 Python 常駐服務運行——牴觸 `SPEC.md` §3（核心不內嵌
   Python）。改為：**執行層跑在遠端主機**，CozyPad 經 SSH 與 durable files 溝通
   （`SPEC.md` §17 既留此選項）。

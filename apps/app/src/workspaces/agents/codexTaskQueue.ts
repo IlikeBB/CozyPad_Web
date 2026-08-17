@@ -1,6 +1,8 @@
-export const CODEX_TASK_QUEUE_STORAGE_KEY = 'cozypad3.pendingCodexTrainingTasks.v1';
+import { V4_STORAGE_EVENTS, V4_STORAGE_KEYS } from '../../platform/storageKeys';
 
-export const CODEX_TASK_QUEUE_EVENT = 'cozypad3:codex-training-task-queued';
+export const CODEX_TASK_QUEUE_STORAGE_KEY = V4_STORAGE_KEYS.queues.codexTrainingTasks;
+
+export const CODEX_TASK_QUEUE_EVENT = V4_STORAGE_EVENTS.codexTrainingTaskQueued;
 
 export type QueuedTrainingAgent = 'claude' | 'codex' | 'agy' | 'bailian';
 

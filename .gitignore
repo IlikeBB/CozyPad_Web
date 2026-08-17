@@ -59,6 +59,7 @@ packages/xterm/
 .env.*.local
 data/
 .run-logs/
+CozyPad-1.0.2/
 
 # Local secrets / machine state
 credentials.json

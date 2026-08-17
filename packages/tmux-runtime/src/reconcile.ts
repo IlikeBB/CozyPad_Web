@@ -11,7 +11,7 @@ export interface ReconciliationResult {
 const LIVE_KEEP_STATES = new Set(['running', 'waiting_approval', 'starting']);
 
 /**
- * SPEC_V3 §5.4：連線／重連時比對本機 records 與 tmux 現況。
+ * SPEC_V4 §5.4：連線／重連時比對本機 records 與 tmux 現況。
  * Gate A：session_id 相同但 session_created 不同代表 tmux server 重啟後
  * $N 被回收——不得誤認為舊 session。
  */

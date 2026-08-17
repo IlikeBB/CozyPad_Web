@@ -84,6 +84,7 @@ export type LegacyCodexWorkflow = {
   mode?: 'server';
   prompt: string;
   output: string;
+  usage?: string;
   model?: string;
   reasoningEffort?: LegacyCodexReasoningEffort;
   status?: 'completed' | 'running' | 'failed';
@@ -162,6 +163,16 @@ export type LegacyCodexStatus = LegacyAgyStatus & {
   defaultModel?: string;
 };
 export type LegacyCodexRunResponse = LegacyAgyRunResponse;
+
+export type LegacyCodexModelUpdateResponse = {
+  ok: boolean;
+  server: LegacySshServer;
+  model: string;
+  applied: boolean;
+  activeSessionUnchanged?: boolean;
+  stdout?: string;
+  stderr?: string;
+};
 export type LegacyBailianStatus = LegacyAgyStatus;
 export type LegacyBailianRunResponse = LegacyAgyRunResponse;
 
@@ -1297,6 +1308,26 @@ export async function getLegacyCodexStatus(serverId: string): Promise<LegacyCode
   } catch (error) {
     if (!isCloudflareEdgeBlock(error)) throw error;
     return legacyTextRpcRequest<LegacyCodexStatus>(`${AGENT_RPC_PREFIX}/codex/status`, { serverId });
+  }
+}
+
+export async function applyLegacyCodexModel(
+  serverId: string,
+  model: string,
+): Promise<LegacyCodexModelUpdateResponse> {
+  assertLegacySshExecutionEnabled();
+  const payload = { serverId, model };
+  try {
+    return await legacyApiRequest<LegacyCodexModelUpdateResponse>('/api/ssh/codex/model', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    if (!isCloudflareEdgeBlock(error)) throw error;
+    return legacyTextRpcRequest<LegacyCodexModelUpdateResponse>(
+      `${AGENT_RPC_PREFIX}/codex/model`,
+      payload,
+    );
   }
 }
 

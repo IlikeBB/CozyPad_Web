@@ -31,24 +31,25 @@ import {
 } from './codexTaskQueue';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
 import { commonAgentSlashCommands } from './slashCommands';
+import { V4_STORAGE_KEYS } from '../../platform/storageKeys';
 
 const AGENT_CONFIG = {
   codex: {
     label: 'Codex',
     title: 'Codex CLI',
-    storageKey: 'cozypad3.legacyCodexTasks.v1',
+    storageKey: V4_STORAGE_KEYS.agents.codexTasks,
     getStatus: getLegacyCodexStatus,
   },
   agy: {
     label: 'agy',
     title: 'agy CLI',
-    storageKey: 'cozypad3.legacyAgyTasks.v1',
+    storageKey: V4_STORAGE_KEYS.agents.agyTasks,
     getStatus: getLegacyAgyStatus,
   },
   bailian: {
     label: 'baillian',
     title: 'baillian',
-    storageKey: 'cozypad3.legacyBailianTasks.v1',
+    storageKey: V4_STORAGE_KEYS.agents.bailianTasks,
     getStatus: getLegacyBailianStatus,
   },
 } as const;
@@ -58,8 +59,8 @@ const MAX_TASKS = 24;
 const MAX_OUTPUT_LENGTH = 120_000;
 const MAX_KEY_TEXT_LENGTH = 24_000;
 const AGENT_WS_STALE_RECONNECT_MS = 90_000;
-const AGY_MODEL_STORAGE_KEY = 'cozypad3.remoteAgy.model.v1';
-const BAILIAN_MODEL_STORAGE_KEY = 'cozypad3.remoteBailian.model.v1';
+const AGY_MODEL_STORAGE_KEY = V4_STORAGE_KEYS.agentModels.agy;
+const BAILIAN_MODEL_STORAGE_KEY = V4_STORAGE_KEYS.agentModels.bailian;
 const AGY_MODEL_FALLBACKS = [
   'gemini-3.6-flash-high',
   'gemini-3.6-flash-medium',

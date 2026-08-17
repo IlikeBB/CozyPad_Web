@@ -46,7 +46,7 @@ function subscribe<T>(
   };
 }
 
-/** 唯一暴露給 renderer 的 API 面；窄、具名、雙向 Zod 驗證（SPEC_V3 4.1）。 */
+/** 唯一暴露給 renderer 的 API 面；窄、具名、雙向 Zod 驗證（SPEC_V4 4.1）。 */
 const bridge: PlatformBridge = {
   kind: 'electron',
 

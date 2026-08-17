@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Markdown from 'react-markdown';
 import type { RemoteFileItem } from '@cozypad/contracts';
 import { textToBase64 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
@@ -7,11 +6,7 @@ import { CodeEditor } from '../components/CodeEditor';
 import { ContextMenu, useLongPress } from '../components/ContextMenu';
 import type { MenuAction } from '../components/ContextMenu';
 import { FileIcon, fileKindOf } from '../components/FileIcons';
-import {
-  markdownRehypePlugins,
-  markdownRemarkPlugins,
-  normalizeMarkdownMath,
-} from '../components/markdownPlugins';
+import { MathAwareMarkdown } from '../components/markdownComponents';
 import { PdfViewer } from '../components/PdfViewer';
 import { mimeTypeForFileName, saveWithBrowserDownload } from '../fileDownload';
 import { buildFileBreadcrumbs, directoryItems } from './fileNavigation';
@@ -1125,11 +1120,11 @@ function LegacyServerFilesWorkspace({
                   </video>
                 </div>
               ) : preview.kind === 'markdown' ? (
-                <div className="markdown markdown-doc legacy-file-markdown">
-                  <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                    {normalizeMarkdownMath(preview.content)}
-                  </Markdown>
-                </div>
+                <MathAwareMarkdown
+                  className="markdown-doc legacy-file-markdown"
+                  showImages={false}
+                  text={preview.content}
+                />
               ) : preview.kind === 'text' ? (
                 <pre className="legacy-file-text-preview">{preview.content}</pre>
               ) : (
@@ -1906,11 +1901,11 @@ function BridgeFilesWorkspace({ active = false, connected }: FilesWorkspaceProps
                 </div>
               )
             ) : draft && isMarkdown(selected) && mdPreview ? (
-              <div className="md-preview markdown markdown-doc">
-                <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                  {normalizeMarkdownMath(draft.text)}
-                </Markdown>
-              </div>
+              <MathAwareMarkdown
+                className="md-preview markdown-doc"
+                showImages={false}
+                text={draft.text}
+              />
             ) : draft ? (
               <CodeEditor
                 path={draft.path}

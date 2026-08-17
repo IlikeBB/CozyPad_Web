@@ -169,7 +169,7 @@ const live = (sessionId: string, createdEpoch = 1000, name = `sdh_${sessionId}`)
   attached: false,
 });
 
-describe('reconcileSessions (SPEC_V3 §5.4 / Gate A)', () => {
+describe('reconcileSessions (SPEC_V4 §5.4 / Gate A)', () => {
   it('marks records without a live session as exited', () => {
     const result = reconcileSessions([record({ tmuxSessionId: '$1' })], [], 'now');
     expect(result.updated[0]?.status).toBe('exited');

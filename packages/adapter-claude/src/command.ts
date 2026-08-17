@@ -1,6 +1,6 @@
 /**
- * Claude CLI 非互動 structured mode 的啟動參數（SPEC_V3 §7.3）。
- * 回傳 argv 陣列——prompt 一律走 stdin，不拼接進 shell 字串（SPEC_V3 §13）。
+ * Claude CLI 非互動 structured mode 的啟動參數（SPEC_V4 §7.3）。
+ * 回傳 argv 陣列——prompt 一律走 stdin，不拼接進 shell 字串（SPEC_V4 §13）。
  * 實際 flags 應在 capability detection 後確認，不得假定所有遠端版本相同。
  */
 export function buildClaudeArgv(options: {

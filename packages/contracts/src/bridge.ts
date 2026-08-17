@@ -40,7 +40,7 @@ import type {
 
 export type Unsubscribe = () => void;
 
-export type PlatformBridgeKind = 'electron' | 'capacitor' | 'mock';
+export type PlatformBridgeKind = 'electron' | 'mock';
 
 export interface AppInfo {
   /** true = 內建假資料模式（COZYPAD_MOCK=1 或瀏覽器 mock bridge）。 */
@@ -48,8 +48,7 @@ export interface AppInfo {
 }
 
 /**
- * 背景維持連線的能力。手機需要前景服務才能在切換 app／關螢幕時保住 socket；
- * 桌面只要視窗開著就會持續執行，回報 unsupported。
+ * 背景維持連線的能力。V4 Web/Desktop 主線不提供原生背景服務，通常回報 unsupported。
  */
 export interface BackgroundMode {
   supported: boolean;
@@ -57,8 +56,8 @@ export interface BackgroundMode {
 }
 
 /**
- * 唯一允許 React app 接觸平台能力的介面（SPEC_V3 3.1）。
- * Electron preload、Capacitor plugin 與瀏覽器 mock 各自實作。
+ * 唯一允許 React app 接觸平台能力的介面（SPEC_V4 3.1）。
+ * Electron preload 與瀏覽器 mock 各自實作。
  */
 export interface PlatformBridge {
   readonly kind: PlatformBridgeKind;
@@ -92,8 +91,7 @@ export interface PlatformBridge {
   fsMove(request: FsTransferRequest): Promise<FsPathResult>;
   fsDelete(request: FsPathRequest): Promise<void>;
   /**
-   * 原生平台可選的下載落盤能力。Android 使用 MediaStore／系統文件選擇器；
-   * 未提供時 renderer 使用標準 browser download。
+   * 原生平台可選的下載落盤能力。未提供時 renderer 使用標準 browser download。
    */
   saveDownload?(request: SaveDownloadRequest): Promise<SaveDownloadResult>;
 

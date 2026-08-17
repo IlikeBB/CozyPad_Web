@@ -22,7 +22,7 @@ const RECORD: RemoteAgentSessionRecord = {
   lastEventSequence: 0,
 };
 
-describe('bindAgentIdentity (SPEC_V3 §5.3)', () => {
+describe('bindAgentIdentity (SPEC_V4 §5.3)', () => {
   it('upgrades provisional identity to the formal composite identity', () => {
     const bound = bindAgentIdentity(RECORD, {
       agentConversationId: 'conv-abc',
@@ -74,7 +74,7 @@ describe('bindAgentIdentity (SPEC_V3 §5.3)', () => {
   });
 });
 
-describe('agentSessionKey (SPEC_V3 Gate A)', () => {
+describe('agentSessionKey (SPEC_V4 Gate A)', () => {
   const base = {
     connectionProfileId: 'p1',
     remoteHostFingerprint: 'fp',

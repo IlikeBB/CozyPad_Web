@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { AgentKindSchema } from './chat';
 
-/** SPEC_V3 §7.1：所有 adapter 必須輸出的一致事件。共同 envelope 欄位。 */
+/** SPEC_V4 §7.1：所有 adapter 必須輸出的一致事件。共同 envelope 欄位。 */
 const envelope = {
   eventId: z.string().min(1),
   sequence: z.number().int().min(0),
@@ -18,7 +18,7 @@ function event<K extends string, S extends z.ZodRawShape>(kind: K, shape: S) {
 
 export const NormalizedAgentEventSchema = z.discriminatedUnion('kind', [
   /**
-   * adapter 取得 conversation ID 的初始化事件（SPEC_V3 §5.3 步驟 3-4）；
+   * adapter 取得 conversation ID 的初始化事件（SPEC_V4 §5.3 步驟 3-4）；
    * conversation ID 走 envelope 的 agentConversationId 欄位。
    */
   event('session_initialized', {

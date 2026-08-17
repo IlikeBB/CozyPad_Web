@@ -3,12 +3,13 @@ import {
   readQueuedCodexTrainingTasks,
   removeQueuedCodexTrainingTask,
 } from './agents/codexTaskQueue';
+import { V4_STORAGE_KEYS } from '../platform/storageKeys';
 
-const CODEX_TASKS_STORAGE_KEY = 'cozypad3.legacyCodexTasks.v1';
-const CLAUDE_TASKS_STORAGE_KEY = 'cozypad3.legacyClaudeTasks.v1';
-const AGY_TASKS_STORAGE_KEY = 'cozypad3.legacyAgyTasks.v1';
-const BAILIAN_TASKS_STORAGE_KEY = 'cozypad3.legacyBailianTasks.v1';
-const DELETED_WORK_RUNS_STORAGE_KEY = 'cozypad3.deletedWorkRunIds.v1';
+const CODEX_TASKS_STORAGE_KEY = V4_STORAGE_KEYS.agents.codexTasks;
+const CLAUDE_TASKS_STORAGE_KEY = V4_STORAGE_KEYS.agents.claudeTasks;
+const AGY_TASKS_STORAGE_KEY = V4_STORAGE_KEYS.agents.agyTasks;
+const BAILIAN_TASKS_STORAGE_KEY = V4_STORAGE_KEYS.agents.bailianTasks;
+const DELETED_WORK_RUNS_STORAGE_KEY = V4_STORAGE_KEYS.workRuns.deletedRunIds;
 const MAX_DELETED_WORK_RUNS = 512;
 
 export const WORK_REFRESH_EVENT = 'cozypad-research-runs-updated';

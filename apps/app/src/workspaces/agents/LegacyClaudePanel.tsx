@@ -18,9 +18,10 @@ import {
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
+import { V4_STORAGE_KEYS } from '../../platform/storageKeys';
 
-const STORAGE_KEY = 'cozypad3.legacyClaudeTasks.v1';
-const CLAUDE_MODEL_STORAGE_KEY = 'cozypad3.remoteClaude.model.v1';
+const STORAGE_KEY = V4_STORAGE_KEYS.agents.claudeTasks;
+const CLAUDE_MODEL_STORAGE_KEY = V4_STORAGE_KEYS.agentModels.claude;
 const WORK_REFRESH_EVENT = 'cozypad-research-runs-updated';
 const MAX_TASKS = 24;
 const MAX_OUTPUT_LENGTH = 120_000;
@@ -388,22 +389,6 @@ function visibleClaudeStreamText(value: string): string {
       );
     })
     .join('\n');
-}
-
-function buildClaudeAssistantItems(taskId: string, reply: string, cwd: string): ChatItem[] {
-  const timestamp = new Date().toISOString();
-  const items: ChatItem[] = [
-    {
-      kind: 'message',
-      id: `${taskId}:assistant:${Date.now()}`,
-      role: 'assistant',
-      text: reply,
-      timestamp,
-    },
-  ];
-  const approval = detectClaudeApprovalRequest(reply, cwd);
-  if (approval) items.push(approval);
-  return items;
 }
 
 function buildApprovalResolutionMessage(

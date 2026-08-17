@@ -71,7 +71,7 @@ function throwOnError(output: string, fallback: string): string {
 }
 
 /**
- * tmux 是 process supervisor 與 reconnect anchor，不是聊天協定（SPEC_V3 §6）。
+ * tmux 是 process supervisor 與 reconnect anchor，不是聊天協定（SPEC_V4 §6）。
  * 一律以 #{session_id} 定位；capture-pane 只供 fallback／診斷。
  */
 export class TmuxRuntime {
@@ -110,7 +110,7 @@ ${this.tmux()} list-sessions -F '#{session_id}\t#{session_name}\t#{session_creat
 
   /**
    * 建立 detached session 並回傳真正的 #{session_id}／#{pane_id}
-   * （SPEC_V3 §5.3 步驟 2）。command 以 argv 形式傳入，不做字串拼接。
+   * （SPEC_V4 §5.3 步驟 2）。command 以 argv 形式傳入，不做字串拼接。
    */
   async newSession(options: {
     name: string;
@@ -161,7 +161,7 @@ ${this.tmux()} new-session -d -s "$session" -c "$cwd" -P -F '__TMUX__\t#{session
     );
   }
 
-  /** 以 literal 模式送字（-l），避免 tmux 把輸入解讀成 key names（SPEC_V3 §13）。 */
+  /** 以 literal 模式送字（-l），避免 tmux 把輸入解讀成 key names（SPEC_V4 §13）。 */
   async sendText(target: string, text: string, pressEnter = true): Promise<void> {
     const command = `if ! ${this.tmux()} has-session -t ${quoteShellArg(target)} 2>/dev/null; then
   echo "__ERROR__\tSession not found: ${target}"
@@ -174,7 +174,7 @@ printf "__OK__\\n"
     throwOnError(await this.exec(command, 5000), 'tmux send failed');
   }
 
-  /** Terminal fallback／診斷用；不得作為 chat 主資料源（SPEC_V3 §6）。 */
+  /** Terminal fallback／診斷用；不得作為 chat 主資料源（SPEC_V4 §6）。 */
   async capturePane(target: string, lines = 160): Promise<string> {
     const clamped = Math.min(500, Math.max(20, Math.trunc(lines)));
     const command = `if ! ${this.tmux()} has-session -t ${quoteShellArg(target)} 2>/dev/null; then

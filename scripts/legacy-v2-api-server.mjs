@@ -220,7 +220,7 @@ const DOMIN_EXE = path.join(DOMIN_ROOT, "CloudflareDdnsAgent.exe");
 const DOMIN_UPDATE_SCRIPT = path.join(DOMIN_ROOT, "update-ddns.ps1");
 const DOMIN_TASK_NAME =
   process.env.COZYPAD_DOMIN_TASK_NAME || "Cloudflare DDNS cats.modoubletw.com";
-const MONITOR_INTERVAL_MS = Number(process.env.COZYPAD_MONITOR_INTERVAL_MS || 30000);
+const MONITOR_INTERVAL_MS = Number(process.env.COZYPAD_MONITOR_INTERVAL_MS || 5000);
 const MONITOR_OPEN_TIMEOUT_MS = Math.max(
   5000,
   Number(process.env.COZYPAD_MONITOR_OPEN_TIMEOUT_MS || 20000) || 20000,
@@ -2225,6 +2225,7 @@ function publicCodexWorkflow(workflow) {
     mode: "server",
     prompt: workflow.prompt || "",
     output: workflow.output || "",
+    usage: workflow.usage || "",
     model: workflow.model || "",
     reasoningEffort: workflow.reasoningEffort || "",
     status: normalizeCodexWorkflowStatus(workflow.status, workflow.running ? "running" : "completed"),
@@ -2267,6 +2268,7 @@ function codexWorkflowFromBody(body, server, existing = null) {
     mode,
     prompt,
     output: trimCodexWorkflowOutput(body.output ?? existing?.output ?? ""),
+    usage: String(body.usage ?? existing?.usage ?? "").trim().slice(0, 2000),
     model: normalizeCodexModelOption(body.model ?? existing?.model ?? ""),
     reasoningEffort: normalizeCodexReasoningEffortOption(
       body.reasoningEffort ?? existing?.reasoningEffort ?? "",
@@ -2727,9 +2729,9 @@ async function getRemoteCodexStatus(session, serverId = "") {
       defaultModel: modelInfo.defaultModel,
     };
   }
-  if (AGENT_TERMINAL_BRIDGE_ENABLED && findReusableTerminalSession(session, server.id)) {
-    return getTerminalBridgeAgentStatus(session, server, "Codex", "Codex");
-  }
+  // A manual Codex check must inspect the remote CLI itself. The terminal
+  // bridge only proves that a shell exists and cannot report its model catalog.
+  // Actual runs still reuse the existing terminal bridge and do not reconnect.
   const blockKey = assertRemoteAgentNotBlocked("Codex", getTerminalOwner(session), server);
 
   const script = [
@@ -2833,7 +2835,9 @@ async function getRemoteCodexStatus(session, serverId = "") {
     models: normalizeCodexModelList([
       modelInfo.defaultModel,
       ...modelInfo.models,
-      ...(modelInfo.models.length ? [] : CODEX_MODEL_FALLBACKS),
+      // Do not advertise synthetic models when the remote CLI exposed a
+      // usable default but did not return its model catalog.
+      ...(modelInfo.defaultModel || modelInfo.models.length ? [] : CODEX_MODEL_FALLBACKS),
     ]),
     defaultModel: modelInfo.defaultModel,
   };
@@ -6821,6 +6825,7 @@ function createUsageCommand() {
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import time
@@ -7016,9 +7021,61 @@ def read_gpu():
     temperature = None if not temperatures else round(sum(temperatures) / len(temperatures), 1)
     return rows, gpu_percent, memory_percent, temperature, len(rows)
 
+def redact_command(command):
+    value = " ".join(str(command or "").split())
+    if not value:
+        return "-"
+
+    patterns = [
+        r"(?i)(--?(?:api[-_]?key|authorization|password|passwd|secret|token|private[-_]?key))(?:=|\s+)\S+",
+        r"(?i)([A-Z_]*(?:API_KEY|TOKEN|PASSWORD|SECRET|PRIVATE_KEY))=(?:[^\s]+)",
+    ]
+    for pattern in patterns:
+        value = re.sub(pattern, r"\1=[redacted]", value)
+    return value[:240]
+
+def read_processes():
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "user=,pid=,pcpu=,pmem=,etime=,args="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return []
+
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 5)
+        if len(parts) < 6:
+            continue
+        user, raw_pid, raw_cpu, raw_memory, elapsed, command = parts
+        try:
+            pid = int(raw_pid)
+            cpu_percent = float(raw_cpu)
+            memory_percent = float(raw_memory)
+        except ValueError:
+            continue
+        if pid <= 0:
+            continue
+        rows.append({
+            "user": user or "?",
+            "pid": pid,
+            "cpuPercent": round(cpu_percent, 1),
+            "memoryPercent": round(memory_percent, 1),
+            "elapsed": elapsed or "-",
+            "command": redact_command(command),
+        })
+
+    rows.sort(key=lambda item: (item["cpuPercent"], item["memoryPercent"]), reverse=True)
+    return rows[:32]
+
 memory_total, memory_available, memory_percent = read_memory()
 disks, disk_total, disk_used, disk_percent = read_disks()
 gpus, gpu_percent, gpu_memory_percent, gpu_temperature_c, gpu_count = read_gpu()
+processes = read_processes()
 load = os.getloadavg() if hasattr(os, "getloadavg") else (0, 0, 0)
 
 print(json.dumps({
@@ -7038,6 +7095,7 @@ print(json.dumps({
     "load15": round(load[2], 2),
     "uptimeSeconds": read_uptime(),
     "processCount": len([name for name in os.listdir("/proc") if name.isdigit()]) if os.path.isdir("/proc") else 0,
+    "processes": processes,
     "gpuPercent": gpu_percent,
     "gpuMemoryPercent": gpu_memory_percent,
     "gpuTemperatureC": gpu_temperature_c,
@@ -7211,6 +7269,19 @@ function createUsageMetrics(parsed, fallbackName) {
     load15: Number(parsed.load15) || 0,
     uptimeSeconds: Number(parsed.uptimeSeconds) || 0,
     processCount: Number(parsed.processCount) || 0,
+    processes: Array.isArray(parsed.processes)
+      ? parsed.processes
+          .map((process) => ({
+            user: String(process?.user ?? process?.User ?? "?").trim() || "?",
+            pid: Number(process?.pid ?? process?.Pid) || 0,
+            cpuPercent: Number(process?.cpuPercent ?? process?.CpuPercent) || 0,
+            memoryPercent: Number(process?.memoryPercent ?? process?.MemoryPercent) || 0,
+            elapsed: String(process?.elapsed ?? process?.Elapsed ?? "-").trim() || "-",
+            command: String(process?.command ?? process?.Command ?? "-").trim() || "-",
+          }))
+          .filter((process) => process.pid > 0)
+          .slice(0, 32)
+      : [],
     gpuPercent: nullableNumber(parsed.gpuPercent),
     gpuMemoryPercent: nullableNumber(parsed.gpuMemoryPercent),
     gpuTemperatureC: nullableNumber(parsed.gpuTemperatureC),
@@ -7273,6 +7344,36 @@ $disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction 
     percent = if ($size -gt 0) { [Math]::Round(($used * 100) / $size, 1) } else { 0 }
   }
 })
+$totalMemory = [double](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+$processDetails = @{}
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+  $processDetails[[int]$_.ProcessId] = $_
+}
+$processUsers = @{}
+Get-Process -IncludeUserName -ErrorAction SilentlyContinue | ForEach-Object {
+  $processUsers[[int]$_.Id] = $_.UserName
+}
+$processes = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.IDProcess -and $_.Name -ne "_Total" -and $_.Name -ne "Idle" } |
+  Sort-Object PercentProcessorTime -Descending |
+  Select-Object -First 32 | ForEach-Object {
+    $pid = [int]$_.IDProcess
+    $detail = $processDetails[$pid]
+    $user = [string]$processUsers[$pid]
+    if (-not $user) { $user = "SYSTEM" }
+    $command = if ($detail -and $detail.CommandLine) { [string]$detail.CommandLine } else { [string]$_.Name }
+    $command = ($command -replace "(?i)(--?(api[-_]?key|authorization|password|passwd|secret|token|private[-_]?key))(=|\\s+)\\S+", '$1=[redacted]')
+    $command = ($command -replace "(?i)([A-Z_]*(API_KEY|TOKEN|PASSWORD|SECRET|PRIVATE_KEY))=[^\\s]+", '$1=[redacted]')
+    if ($command.Length -gt 240) { $command = $command.Substring(0, 240) }
+    [pscustomobject]@{
+      user = ($user -split "\\")[-1]
+      pid = $pid
+      cpuPercent = [Math]::Round([double]$_.PercentProcessorTime, 1)
+      memoryPercent = if ($totalMemory -gt 0) { [Math]::Round(([double]$_.WorkingSetPrivate * 100) / $totalMemory, 1) } else { 0 }
+      elapsed = "-"
+      command = $command
+    }
+  })
 $total = [double](($disks | Measure-Object -Property totalKb -Sum).Sum)
 $usedTotal = [double](($disks | Measure-Object -Property usedKb -Sum).Sum)
 $percent = if ($total -gt 0) { [Math]::Round(($usedTotal * 100) / $total, 1) } else { 0 }
@@ -7282,6 +7383,7 @@ $percent = if ($total -gt 0) { [Math]::Round(($usedTotal * 100) / $total, 1) } e
   DiskPercent = $percent
   Disks = $disks
   ProcessCount = @((Get-Process -ErrorAction SilentlyContinue)).Count
+  Processes = $processes
 } | ConvertTo-Json -Compress -Depth 5
 `.trim();
   const result = await runProcess("powershell.exe", ["-NoProfile", "-Command", script], {
@@ -7296,6 +7398,7 @@ $percent = if ($total -gt 0) { [Math]::Round(($usedTotal * 100) / $total, 1) } e
       diskPercent: 0,
       disks: [],
       processCount: 0,
+      processes: [],
     };
   }
 
@@ -7308,6 +7411,7 @@ $percent = if ($total -gt 0) { [Math]::Round(($usedTotal * 100) / $total, 1) } e
       diskPercent: Number(parsed.DiskPercent) || 0,
       disks,
       processCount: Number(parsed.ProcessCount) || 0,
+      processes: Array.isArray(parsed.Processes) ? parsed.Processes : [],
     };
   } catch {
     return {
@@ -7316,6 +7420,7 @@ $percent = if ($total -gt 0) { [Math]::Round(($usedTotal * 100) / $total, 1) } e
       diskPercent: 0,
       disks: [],
       processCount: 0,
+      processes: [],
     };
   }
 }
@@ -7509,6 +7614,7 @@ function startLocalMonitorStream(server, onUpdate) {
           load15: os.loadavg()[2] || 0,
           uptimeSeconds: Math.round(os.uptime()),
           processCount: disk.processCount,
+          processes: disk.processes,
           gpuPercent: gpu.gpuPercent,
           gpuMemoryPercent: gpu.gpuMemoryPercent,
           gpuTemperatureC: gpu.gpuTemperatureC,
@@ -10098,6 +10204,7 @@ async function createTerminalSession(id, owner, server, dimensions = {}, gateOpt
     sockets: new Set(),
     watchers: new Set(),
     activeAgentJob: null,
+    codexModel: "",
     buffer: "",
     cleanupTimer: null,
     createdAt: now,
@@ -11074,6 +11181,10 @@ async function spawnTerminalAgentJob(session, agent, prompt, server, options = {
     );
   }
 
+  if (agent === "codex" && options.model) {
+    terminalSession.codexModel = normalizeCodexModelOption(options.model);
+  }
+
   const jobId = `termjob_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
   const job = createTerminalAgentJob(terminalSession, agent, jobId);
   terminalSession.activeAgentJob = job;
@@ -11220,15 +11331,11 @@ function getTerminalBridgeAgentStatus(session, server, agent, label) {
   const terminalSession = findReusableTerminalSession(session, server.id);
   const agentLower = String(agent || "").toLowerCase();
   const modelStatus =
-    agentLower === "codex"
-      ? { models: CODEX_MODEL_FALLBACKS, defaultModel: "" }
-      : agentLower === "claude"
-        ? { models: CLAUDE_MODEL_FALLBACKS, defaultModel: "" }
-        : agentLower === "agy"
-          ? { models: AGY_MODEL_FALLBACKS, defaultModel: "" }
-          : agentLower === "bailian"
-            ? bailianModelInfo()
-          : {};
+    agentLower === "codex" && terminalSession?.codexModel
+      ? { models: [terminalSession.codexModel], defaultModel: terminalSession.codexModel }
+      : agentLower === "bailian"
+        ? bailianModelInfo()
+        : {};
   return {
     server: publicSshServer(server),
     available: Boolean(terminalSession),
@@ -13050,7 +13157,93 @@ async function getLocalCodexModelInfo(session, cli) {
 
   return {
     defaultModel,
-    models: normalizeCodexModelList([defaultModel, ...models, ...CODEX_MODEL_FALLBACKS]),
+    models: normalizeCodexModelList([
+      defaultModel,
+      ...models,
+      ...(defaultModel || models.length ? [] : CODEX_MODEL_FALLBACKS),
+    ]),
+  };
+}
+
+async function applyRemoteCodexModel(session, body) {
+  const serverId = String(body.serverId || '').trim();
+  const model = normalizeCodexModelOption(body.model);
+  const server = serverId ? await findServer(serverId, session) : null;
+  if (!server) {
+    throw new Error('Server is required');
+  }
+  if (isSystemLocalServer(server)) {
+    throw new Error('Remote Codex model update requires an SSH server');
+  }
+
+  const modelArg = shellQuote(model);
+  const script = [
+    'set -eu',
+    'command -v codex >/dev/null 2>&1 || { printf "[CozyPad] remote Codex CLI not found\\n" >&2; exit 127; }',
+    'codex_home="${CODEX_HOME:-$HOME/.codex}"',
+    'mkdir -p "$codex_home"',
+    'config_file="$codex_home/config.toml"',
+    'tmp_file=$(mktemp "${config_file}.cozypad.XXXXXX")',
+    'cleanup() { rm -f "$tmp_file"; }',
+    'trap cleanup EXIT INT TERM',
+    `selected_model=${modelArg}`,
+    'if [ -f "$config_file" ]; then',
+    '  awk -v model="$selected_model" \'BEGIN { updated = 0 } /^[[:space:]]*model[[:space:]]*=/ && updated == 0 { if (model != "") printf "model = \\\"%s\\\"\\n", model; updated = 1; next } { print } END { if (updated == 0 && model != "") printf "model = \\\"%s\\\"\\n", model }\' "$config_file" > "$tmp_file"',
+    'else',
+    '  if [ -n "$selected_model" ]; then printf \'model = "%s"\\n\' "$selected_model" > "$tmp_file"; else : > "$tmp_file"; fi',
+    'fi',
+    'mv "$tmp_file" "$config_file"',
+    'trap - EXIT INT TERM',
+    'if [ -n "$selected_model" ]; then',
+    '  printf "__COZYPAD_CODEX_MODEL__:%s\\n" "$selected_model"',
+    '  printf "[CozyPad] remote Codex default model set for the next run.\\n"',
+    'else',
+    '  printf "__COZYPAD_CODEX_MODEL__:\\n"',
+    '  printf "[CozyPad] remote Codex default model cleared for the next run.\\n"',
+    'fi',
+  ].join('\\n');
+
+  const result = await runRemoteCommand(
+    session,
+    server,
+    `sh -lc ${shellQuote(script)}`,
+    30000,
+    {
+      purpose: 'Remote Codex model update',
+      connectTimeout: 8,
+      connectionAttempts: 1,
+      stdoutLimit: 32 * 1024,
+      stderrLimit: 32 * 1024,
+    },
+  );
+  const marker = String(result.stdout || '').match(/__COZYPAD_CODEX_MODEL__:(.*)/);
+  const appliedModel = normalizeCodexModelOption(marker?.[1] || '');
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || 'Remote Codex model update failed');
+  }
+  const owner = getTerminalOwner(session);
+  for (const terminalSession of terminalSessions.values()) {
+    if (terminalSession.owner === owner && terminalSession.serverId === server.id) {
+      terminalSession.codexModel = appliedModel;
+    }
+  }
+  for (const codexSession of codexSessions.values()) {
+    if (
+      codexSession.owner === owner &&
+      codexSession.serverId === server.id &&
+      !codexSession.ended
+    ) {
+      codexSession.codexModel = appliedModel;
+    }
+  }
+  return {
+    ok: true,
+    server: publicSshServer(server),
+    model: appliedModel,
+    applied: true,
+    activeSessionUnchanged: true,
+    stdout: result.stdout,
+    stderr: result.stderr,
   };
 }
 
@@ -14337,8 +14530,14 @@ async function spawnRemoteCodex(prompt, server, codexSession, attachments = [], 
   return job;
 }
 
-function createCodexOutputParser(target, onText = () => undefined, onOpenAiAuthError = () => undefined) {
+function createCodexOutputParser(
+  target,
+  onText = () => undefined,
+  onOpenAiAuthError = () => undefined,
+  onUsage = () => undefined,
+) {
   let buffer = "";
+  let pendingPlainUsageLine = false;
   const sendText =
     typeof target === "function" ? target : (text) => sendWebSocketText(target, text);
 
@@ -14383,6 +14582,172 @@ function createCodexOutputParser(target, onText = () => undefined, onOpenAiAuthE
       return `${type || "event"}: ${String(text).slice(0, 220)}`;
     }
     return type;
+  }
+
+  function usageEventLine(event) {
+    const candidates = [
+      event,
+      event?.usage,
+      event?.turn?.usage,
+      event?.item?.usage,
+      event?.result?.usage,
+      event?.result?.response?.usage,
+      event?.response?.usage,
+      event?.response?.body?.usage,
+      event?.data?.usage,
+    ].filter((value) => value && typeof value === "object");
+
+    // Codex CLI has changed the nesting of usage data between releases. Walk
+    // the event defensively, but only keep shallow objects that contain token
+    // fields so unrelated numeric metadata is never rendered as usage.
+    const tokenFieldPattern = /(?:^|_)(?:total|input|prompt|output|completion|cached|cache|reasoning|context)(?:_|$)/i;
+    const seen = new Set();
+    const collectUsageObjects = (value, depth = 0) => {
+      if (!value || typeof value !== "object" || depth > 5 || seen.has(value)) return;
+      seen.add(value);
+      const keys = Object.keys(value);
+      if (keys.some((key) => tokenFieldPattern.test(key))) {
+        candidates.push(value);
+      }
+      for (const child of Object.values(value)) {
+        if (child && typeof child === "object") collectUsageObjects(child, depth + 1);
+      }
+    };
+    collectUsageObjects(event);
+
+    const uniqueCandidates = [...new Set(candidates)];
+    if (uniqueCandidates.length === 0) return "";
+
+    const readNumber = (source, keys, depth = 0, visited = new Set()) => {
+      if (!source || typeof source !== "object" || depth > 3 || visited.has(source)) {
+        return null;
+      }
+      visited.add(source);
+      for (const key of keys) {
+        const value = source?.[key];
+        const numericValue =
+          typeof value === "number"
+            ? value
+            : typeof value === "string" && value.trim() !== ""
+              ? Number(value.replaceAll(",", ""))
+              : NaN;
+        if (Number.isFinite(numericValue) && numericValue >= 0) {
+          return Math.floor(numericValue);
+        }
+      }
+      for (const child of Object.values(source)) {
+        if (child && typeof child === "object") {
+          const nestedValue = readNumber(child, keys, depth + 1, visited);
+          if (nestedValue !== null) return nestedValue;
+        }
+      }
+      return null;
+    };
+
+    for (const usage of uniqueCandidates) {
+      const total = readNumber(usage, ["total_tokens", "totalTokens", "total"]);
+      const input = readNumber(usage, [
+        "input_tokens",
+        "inputTokens",
+        "prompt_tokens",
+        "promptTokens",
+        "input",
+      ]);
+      const cachedInput = readNumber(usage, [
+        "cached_input_tokens",
+        "cachedInputTokens",
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cached_input",
+        "cached_tokens",
+        "cachedTokens",
+        "cache_read_tokens",
+        "cacheReadTokens",
+      ]);
+      const output = readNumber(usage, [
+        "output_tokens",
+        "outputTokens",
+        "completion_tokens",
+        "completionTokens",
+        "output",
+      ]);
+      const reasoning = readNumber(usage, [
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+        "reasoningTokens",
+        "reasoning",
+      ]);
+      const currentContext = readNumber(usage, [
+        "current_context_tokens",
+        "currentContextTokens",
+        "context_tokens",
+        "contextTokens",
+        "context_used_tokens",
+        "contextUsedTokens",
+        "used_tokens",
+        "usedTokens",
+        "current_context",
+        "currentContext",
+        "context",
+      ]);
+      const contextLimit = readNumber(usage, [
+        "context_window_tokens",
+        "contextWindowTokens",
+        "context_limit_tokens",
+        "contextLimitTokens",
+        "max_context_tokens",
+        "context_limit",
+        "contextLimit",
+        "context_window",
+        "contextWindow",
+      ]);
+      const contextRemainingTokens = readNumber(usage, [
+        "context_remaining_tokens",
+        "contextRemainingTokens",
+        "remaining_context_tokens",
+        "remainingContextTokens",
+        "context_remaining",
+        "contextRemaining",
+        "remaining_context",
+        "remainingContext",
+      ]);
+      const contextRemainingPercent = readNumber(usage, [
+        "context_remaining_percent",
+        "contextRemainingPercent",
+        "remaining_context_percent",
+        "remainingContextPercent",
+        "context_remaining_pct",
+        "contextRemainingPct",
+      ]);
+      if (
+        total === null &&
+        input === null &&
+        cachedInput === null &&
+        output === null &&
+        reasoning === null &&
+        currentContext === null &&
+        contextLimit === null &&
+        contextRemainingTokens === null &&
+        contextRemainingPercent === null
+      ) {
+        continue;
+      }
+      return [
+        "[CozyPad] usage",
+        total === null ? null : `total=${total}`,
+        input === null ? null : `input=${input}`,
+        cachedInput === null ? null : `cached_input=${cachedInput}`,
+        output === null ? null : `output=${output}`,
+        reasoning === null ? null : `reasoning=${reasoning}`,
+        currentContext === null ? null : `context=${currentContext}`,
+        contextLimit === null ? null : `context_limit=${contextLimit}`,
+        contextRemainingTokens === null ? null : `context_remaining=${contextRemainingTokens}`,
+        contextRemainingPercent === null ? null : `context_remaining_percent=${contextRemainingPercent}`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+    return "";
   }
 
   function displayEvent(event) {
@@ -14440,6 +14805,10 @@ function createCodexOutputParser(target, onText = () => undefined, onOpenAiAuthE
         onOpenAiAuthError(text);
         return;
       }
+      const usageLine = usageEventLine(event);
+      if (usageLine) {
+        onUsage(`${usageLine}\r\n`);
+      }
       const display = displayEvent(event);
       if (display?.text) {
         const output = sanitizeVisibleText(display.text);
@@ -14458,6 +14827,50 @@ function createCodexOutputParser(target, onText = () => undefined, onOpenAiAuthE
       }
       if (isHiddenImagePayloadLine(line)) {
         return;
+      }
+      const contextPercent = line.match(
+        /context\s+remaining\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*%/i,
+      );
+      if (contextPercent) {
+        const percent = Number(contextPercent[1]);
+        if (Number.isFinite(percent)) {
+          onUsage(`[CozyPad] usage context_remaining_percent=${percent}\r\n`);
+        }
+      }
+      if (/^\s*tokens\s+used\s*$/i.test(line)) {
+        pendingPlainUsageLine = true;
+      }
+      const compactUsage = line.match(
+        /(?:usage|tokens\s+used)?\s*[—-]?\s*in\s+(\d[\d,]*)\s*\/\s*out\s+(\d[\d,]*)\s+tokens?/i,
+      );
+      if (compactUsage) {
+        const input = Number(compactUsage[1].replaceAll(",", ""));
+        const output = Number(compactUsage[2].replaceAll(",", ""));
+        if (Number.isFinite(input) && Number.isFinite(output)) {
+          onUsage(`[CozyPad] usage total=${input + output} input=${input} output=${output}\r\n`);
+          pendingPlainUsageLine = false;
+        }
+      } else if (pendingPlainUsageLine) {
+        const splitUsage = line.match(
+          /^\s*in\s+(\d[\d,]*)\s*\/\s*out\s+(\d[\d,]*)\s+tokens?\s*$/i,
+        );
+        if (splitUsage) {
+          const input = Number(splitUsage[1].replaceAll(",", ""));
+          const output = Number(splitUsage[2].replaceAll(",", ""));
+          if (Number.isFinite(input) && Number.isFinite(output)) {
+            onUsage(`[CozyPad] usage total=${input + output} input=${input} output=${output}\r\n`);
+            pendingPlainUsageLine = false;
+          }
+        } else {
+          const totalUsage = line.match(/^\s*(\d[\d,]*)\s*$/);
+          if (totalUsage) {
+            const total = Number(totalUsage[1].replaceAll(",", ""));
+            if (Number.isFinite(total)) {
+              onUsage(`[CozyPad] usage total=${total}\r\n`);
+              pendingPlainUsageLine = false;
+            }
+          }
+        }
       }
       onText(line);
       sendText(`${line}\r\n`);
@@ -14478,6 +14891,7 @@ function createCodexOutputParser(target, onText = () => undefined, onOpenAiAuthE
         handleLine(buffer);
       }
       buffer = "";
+      pendingPlainUsageLine = false;
     },
   };
 }
@@ -14775,6 +15189,33 @@ function appendCodexSessionOutput(codexSession, text) {
   }
 }
 
+function appendCodexSessionUsage(codexSession, usageLine) {
+  if (!codexSession || codexSession.ended) {
+    return;
+  }
+
+  const line = String(usageLine || "").trim();
+  if (!line) {
+    return;
+  }
+
+  const previous = String(codexSession.usageLine || "").trim();
+  codexSession.usageLine = trimCodexSessionBuffer(
+    previous ? `${previous}\n${line}` : line,
+  );
+
+  // Usage is a control event, not transcript text. Sending it as a separate
+  // WebSocket message lets the browser update the counters without depending
+  // on replayed or filtered CLI output.
+  const message = JSON.stringify({
+    type: "cozypad.usage",
+    usage: codexSession.usageLine,
+  });
+  for (const socket of codexSession.sockets) {
+    sendWebSocketText(socket, message);
+  }
+}
+
 function isHiddenRemoteCodexStderrLine(line) {
   const text = String(line || "").trim();
   const lower = text.toLowerCase();
@@ -14899,6 +15340,13 @@ function attachCodexSocket(codexSession, socket, options = {}) {
     sendWebSocketText(socket, `[CozyPad] codex attached to ${codexSession.serverName}\r\n`);
   }
 
+  if (codexSession.usageLine) {
+    sendWebSocketText(
+      socket,
+      JSON.stringify({ type: "cozypad.usage", usage: codexSession.usageLine }),
+    );
+  }
+
   sendWebSocketText(
     socket,
     codexSession.running
@@ -14949,6 +15397,7 @@ function getOrCreateCodexSession(session, selectedServer, activeHistory, taskId 
     workflowTitle: "",
     codexModel: "",
     codexReasoningEffort: "",
+    usageLine: "",
     status: "completed",
     activeChild: null,
     pendingPrompts: [],
@@ -14981,6 +15430,7 @@ async function persistCodexSessionWorkflow(codexSession, selectedServer) {
         titleFromPrompt(codexSession.workflowPrompt || "", `${selectedServer.name} 工作`),
       prompt: codexSession.workflowPrompt || "",
       output: codexSession.buffer || "",
+      usage: codexSession.usageLine || "",
       model: codexSession.codexModel || "",
       reasoningEffort: codexSession.codexReasoningEffort || "",
       status: codexSession.status || (codexSession.running ? "running" : "completed"),
@@ -15138,7 +15588,10 @@ function finishCodexSessionChild(codexSession, child, message, selectedServer, o
 async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
   const parsedPrompt = parseCodexPromptPayload(Buffer.isBuffer(prompt) ? prompt : Buffer.from(String(prompt || ""), "utf8"));
   const attachments = parsedPrompt.attachments;
-  const codexOptions = normalizeCodexRunOptions(parsedPrompt.options);
+  const codexOptions = normalizeCodexRunOptions({
+    ...parsedPrompt.options,
+    model: parsedPrompt.options.model || codexSession.codexModel || "",
+  });
   const runRemotePath = normalizeRemotePathOption(
     parsedPrompt.remotePath || selectedServer?.defaultPath || "~",
   );
@@ -15148,6 +15601,9 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
   };
   const localCodex = isSystemLocalServer(selectedServer);
   codexSession.selectedServer = selectedServer;
+  if (codexOptions.model) {
+    codexSession.codexModel = codexOptions.model;
+  }
   const userPrompt =
     String(parsedPrompt.prompt || "").trim() ||
     (attachments.length ? "Please help with the attached images." : "");
@@ -15336,6 +15792,10 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
       );
     },
     markOpenAiAuthError,
+    (text) => {
+      lastVisibleCodexOutputAt = Date.now();
+      appendCodexSessionUsage(codexSession, text);
+    },
   );
   let stderr = "";
 
@@ -16494,12 +16954,32 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "POST" && pathname === "/api/ssh/codex/model") {
+    try {
+      const body = await readBody(request, 64 * 1024);
+      sendJson(response, 200, await applyRemoteCodexModel(session, body));
+    } catch (error) {
+      sendErrorJson(response, 400, error, "Remote Codex model update failed");
+    }
+    return;
+  }
+
   if (request.method === "POST" && pathname === "/api/rpc/ssh/codex/run") {
     try {
       const body = await readBase64UrlJsonBody(request, 512 * 1024);
       sendJson(response, 200, await runRemoteCodexPrompt(session, body));
     } catch (error) {
       sendErrorJson(response, 400, error, "Remote Codex run failed");
+    }
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/rpc/ssh/codex/model") {
+    try {
+      const body = await readBase64UrlJsonBody(request, 64 * 1024);
+      sendJson(response, 200, await applyRemoteCodexModel(session, body));
+    } catch (error) {
+      sendErrorJson(response, 400, error, "Remote Codex model update failed");
     }
     return;
   }

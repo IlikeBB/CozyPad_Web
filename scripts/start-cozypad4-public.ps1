@@ -13,11 +13,15 @@ $publicUrl = "https://cozypad.modoubletw.com/"
 $originUrl = "http://127.0.0.1:$WebPort"
 $logDir = Join-Path $root ".run-logs"
 $legacyRoot = Join-Path $root "..\CozyPad"
+$agentTunnelRoot = Join-Path $root "..\..\Agent\cloudflare_ddns_agent"
 $credentialCandidates = @(
   (Join-Path $root "cloudflared-token-credentials.json")
 )
 if (Test-Path -LiteralPath $legacyRoot) {
   $credentialCandidates += Join-Path (Resolve-Path $legacyRoot).Path "cloudflared-token-credentials.json"
+}
+if (Test-Path -LiteralPath $agentTunnelRoot) {
+  $credentialCandidates += Join-Path (Resolve-Path $agentTunnelRoot).Path "cloudflared-token-credentials.json"
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -59,9 +63,9 @@ function Start-CozyPadApi {
   }
 
   $args = "scripts\legacy-v2-api-server.mjs 1> .run-logs\api.out.log 2> .run-logs\api.err.log"
-  $pid = Start-DetachedProcess -FileName "cmd.exe" -Arguments "/d /s /c `"node $args`"" -WorkingDirectory $root
+  $processId = Start-DetachedProcess -FileName "cmd.exe" -Arguments "/d /s /c `"node $args`"" -WorkingDirectory $root
   Start-Sleep -Seconds 2
-  return @($pid)
+  return @($processId)
 }
 
 function Start-CozyPadWeb {
@@ -70,9 +74,9 @@ function Start-CozyPadWeb {
   }
 
   $args = "pnpm --filter @cozypad/app dev 1> .run-logs\vite.out.log 2> .run-logs\vite.err.log"
-  $pid = Start-DetachedProcess -FileName "cmd.exe" -Arguments "/d /s /c `"$args`"" -WorkingDirectory $root
+  $processId = Start-DetachedProcess -FileName "cmd.exe" -Arguments "/d /s /c `"$args`"" -WorkingDirectory $root
   Start-Sleep -Seconds 5
-  return @($pid)
+  return @($processId)
 }
 
 function Get-TunnelCredentialFile {

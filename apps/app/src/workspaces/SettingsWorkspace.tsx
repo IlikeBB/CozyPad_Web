@@ -142,8 +142,7 @@ export function SettingsWorkspace({
             <span>
               切換 app 後維持連線
               <span className="hint settings-sub">
-                以前景服務保住 SSH 連線（狀態列會有常駐通知）。關閉時 Android
-                會在背景凍結連線；無論是否開啟，遠端 tmux 中的工作都不會中斷，重連即可接回。
+                平台支援時可維持 SSH 連線；無論是否開啟，遠端 tmux 中的工作都不會中斷，重連即可接回。
               </span>
             </span>
             <Toggle

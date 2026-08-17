@@ -43,7 +43,7 @@ function summarizeInput(input: unknown, maxLength = 200): string {
 
 /**
  * 把 Claude CLI `--output-format stream-json` 的一行轉成 normalized events
- * （SPEC_V3 §7.1／§7.3）。未知型別容忍略過（回傳空陣列），不得讓 UI 崩潰；
+ * （SPEC_V4 §7.1／§7.3）。未知型別容忍略過（回傳空陣列），不得讓 UI 崩潰；
  * 無法解析的 JSON 產生 agent_error。
  */
 export function parseClaudeStreamLine(

@@ -2,7 +2,7 @@
 
 ## 1. 產品定位
 
-將 手機/本地 連接 遠端主機上的 coding agent 的應用程式。
+將本地 Web/Desktop 介面連接到遠端主機上的 coding agent。
 
 CozyPad 的責任是：
 
@@ -11,7 +11,7 @@ CozyPad 的責任是：
 - 將不同 agent 的結構化事件正規化成一致的聊天體驗。
 - 提供接近 Claude Desktop 品質的對話、工具、權限、diff、附件與 session 管理 UI。
 - 提供完整 SSH PTY Terminal，作為操作、除錯及 agent adapter 降級介面。
-- 讓 Desktop 與 Mobile 共用 domain contracts，但使用各自最合適的 UI。
+- 讓 Web 與 Desktop 共用 domain contracts，並保留未來平台殼替換空間。
 - 提供 Research Lab，定義、執行、追蹤與比較可重現的研究 pipeline、sweep 與 ablation。
 
 CozyPad 不負責：
@@ -23,7 +23,7 @@ CozyPad 不負責：
 
 ## 2. 移除 Hermes
 
-V3 SHALL 完整移除下列概念：
+V4 SHALL 完整移除下列概念：
 
 - Hermes engine、harness、memory、skills、provider profile。
 - Hermes session store、tool registry、approval policy。
@@ -31,7 +31,7 @@ V3 SHALL 完整移除下列概念：
 - Hermes 專屬 UI、設定、API key 與本機資料目錄。
 - 所有 `Hermes*` domain type、command、event 與 repository package。
 
-舊 Flutter 實作中的下列檔案屬於遷移來源，不得搬進 V3：
+舊 Flutter 實作中的下列檔案屬於遷移來源，不得搬進 V4：
 
 ```text
 lib/hermes/hermes_engine.dart
@@ -59,43 +59,39 @@ lib/hermes/rebuild/hermes_remote_runtime.dart
 | Desktop SSH profile / host trust | Electron main process + `safeStorage` |
 | Research analytics | Parquet artifacts + embedded DuckDB adapter |
 | Charts and tables | Apache ECharts + TanStack Table |
-| Mobile | Capacitor + 共用同一套 React + TypeScript |
-| Android SSH secrets | Native credential vault + Android Keystore AES-256-GCM |
 | Shared contracts | TypeScript + Zod |
 | Monorepo | pnpm workspace |
 | Remote process supervisor | tmux |
 | Remote agent integration | 每個 agent 一個 adapter |
-| Transport | SSH；Mobile 可選原生 SSH plugin（直連，與 Flutter 版同等）或配對 Desktop／authenticated WSS gateway |
+| Transport | Desktop SSH via Electron main process；browser dev mode uses mock bridge |
 | Python | CozyPad 核心不內嵌；遠端研究專案可自由使用 |
-| Rust | V3 第一版不需要 |
+| Rust | V4 第一版不需要 |
 
 ### 3.1 Shell 決策與 Tauri 遷移保險
 
-（2026-07-29 定案）Desktop shell 採 Electron、Mobile shell 採 Capacitor，理由：
+（V4 更新）Desktop shell 採 Electron；Android/Capacitor 支援暫停，不進 V4 workspace、build、test 或 release gate。理由：
 
 - 全專案單一語言（TypeScript），無 Rust／原生編譯稅；任何貢獻者 `pnpm install && pnpm dev` 即可跑起完整 app。
-- 開發機 toolchain 最輕：Desktop 只需 Node + pnpm；Android 只需標準 Android SDK + JDK（無 NDK、無交叉編譯）。
+- 開發機 toolchain 最輕：V4 主線只需 Node + pnpm；不要求 Android SDK/JDK。
 - `ssh2` 與 xterm.js 是最成熟的 SSH／terminal 組合（VS Code 同款生態）。
 - 已知代價：Windows 安裝包（~100MB）與記憶體佔用高於 Flutter 現況；以 developer workstation 定位接受。
 
 Tauri 2 是既定的效能逃生路線，且必須維持為「換殼」而不是「重寫」：
 
-- React app、shared core、contracts、chat UI 在兩種 shell 下完全相同；遷移範圍僅限 desktop shell 與 transport adapter（`ssh2` → russh）。
+- React app、shared core、contracts、chat UI 必須保持 shell-agnostic；遷移範圍僅限 desktop shell 與 transport adapter（`ssh2` → russh）。
 - 為維持可遷移性，下列規則為硬性架構約束：
   - Renderer／React app 不得直接 import `electron`、`@capacitor/*` 或任何 shell API。
   - 平台能力（SSH、檔案、secrets、視窗控制）一律經由 `PlatformBridge` typed interface 取得。
   - React app 必須可在純瀏覽器 + mock adapter 模式下啟動與測試。
 - 遷移評估觸發條件（參考值，非硬 gate）：Windows 閒置記憶體 > 500MB、冷啟動 > 3 秒、或安裝包體積成為使用者實際抱怨來源。
 
-與前版草案的差異：Mobile 由 React Native + Expo 改為 Capacitor，使 Desktop 與
-Mobile 共用同一套 React app；舊草案中的 React Native／Expo 內容不再適用。
+與前版草案的差異：Android/Capacitor 已從 V4 主線暫時移除；舊草案中的 React Native／Expo 與 Capacitor 發版內容不再適用。
 
 ## 4. 系統架構
 
 ```mermaid
 flowchart TB
     Desktop[Electron Desktop]
-    Mobile[Capacitor Mobile]
     Core[Shared TypeScript Core]
     Store[SQLite Session Store]
     Vault[Platform Credential Vault]
@@ -108,12 +104,9 @@ flowchart TB
     Terminal[xterm.js Terminal]
 
     Desktop --> Core
-    Mobile --> Core
     Desktop --> Store
     Desktop --> Vault
-    Mobile --> Vault
     Desktop --> Trust
-    Mobile --> Trust
     Vault --> SSH
     Trust --> SSH
     Desktop --> SSH
@@ -130,10 +123,8 @@ flowchart TB
 
 - React renderer 不得直接存取 Node.js、SSH、filesystem 或 process API。
 - Electron main process 擁有 SSH、tmux、SQLite、secrets 與 agent process lifecycle。
-- Android `SshPlugin` 擁有 socket、SSH credential 與 host-key trust；WebView 只提交
-  新 credential，不得列舉、讀回或覆寫已信任 fingerprint。
 - Preload 只暴露經 Zod 驗證的 typed IPC。
-- Shared core 不得 import Electron、Capacitor、`ssh2` 或 xterm.js。
+- Shared core 不得 import Electron、`ssh2` 或 xterm.js。
 - React app 不得直接 import shell API；平台能力一律經由 `PlatformBridge` adapter（見 3.1），使 desktop shell 可整顆替換（Electron ⇄ Tauri）。
 - Agent adapter 不得直接操作 React state。
 - Terminal stream 與 structured chat event stream 必須分開。
@@ -351,7 +342,7 @@ Codex adapter 優先採用：
 2. `codex exec --json` 與 `codex exec resume <session-id> --json`。
 3. Interactive TUI terminal fallback。
 
-目前本機 Codex 的 app-server 仍標示 experimental，因此 V3 SHALL：
+目前本機 Codex 的 app-server 仍標示 experimental，因此 V4 SHALL：
 
 - 進行 version/capability handshake。
 - 保存 protocol version。
@@ -396,11 +387,11 @@ Codex adapter 優先採用：
 
 ## 9. Chat UX 品質標準
 
-Remote Agent Chat 是 V3 的主畫面，不是附屬 tab。
+Remote Agent Chat 是 V4 的主畫面，不是附屬 tab。
 
 ### 9.1 Information Architecture
 
-Agent 是第一層導航，session 是第二層導航。V3 不把所有 agent session 預設攤平成同一張清單。
+Agent 是第一層導航，session 是第二層導航。V4 不把所有 agent session 預設攤平成同一張清單。
 
 ```text
 Agents
@@ -439,7 +430,7 @@ Desktop SHALL 提供 agent page tabs：
 - Adapter 可以增加 agent-specific actions，但 message、tool、diff 與 approval 使用共用 Chat UI primitives。
 - 全域搜尋可以跨 agent；搜尋結果必須標示 agent、host、project 與 session。
 - 可以提供 `Activity` overview page 顯示所有 agent 的狀態與待處理 approval，但不得把不同 session 的 message timeline 合併成一段對話。
-- Mobile 使用 top tabs、segmented control 或 agent switcher 呈現相同階層，不要求與 Desktop 像素一致。
+- 窄螢幕使用 top tabs、segmented control 或 agent switcher 呈現相同階層，不要求與 Desktop 像素一致。
 
 ### 9.2 Layout
 
@@ -555,7 +546,6 @@ cozypad/
 │   ├── desktop/               # Electron shell
 │   │   ├── main/
 │   │   └── preload/
-│   └── mobile/                # Capacitor shell（載入 apps/app）
 ├── packages/
 │   ├── contracts/
 │   ├── core/
@@ -589,11 +579,10 @@ cozypad/
 
 - SSH 驗證方式支援密碼與 private key；加密私鑰可另外提供 passphrase。
 - Profile list 與一般 metadata 不得包含密碼、私鑰或 passphrase。Secret 只能單向送進
-  privileged platform layer，儲存後不得回傳 renderer／WebView 或寫入 log。
+  privileged platform layer，儲存後不得回傳 renderer 或寫入 log。
 - Desktop 必須以 Electron `safeStorage` 加密完整 profile 與 host trust，包含名稱、
   host、port、username、驗證方式、credential 與 fingerprint；舊版明文 metadata
-  必須以原子寫入自動遷移。Android 必須以 Android Keystore 管理的 AES-256-GCM
-  金鑰保護 credential 與 host trust。OS secure storage 不可用、資料損壞或無法解密時
+  必須以原子寫入自動遷移。OS secure storage 不可用、資料損壞或無法解密時
   必須 fail closed，不得退回明文儲存或靜默清空。
 - 使用者不選擇記憶時，credential 僅保留在 main/native process memory，讓同一次
   app 執行期間可自動重連；process 結束後即失效。
@@ -601,14 +590,12 @@ cozypad/
   任一欄位不一致時不得取用舊 credential，避免 renderer metadata 遭竄改後轉送 secret。
 - 使用 SSH host key verification；未知或變更的 fingerprint 必須提示。Fingerprint
   採 OpenSSH `SHA256:` 格式，信任資料只由 privileged platform layer 管理。
-- Desktop 與 Android 使用明確的安全演算法白名單；禁止 SHA-1、DSA、CBC、3DES、
+- Desktop 使用明確的安全演算法白名單；禁止 SHA-1、DSA、CBC、3DES、
   RC4 與 MD5，且不得為相容舊主機而靜默降級。
 - Host-key prompt 必須有逾時與拒絕路徑；fingerprint 變更不得沿用先前信任。
-- Android release 禁止 cleartext traffic、系統資料備份與 WebView release debugging，
-  並啟用 shrinking／obfuscation。正式 APK 與 Desktop package 缺少簽章資訊時必須拒絕建置。
-- 經產品負責人明確核准的內部原型 prerelease 可附 debug-signed APK 或 unsigned Desktop
-  installer，但檔名與 release notes 必須標示 `Internal`、列出簽章狀態與 SHA-256，
-  且不得標成正式或 latest release。
+- 正式 Desktop package 缺少簽章資訊時必須拒絕建置。經產品負責人明確核准的內部原型
+  prerelease 可附 unsigned Desktop installer，但檔名與 release notes 必須標示 `Internal`、
+  列出簽章狀態與 SHA-256，且不得標成正式或 latest release。
 - Agent authentication 沿用遠端 CLI 自己的 credential，不複製到 CozyPad。
 - Electron renderer 啟用 sandbox、context isolation 與嚴格 CSP。
 - 所有 IPC、remote metadata 與 provider event 都經 schema validation。
@@ -669,20 +656,13 @@ cozypad/
 - Baseline、單因子 ablation、重複 seeds 與 control drift 檢查。
 - Agent-assisted plan authoring 與 failure analysis，但 launch 與變更仍需使用者確認。
 
-### Phase 7：Mobile
+### Phase 7：Mobile / Android（Paused）
 
-- 以 Capacitor 包裝共用的 React app；共用 contracts、session list 與 chat UI primitives。
-- **Transport 有兩條路，不互斥：**
-  - **原生 SSH plugin（直連）**：Capacitor plugin 包 Android sshj／iOS libssh2，實作
-    同一個 `PlatformBridge`。WebView 本身沒有 raw TCP，必須由原生層提供；
-    Flutter 版以 `dartssh2` 達成的直連能力即由此對應。Android 已落地密碼與 SSH Key
-    登入、native credential vault、host-key trust、keepalive 與自動重連。
-  - **配對 Desktop 或 authenticated gateway**：適合不想在手機上管理金鑰／密碼的情境。
-- Android 下載遠端檔案不得依賴 WebView 的 `blob:`／`<a download>` 行為。Android 10+
-  必須經原生 `MediaStore.Downloads` 寫入 `Downloads/CozyPad`；Android 7–9 使用
-  `ACTION_CREATE_DOCUMENT`。兩者都必須保留原始檔名、明確設定 MIME，未知格式使用
-  `application/octet-stream`，並拒絕路徑分隔符與控制字元；不得要求廣泛儲存權限。
-- Mobile 不直接解析 agent raw protocol。
+- V4 暫時移除 Android/Capacitor 支援；`apps/mobile` 不屬於 pnpm workspace，也不參與
+  build、test、lint 或 release gate。
+- React app 仍需保持 shell-agnostic，避免未來恢復平台殼時重寫核心 UI 與 contracts。
+- 恢復 Android 支援前，必須重新定義 credential vault、host-key trust、背景連線、
+  檔案下載與 release signing gate。
 
 ### Phase 8：Cutover
 
@@ -722,7 +702,7 @@ cozypad/
 
 ### Gate E：Hermes Removal
 
-- V3 build 不包含 Hermes、Python runtime 或 Hermes credentials。
+- V4 build 不包含 Hermes、Python runtime 或 Hermes credentials。
 - 新 repository package 不得使用 `Hermes*` 命名。
 - Flutter 舊資料 migration 不讀取或上傳 Hermes memory/session。
 
@@ -736,18 +716,15 @@ cozypad/
 
 ### Gate G：SSH Security
 
-- Desktop 與 Android 均通過密碼、未加密 private key、加密 private key 與
+- Desktop 通過密碼、未加密 private key、加密 private key 與
   「不記憶但同次執行可重連」測試。
-- Renderer／WebView 無法從 profile list、bridge response、log 或 error message
+- Renderer 無法從 profile list、bridge response、log 或 error message
   取得已儲存的 credential。
 - 未知 host key、變更 host key、提示逾時與使用者拒絕都會安全中止連線。
 - 弱演算法測試證明 SHA-1、DSA、CBC、3DES、RC4 與 MD5 不會被協商。
-- Android release manifest、R8 與簽章 gate 通過；發行資產不得包含 source map、
-  keystore、簽章密碼或環境專屬絕對路徑。
-- 內部原型 prerelease 若依明確核准延後正式簽章，仍須驗證 manifest、資產內容、
+- Desktop 發行資產不得包含 source map、keystore、簽章密碼或環境專屬絕對路徑。
+- 內部原型 prerelease 若依明確核准延後正式簽章，仍須驗證資產內容、
   commit 對應、SHA-256 與實際簽章狀態，並同時揭露於 release notes。
-- Android 遠端檔案下載須以原檔名與 byte-exact 內容寫入公開 Downloads／使用者選取
-  位置；未知副檔名不得被改名為 XML，且 manifest 不得新增廣泛儲存權限。
 
 ## 16. 已定案事項
 
@@ -756,20 +733,17 @@ cozypad/
 - Session 以 tmux session identity 與 agent conversation identity 共同區分。
 - Agent 是第一層 page tab；每個 agent page 管理自己的 session sidebar。
 - tmux 負責 process persistence；structured protocol 負責 Chat UI。
-- Desktop 先完成，Mobile 後接同一份 contracts。
+- Desktop 先完成；Mobile/Android 暫停，未列入 V4 主線。
 - Desktop shell V1 採 Electron；效能或體積成為實際問題時，遷移目標為 Tauri 2，
   React app 與 shared core 不得因此重寫（約束見 3.1）。
-- Mobile shell 採 Capacitor 並與 Desktop 共用同一套 React app；不採 React Native。
-- Android 第一版採原生 SSH plugin 直連；authenticated gateway 保留為可選路徑，
-  不作為密碼／SSH Key 直連的前置條件。
-- CozyPad 發布物的技術主線維持 TypeScript；V3 第一版不內嵌 Python 或 Rust runtime，
+- CozyPad 發布物的技術主線維持 TypeScript；V4 第一版不內嵌 Python 或 Rust runtime，
   但 Research Lab 可執行遠端專案自己的 Python、Rust 或 shell workflow。
 - Research Lab 是獨立頂層 workspace；研究 run、tmux runtime 與 agent conversation 各自有 ID，只以明確外鍵連結。
 
 ## 17. 待確認但不阻塞架構
 
 - `agy` 的完整產品名稱、CLI command 與 protocol。
-- iOS 原生 SSH plugin 與 authenticated gateway 的實作優先順序。
+- Mobile/Android 若恢復時的 shell、transport 與 authenticated gateway 優先順序。
 - Codex app-server 穩定後，是否淘汰 JSONL exec fallback。
 - 是否在遠端部署常駐 bridge；Phase 0 先以 SSH channels 與 durable event files 驗證。
 
@@ -1170,8 +1144,8 @@ Dashboard：
 - Dashboard 頂端固定顯示 dataset revision、baseline、run count、failed count 與最後更新時間。
 - Export 支援 PNG/SVG、CSV、Parquet 與可攜式 experiment report manifest。
 
-Mobile 第一版只需 Overview、run status、核心 charts、approval 與 notes；pipeline 編輯、
-大量 pivot 與 dashboard layout 編輯保留在 Desktop。
+窄螢幕版只需 Overview、run status、核心 charts、approval 與 notes；pipeline 編輯、
+大量 pivot 與 dashboard layout 編輯保留在 Desktop 寬版介面。
 
 ### 18.10 Remote Agent 協作
 

@@ -60,7 +60,7 @@ CozyPad Web 主要用來把多台 SSH server、研究工作、Agent CLI 與檔�
 | Work | 任務列表與狀態追蹤 | Agent 與 Start Training 產生的任務可回到對應工作畫面。 |
 | device Monitor | SSH live monitor | 顯示在線 server 的 CPU、RAM、Disk、GPU、GPU process、溫度與磁碟狀態。 |
 | Public | 公開服務狀態檢查 | 檢查 API、Web origin、Cloudflare Tunnel 與 public URL 狀態，並輔助判斷 403/1033/502/524。 |
-| Settings | 連線與執行設定 | 管理 tmux、desktop/mobile 行為、remote runtime、host key 與開發測試設定。 |
+| Settings | 連線與執行設定 | 管理 tmux、Desktop/Web 行為、remote runtime、host key 與開發測試設定。 |
 
 ## Research Lab
 
@@ -119,7 +119,7 @@ Terminal 使用 xterm 介面並支援多工作分頁。
 | SSH terminal | 對已選 server 開啟互動式終端。 |
 | Local terminal | 選 localhost 時不走 SSH，使用本機終端模式。 |
 | Quick commands | 內建 `ls -la`、`pwd`、`git status`、`nvidia-smi`、`df -h`、`tmux ls` 等常用指令。 |
-| Mobile friendly | 支援快捷鍵列與長按重複輸入，方便手機操作。 |
+| 窄螢幕操作 | 支援快捷鍵列與長按重複輸入。 |
 | Reconnect policy | 連線中斷時可手動重連，避免背景自動狂重試造成 SSH 風險。 |
 
 ## Files
@@ -187,13 +187,16 @@ Desktop app 使用 Electron Builder 與 NSIS。
 pnpm --filter @cozypad/desktop package
 ```
 
+### Android 支援
+
+V4 暫時停用 Android/Capacitor 支援；它不參與 pnpm workspace、build、test、lint 或 release flow。
+
 ## 專案結構
 
 | 路徑 | 說明 |
 | --- | --- |
 | `apps/app` | React + Vite Web 介面。 |
 | `apps/desktop` | Electron desktop wrapper 與 Windows installer 設定。 |
-| `apps/mobile` | Capacitor Android mobile shell。 |
 | `packages/contracts` | 共用型別與 contract。 |
 | `packages/remote-services` | 遠端服務抽象與 SSH/agent 相關服務。 |
 | `packages/tmux-runtime` | tmux runtime 相關邏輯。 |

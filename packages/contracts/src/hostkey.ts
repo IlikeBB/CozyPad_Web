@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** SSH host key 首次信任／變更警告（SPEC.md 6.1 已知缺口、SPEC_V3 13）。 */
+/** SSH host key 首次信任／變更警告（SPEC.md 6.1 已知缺口、SPEC_V4 13）。 */
 export const HostKeyPromptEventSchema = z.object({
   requestId: z.string().min(1),
   profileId: z.string().min(1),

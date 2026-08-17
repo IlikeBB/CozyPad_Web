@@ -41,7 +41,7 @@ export interface IpcServices {
   mockData: boolean;
 }
 
-/** 所有 IPC 進出都經 Zod 驗證，且只接受主視窗的 sender（SPEC_V3 4.1、13）。 */
+/** 所有 IPC 進出都經 Zod 驗證，且只接受主視窗的 sender（SPEC_V4 4.1、13）。 */
 export function registerIpc(services: IpcServices, win: BrowserWindow): void {
   const {
     transport,

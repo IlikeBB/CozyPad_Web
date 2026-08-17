@@ -1,7 +1,8 @@
 import type { LegacySshServer } from './agents/legacySshApi';
+import { V4_STORAGE_EVENTS, V4_STORAGE_KEYS } from '../platform/storageKeys';
 
-const LAST_SELECTED_LEGACY_SERVER_KEY = 'cozypad3.lastSelectedLegacyServerId';
-const LAST_SELECTED_LEGACY_SERVER_EVENT = 'cozypad3:last-selected-legacy-server';
+const LAST_SELECTED_LEGACY_SERVER_KEY = V4_STORAGE_KEYS.sshServers.lastSelectedLegacyServerId;
+const LAST_SELECTED_LEGACY_SERVER_EVENT = V4_STORAGE_EVENTS.lastSelectedLegacyServer;
 
 function hasWindow(): boolean {
   return typeof window !== 'undefined';

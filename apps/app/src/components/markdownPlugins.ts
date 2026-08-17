@@ -101,7 +101,7 @@ function normalizeKnownMathNames(value: string): string {
 
 function normalizeSubscripts(value: string): string {
   return value
-    .replace(/\bsum_([A-Za-z0-9]+)\b/g, '\\sum_{$1}')
+    .replace(/\\*\bsum_([A-Za-z0-9]+)\b/g, '\\sum_{$1}')
     .replace(/\b([A-Za-z])_([A-Za-z0-9]+)\b/g, '$1_{$2}');
 }
 
@@ -112,7 +112,19 @@ function normalizeHats(value: string): string {
 }
 
 function normalizeBrackets(value: string): string {
-  return value.replace(/\[([^\[\]]*(?:\\log|\\sum|\\hat|[A-Za-z]_\{|[-+*/])[^\[\]]*)\]/g, '\\left[$1\\right]');
+  const repaired = normalizeRepeatedLatexDelimiters(value);
+
+  // Do not wrap a bracket that is already part of a `\\left[...\\right]`
+  // expression. The normalization pipeline runs on every render, so this
+  // must remain idempotent.
+  return repaired.replace(
+    /(^|[^A-Za-z\\])\[([^\[\]]*(?:\\log|\\sum|\\hat|[A-Za-z]_\{|[-+*/])[^\[\]]*)\]/g,
+    '$1\\left[$2\\right]',
+  );
+}
+
+function normalizeRepeatedLatexDelimiters(value: string): string {
+  return value.replace(/(?:\\left\s*){2,}/g, '\\left').replace(/(?:\\right\s*){2,}/g, '\\right');
 }
 
 function convertFormulaExpression(value: string): string {
@@ -120,11 +132,15 @@ function convertFormulaExpression(value: string): string {
     normalizeHats(
       normalizeSubscripts(
         normalizeKnownMathNames(value.trim())
-          .replace(/\\\\(log|hat|sum|frac|exp|operatorname|left|right|ldots|dots|mathbb|mathbf|mathrm)/g, '\\$1')
+          .replace(
+            /\\{2,}(log|hat|sum|frac|exp|operatorname|left|right|ldots|dots|mathbb|mathbf|mathrm)/g,
+            (_, command: string) => `\\${command}`,
+          )
           .replace(/\.\.\./g, '\\ldots')
           .replace(/\s+/g, ' ')
           .replace(/\s*([=+\-*/])\s*/g, ' $1 ')
-          .replace(/\s*,\s*/g, ', '),
+          .replace(/\s*,\s*/g, ', ')
+          .replace(/\s{2,}/g, ' '),
       ),
     ),
   )
@@ -159,6 +175,75 @@ function normalizePseudoMathBlocks(text: string): string {
       .join(' \\\\\n');
     return `\n$$\n${expressions}\n$$\n`;
   });
+}
+
+function normalizeInlineDisplayMath(text: string): string {
+  const lines = text.split('\n');
+  const output: string[] = [];
+  let inCodeFence = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
+      inCodeFence = !inCodeFence;
+      output.push(line);
+      continue;
+    }
+    if (inCodeFence) {
+      output.push(line);
+      continue;
+    }
+
+    const inlineDisplay = line.match(/^(\s*)(.*?)\$\$\s*(.+?)\s*\$\$(\s*)$/);
+    if (!inlineDisplay) {
+      output.push(line);
+      continue;
+    }
+
+    const indent = inlineDisplay[1] || '';
+    const prefix = inlineDisplay[2]?.trim() || '';
+    const expression = convertFormulaExpression(inlineDisplay[3] || '');
+    if (prefix) output.push(`${indent}${prefix}`, '');
+    output.push(`${indent}$$`, expression, `${indent}$$`);
+    if (inlineDisplay[4]?.trim()) output.push('', `${indent}${inlineDisplay[4].trim()}`);
+  }
+
+  return output.join('\n');
+}
+
+function normalizeEscapedMathDelimiters(text: string): string {
+  const lines = text.split('\n');
+  const output: string[] = [];
+  let inCodeFence = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
+      inCodeFence = !inCodeFence;
+      output.push(line);
+      continue;
+    }
+    if (inCodeFence) {
+      output.push(line);
+      continue;
+    }
+
+    // Some CLI transports escape Markdown delimiters before returning them
+    // (for example `\$\$ ... \$\$`). Restore only math delimiters, leaving
+    // ordinary escaped dollar signs and code fences untouched.
+    let restored = line
+      .replace(/\\\$\\\$/g, () => '$$')
+      .replace(/\\\\\[/g, '\\[')
+      .replace(/\\\\\]/g, '\\]')
+      .replace(/\\\\\(/g, '\\(')
+      .replace(/\\\\\)/g, '\\)');
+    if (/\\\$/.test(restored) && /(?:\\sum|\\log|\\frac|\\left|\\right|[_^{}])/.test(restored)) {
+      restored = restored.replace(/\\\$/g, '$');
+    }
+    output.push(restored);
+  }
+
+  return output.join('\n');
 }
 
 function pushDisplayFormula(output: string[], expression: string): void {
@@ -389,11 +474,17 @@ function normalizeInlineUnderscoreTokens(text: string): string {
 export function normalizeMarkdownMath(text: string): string {
   const normalized = normalizeInlineUnderscoreTokens(
     normalizeTechnicalNotationLines(
-      normalizeFormulaLines(normalizePseudoMathBlocks(normalizeSplitConditionLines(unwrapBoxedLatex(text)))),
+      normalizeFormulaLines(
+        normalizePseudoMathBlocks(
+          normalizeInlineDisplayMath(
+            normalizeEscapedMathDelimiters(normalizeSplitConditionLines(unwrapBoxedLatex(text))),
+          ),
+        ),
+      ),
     ),
   )
     .replace(/\\\[((?:.|\n)*?)\\\]/g, (_, body: string) => `\n$$\n${convertFormulaExpression(body.trim())}\n$$\n`)
     .replace(/\\\((.*?)\\\)/g, (_, body: string) => `$${convertFormulaExpression(body.trim())}$`);
 
-  return normalizeDisplayMathSpacing(normalized);
+  return normalizeDisplayMathSpacing(normalizeRepeatedLatexDelimiters(normalized));
 }

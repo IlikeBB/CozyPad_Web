@@ -24,7 +24,7 @@ import { Ssh2Transport } from './transport/ssh2Transport';
 import type { TransportPort } from './transport/TransportPort';
 
 const DEV_URL = process.env.COZYPAD_DEV_URL;
-/** 所有 agent conversation session 都開在這個 socket（SPEC_V3 §6）。 */
+/** 所有 agent conversation session 都開在這個 socket（SPEC_V4 §6）。 */
 const TMUX_SOCKET = process.env.COZYPAD_TMUX_SOCKET ?? 'default';
 const SMOKE_TEST = process.argv.includes('--smoke-test');
 const USE_MOCK = process.env.COZYPAD_MOCK === '1' || SMOKE_TEST;

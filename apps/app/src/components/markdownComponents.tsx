@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentProps, ReactNode } from 'react';
+import katex from 'katex';
+import Markdown from 'react-markdown';
 import type { Components } from 'react-markdown';
+import {
+  markdownRehypePlugins,
+  markdownRemarkPlugins,
+  normalizeMarkdownMath,
+} from './markdownPlugins';
 
 export const OPEN_FILE_PATH_EVENT = 'cozypad-open-file-path';
 const FILE_PATH_LINK_PREFIX = '#cozypad-file';
@@ -588,3 +595,107 @@ export const markdownComponents: Components = {
   code: createCodeComponent(),
   img: createImageComponent(),
 };
+
+type MathAwareMarkdownSegment =
+  | { type: 'text'; value: string }
+  | { type: 'math'; value: string };
+
+type MathAwareMarkdownProps = {
+  text: string;
+  className?: string;
+  serverId?: string;
+  onOpenFilesPath?: OpenFilePathHandler;
+  showImages?: boolean;
+  maxImages?: number;
+};
+
+function splitDisplayMathSegments(text: string): MathAwareMarkdownSegment[] {
+  const segments: MathAwareMarkdownSegment[] = [];
+  const displayMathPattern = /\$\$\s*\n?([\s\S]*?)\n?\s*\$\$/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = displayMathPattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      segments.push({ type: 'text', value: text.slice(cursor, match.index) });
+    }
+    const formula = (match[1] || '').trim();
+    if (formula) {
+      segments.push({ type: 'math', value: formula });
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < text.length) {
+    segments.push({ type: 'text', value: text.slice(cursor) });
+  }
+
+  return segments.length > 0 ? segments : [{ type: 'text', value: text }];
+}
+
+function renderDisplayMath(formula: string, key: string) {
+  try {
+    return (
+      <div
+        className="legacy-codex-formula-block"
+        dangerouslySetInnerHTML={{
+          __html: katex.renderToString(formula, {
+            displayMode: true,
+            strict: 'ignore',
+            throwOnError: false,
+            trust: false,
+          }),
+        }}
+        key={key}
+      />
+    );
+  } catch {
+    return (
+      <code className="legacy-codex-formula-fallback" key={key}>
+        {formula}
+      </code>
+    );
+  }
+}
+
+export function MathAwareMarkdown({
+  text,
+  className = '',
+  serverId = '',
+  onOpenFilesPath,
+  showImages = true,
+  maxImages,
+}: MathAwareMarkdownProps) {
+  const normalizedText = normalizeMarkdownMath(linkifyRemotePathLines(String(text || ''), serverId));
+  const segments = splitDisplayMathSegments(normalizedText);
+  const components = onOpenFilesPath
+    ? createMarkdownComponents(onOpenFilesPath, { serverId })
+    : createMarkdownComponents(undefined, { serverId });
+
+  return (
+    <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`}>
+      {segments.map((segment, index) =>
+        segment.type === 'math' ? (
+          renderDisplayMath(segment.value, `math-${index}`)
+        ) : segment.value.trim() ? (
+          <Markdown
+            components={components}
+            key={`text-${index}`}
+            remarkPlugins={markdownRemarkPlugins}
+            rehypePlugins={markdownRehypePlugins}
+          >
+            {segment.value}
+          </Markdown>
+        ) : null,
+      )}
+      {showImages ? (
+        <AgentImagePreviewStrip
+          maxImages={maxImages}
+          onOpenFilesPath={onOpenFilesPath}
+          serverId={serverId}
+          text={String(text || '')}
+        />
+      ) : null}
+    </div>
+  );
+}

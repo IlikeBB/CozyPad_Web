@@ -6,6 +6,7 @@ export const commonAgentSlashCommands: SlashCommand[] = [
   { name: 'clear', description: '清空目前對話' },
   { name: 'compact', description: '壓縮歷史並保留重點' },
   { name: 'model', description: '切換模型或推論設定' },
+  { name: 'show', description: '顯示目前模型與推論 level' },
   { name: 'status', description: '檢查目前 agent 狀態' },
   { name: 'init', description: '初始化目前專案設定' },
   { name: 'login', description: '登入 CLI 帳號' },

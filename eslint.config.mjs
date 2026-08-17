@@ -5,9 +5,13 @@ export default tseslint.config(
     ignores: [
       '**/node_modules/**',
       '**/dist/**',
+      '.run-logs/**',
       'apps/app/public/legacy-v2/**',
       'apps/desktop/release*/**',
+      'apps/mobile/**',
       'apps/mobile/android/**',
+      'CozyPad-1.0.2/**',
+      'data/**',
       'lib/**',
       'packages/xterm/**',
       'android/**',
@@ -33,7 +37,7 @@ export default tseslint.config(
             {
               group: ['electron', 'electron/*', '@capacitor/*', 'ssh2', 'node:*'],
               message:
-                'React app 不得直接使用 shell/Node API；一律經由 PlatformBridge（SPEC_V3 3.1）。',
+                'React app 不得直接使用 shell/Node API；一律經由 PlatformBridge（SPEC_V4 3.1）。',
             },
           ],
         },

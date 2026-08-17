@@ -137,7 +137,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 
 /**
  * 首次連線 → 顯示 fingerprint 請使用者信任；fingerprint 變更 → 警告（可能是重灌或中間人）。
- * 信任後寫入 known hosts；拒絕則中止連線（SPEC.md 6.1、SPEC_V3 13）。
+ * 信任後寫入 known hosts；拒絕則中止連線（SPEC.md 6.1、SPEC_V4 13）。
  */
 export class HostKeyGate {
   private readonly pending = new Map<string, (accept: boolean) => void>();

@@ -40,6 +40,16 @@ type MonitorMetrics = {
   gpuTemperatureC: number | null;
   gpuCount: number;
   gpus?: MonitorGpu[];
+  processes?: MonitorProcess[];
+};
+
+type MonitorProcess = {
+  user: string;
+  pid: number;
+  cpuPercent: number;
+  memoryPercent: number;
+  elapsed: string;
+  command: string;
 };
 
 type MonitorDisk = {
@@ -387,7 +397,65 @@ function GpuUsageList({ gpus }: { gpus: MonitorGpu[] }) {
   );
 }
 
+function ProcessTable({
+  processes,
+  processCount,
+  onSelectProcess,
+}: {
+  processes: MonitorProcess[];
+  processCount: number;
+  onSelectProcess: (process: MonitorProcess) => void;
+}) {
+  if (!processes.length) {
+    return <div className="monitor-panel-empty">No process details available</div>;
+  }
+
+  const users = new Set(processes.map((process) => process.user).filter(Boolean));
+
+  return (
+    <div className="monitor-process-table-wrap">
+      <div className="monitor-process-summary">
+        <span>{processCount} total processes</span>
+        <strong>{users.size} active users</strong>
+      </div>
+      <table className="monitor-process-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>PID</th>
+            <th>CPU</th>
+            <th>MEM</th>
+            <th>Elapsed</th>
+            <th>Command</th>
+          </tr>
+        </thead>
+        <tbody>
+          {processes.map((process) => (
+            <tr key={`${process.pid}-${process.user}`}>
+              <td className="monitor-process-user">{process.user}</td>
+              <td>{process.pid}</td>
+              <td>{formatPercent(process.cpuPercent)}</td>
+              <td>{formatPercent(process.memoryPercent)}</td>
+              <td>{process.elapsed || 'n/a'}</td>
+              <td className="monitor-process-command" title="View full command">
+                <button
+                  type="button"
+                  className="monitor-process-command-button"
+                  onClick={() => onSelectProcess(process)}
+                >
+                  {process.command}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function MonitorMachinePage({ server }: { server: MonitorServer }) {
+  const [selectedProcess, setSelectedProcess] = useState<MonitorProcess | null>(null);
   const metrics = server.metrics;
 
   if (!server.online) {
@@ -473,6 +541,53 @@ function MonitorMachinePage({ server }: { server: MonitorServer }) {
         </div>
         <DiskUsageList disks={disks} />
       </section>
+
+      <section className="monitor-machine-processes" aria-label="Process activity">
+        <div className="monitor-panel-heading">
+          <span>Bottom</span>
+          <h3>Process activity</h3>
+        </div>
+        <ProcessTable
+          processes={metrics.processes || []}
+          processCount={metrics.processCount}
+          onSelectProcess={setSelectedProcess}
+        />
+      </section>
+
+      {selectedProcess ? (
+        <div className="modal-overlay monitor-process-modal-overlay" onClick={() => setSelectedProcess(null)}>
+          <section
+            className="modal monitor-process-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="monitor-process-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <span className="monitor-process-modal-kicker">Process command</span>
+                <h2 id="monitor-process-modal-title">{selectedProcess.command.split(/\s+/)[0] || 'Command'}</h2>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                aria-label="Close command details"
+                onClick={() => setSelectedProcess(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="monitor-process-modal-meta">
+              <span>User <strong>{selectedProcess.user}</strong></span>
+              <span>PID <strong>{selectedProcess.pid}</strong></span>
+              <span>CPU <strong>{formatPercent(selectedProcess.cpuPercent)}</strong></span>
+              <span>MEM <strong>{formatPercent(selectedProcess.memoryPercent)}</strong></span>
+              <span>Elapsed <strong>{selectedProcess.elapsed || 'n/a'}</strong></span>
+            </div>
+            <pre className="monitor-process-modal-command">{selectedProcess.command}</pre>
+          </section>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -637,13 +752,11 @@ export function MonitorWorkspace({
       url.searchParams.set(key, value);
     }
     const socket = new WebSocket(url.toString());
-    let socketOpened = false;
 
     setMonitorState('connecting');
     setMonitorError('');
 
     socket.addEventListener('open', () => {
-      socketOpened = true;
       if (!closedByEffect) {
         setMonitorState('live');
       }
@@ -775,7 +888,7 @@ export function MonitorWorkspace({
           <span>{offlineServers} offline</span>
           <span>{blockedServers} paused</span>
           <span>last refresh {formatClock(snapshot?.generatedAt)}</span>
-          <span>interval {(snapshot?.intervalMs ?? 30000) / 1000}s</span>
+          <span>interval {(snapshot?.intervalMs ?? 5000) / 1000}s</span>
           <span>{enabled ? 'selected monitor' : 'monitor idle'}</span>
           {connected && host ? <span>selected {host}</span> : null}
         </div>

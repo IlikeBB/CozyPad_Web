@@ -45,7 +45,7 @@ export interface Ssh2TransportOptions {
   getCredential?: (
     profileId: string,
   ) => Promise<ProfileCredential | null> | ProfileCredential | null;
-  /** SSH host key 驗證（SPEC_V3 13）；回傳 false 中止連線。 */
+  /** SSH host key 驗證（SPEC_V4 13）；回傳 false 中止連線。 */
   verifyHostKey?: (profile: ConnectionProfile, key: Uint8Array) => Promise<boolean>;
   clientFactory?: () => Ssh2ClientLike;
 }

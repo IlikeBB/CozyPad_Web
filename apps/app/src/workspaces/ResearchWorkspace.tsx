@@ -1,11 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
-import Markdown from 'react-markdown';
-import {
-  markdownRehypePlugins,
-  markdownRemarkPlugins,
-  normalizeMarkdownMath,
-} from '../components/markdownPlugins';
+import { MathAwareMarkdown } from '../components/markdownComponents';
 import { createLegacyWebSocketUrl } from '../platform/legacyApiRoutes';
 import {
   createLegacyCodexHistory,
@@ -19,17 +14,18 @@ import {
 } from './agents/legacySshApi';
 import { queueCodexTrainingTask, type QueuedTrainingAgent } from './agents/codexTaskQueue';
 import { findRememberedLegacyServer } from './sshServerPreference';
+import { V4_STORAGE_KEYS } from '../platform/storageKeys';
 
-const PIPELINE_NODES_STORAGE_KEY = 'cozypad3.researchPipelineNodes.v1';
-const PIPELINE_EDGES_STORAGE_KEY = 'cozypad3.researchPipelineEdges.v1';
-const RESEARCH_FLOWCHARTS_STORAGE_KEY = 'cozypad3.researchFlowcharts.v2';
-const RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY = 'cozypad3.researchActiveFlowchart.v1';
-const RESEARCH_MARKDOWN_STORAGE_KEY = 'cozypad3.researchRemoteMarkdown.v1';
-const RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = 'cozypad3.researchRemoteMarkdownByFlowchart.v1';
+const PIPELINE_NODES_STORAGE_KEY = V4_STORAGE_KEYS.research.pipelineNodes;
+const PIPELINE_EDGES_STORAGE_KEY = V4_STORAGE_KEYS.research.pipelineEdges;
+const RESEARCH_FLOWCHARTS_STORAGE_KEY = V4_STORAGE_KEYS.research.flowcharts;
+const RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY = V4_STORAGE_KEYS.research.activeFlowchart;
+const RESEARCH_MARKDOWN_STORAGE_KEY = V4_STORAGE_KEYS.research.markdown;
+const RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY = V4_STORAGE_KEYS.research.markdownByFlowchart;
 const RESEARCH_AGENT_MODEL_STORAGE_KEYS: Partial<Record<ResearchAnalysisAgent, string>> = {
-  codex: 'cozypad3.remoteCodex.model.v1',
-  agy: 'cozypad3.remoteAgy.model.v1',
-  bailian: 'cozypad3.remoteBailian.model.v1',
+  codex: V4_STORAGE_KEYS.agentModels.codex,
+  agy: V4_STORAGE_KEYS.agentModels.agy,
+  bailian: V4_STORAGE_KEYS.agentModels.bailian,
 };
 const RESEARCH_AGENT_MODEL_FALLBACKS: Partial<Record<ResearchAnalysisAgent, string>> = {
   bailian: 'qwen-plus',
@@ -2025,8 +2021,16 @@ function runResearchAgentStreamPrompt(options: {
         abort();
         return;
       }
-      const { signal: _signal, ...payload } = options;
-      socket.send(serializeLegacyRemoteAgentStreamPayload(payload));
+      socket.send(
+        serializeLegacyRemoteAgentStreamPayload({
+          agent: options.agent,
+          serverId: options.serverId,
+          prompt: options.prompt,
+          remotePath: options.remotePath,
+          allowedDirs: options.allowedDirs,
+          model: options.model,
+        }),
+      );
     });
 
     socket.addEventListener('message', (event) => {
@@ -2522,6 +2526,16 @@ function defaultResearchFlowchart(variant: ResearchVariant = 'standard'): Resear
     title: 'Flowchart 1',
     nodes,
     edges: readPipelineEdges(nodes, variant),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function emptyResearchFlowchart(title = 'Flowchart 1'): ResearchFlowchart {
+  return {
+    id: createResearchFlowchartId(),
+    title,
+    nodes: [],
+    edges: [],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -3303,7 +3317,8 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
   const deleteActiveFlowchart = () => {
     if (!activeFlowchart) return;
     if (flowchartLibrary.flowcharts.length <= 1) {
-      if (!window.confirm('Clear this flowchart?')) return;
+      if (!window.confirm(`Delete "${activeFlowchart.title}"?`)) return;
+      const replacementFlowchart = emptyResearchFlowchart('Flowchart 1');
       setNodes([]);
       setEdges([]);
       setRemoteMarkdown('');
@@ -3314,19 +3329,19 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
       setMarkdownTrainingDraft(null);
       setNodeFeedbackTrainingDraft(null);
       setMarkdownAnalysis({ status: 'idle', message: '' });
-      setMarkdownByFlowchart((current) => ({
-        ...current,
-        [activeFlowchart.id]: { markdown: '', userDraft: false, updatedAt: new Date().toISOString() },
-      }));
+      setCodexDiagramStatus({ status: 'idle', message: '' });
+      setCodexDiagramJson('');
+      setMarkdownByFlowchart((current) => {
+        const next = { ...current };
+        delete next[activeFlowchart.id];
+        next[replacementFlowchart.id] = { markdown: '', userDraft: false, updatedAt: replacementFlowchart.updatedAt };
+        return next;
+      });
       clearFlowchartInteractionState();
-      setFlowchartLibrary((current) => ({
-        ...current,
-        flowcharts: current.flowcharts.map((flowchart) =>
-          flowchart.id === current.activeFlowchartId
-            ? { ...flowchart, nodes: [], edges: [], updatedAt: new Date().toISOString() }
-            : flowchart,
-        ),
-      }));
+      setFlowchartLibrary({
+        flowcharts: [replacementFlowchart],
+        activeFlowchartId: replacementFlowchart.id,
+      });
       return;
     }
 
@@ -3752,6 +3767,7 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
     if (!nodeFeedbackTrainingDraft) setNodeFeedbackTrainingDraft(nextDialog);
     setTrainingDialogSource('nodeFeedback');
     setTrainingPromptDialog(nextDialog);
+    setActiveView('markdown');
   };
 
   const submitTrainingPrompt = async () => {
@@ -4322,6 +4338,13 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
                   </button>
                   <button
                     type="button"
+                    onClick={startTrainingFromNodeFeedback}
+                    disabled={!hasNodeFeedbackMarkdown}
+                  >
+                    回饋訓練
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void analyzeFlowchartWithBailian()}
                     disabled={!hasAnalysisAgent || markdownAnalysis.status === 'running' || nodes.length === 0}
                   >
@@ -4356,6 +4379,14 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
                     </details>
                   </div>
                 ) : null}
+                {visibleNodeFeedbackAnalysisMessage ? (
+                  <div className={`research-analysis-status research-analysis-${markdownAnalysis.status}`}>
+                    <span>{visibleNodeFeedbackAnalysisMessage}</span>
+                    <strong>
+                      {nodeFeedbackCount} / {nodeFeedbackTotal}
+                    </strong>
+                  </div>
+                ) : null}
               </div>
             </aside>
           </section>
@@ -4385,13 +4416,15 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
                 </button>
               </div>
             </div>
-            {trainingPromptDialog && trainingDialogSource === 'markdown' ? (
+            {trainingPromptDialog && (trainingDialogSource === 'markdown' || trainingDialogSource === 'nodeFeedback') ? (
               <div className="research-training-panel" role="region" aria-labelledby="start-training-title">
                 <div className="research-training-panel-head">
                   <div>
                     <h4 id="start-training-title">Start Training</h4>
                     <p className="hint">
-                      MD.md is used as the main training schedule prompt. Add project, dataset, output location, epoch, prompts, data, and model sources before sending.
+                      {trainingDialogSource === 'nodeFeedback'
+                        ? 'Node feedback is used as the training prompt source. Add project, dataset, output location, epoch, prompts, data, and model sources before sending.'
+                        : 'MD.md is used as the main training schedule prompt. Add project, dataset, output location, epoch, prompts, data, and model sources before sending.'}
                     </p>
                   </div>
                   <div className="form-actions research-training-actions">
@@ -4543,7 +4576,7 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
                   <summary>Preview prompt</summary>
                   <pre>
                     {buildTrainingPromptFromMarkdown(
-                      pipelineMarkdown.trim(),
+                      (trainingDialogSource === 'nodeFeedback' ? nodeFeedbackTrainingMarkdown : pipelineMarkdown).trim(),
                       nodes,
                       edges,
                       trainingPromptDialog,
@@ -4572,11 +4605,11 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
                 spellCheck={false}
               />
             ) : null}
-            <div className="research-markdown-preview">
-              <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                {normalizeMarkdownMath(pipelineMarkdown)}
-              </Markdown>
-            </div>
+            <MathAwareMarkdown
+              className="research-markdown-preview"
+              showImages={false}
+              text={pipelineMarkdown}
+            />
           </section>
 
       {nodeDocModalNode ? (
@@ -4609,11 +4642,11 @@ export function ResearchWorkspace({ connected = false, variant = 'standard' }: R
               </button>
             </div>
             <div className="research-node-doc-modal-grid">
-              <div className="research-node-doc-modal-preview markdown">
-                <Markdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
-                  {normalizeMarkdownMath(selectedNodeDocument)}
-                </Markdown>
-              </div>
+              <MathAwareMarkdown
+                className="research-node-doc-modal-preview"
+                showImages={false}
+                text={selectedNodeDocument}
+              />
               <div className="research-node-doc-modal-editor">
                 <label className="research-node-editor research-node-agent-prompt">
                   <span>Agent 輸入 Prompt</span>

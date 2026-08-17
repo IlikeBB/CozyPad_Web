@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /**
- * Research run 狀態機（SPEC_V3 §18.6），驗證模式採 ADR 0001：
+ * Research run 狀態機（SPEC_V4 §18.6），驗證模式採 ADR 0001：
  * 顯式轉移鄰接表、同狀態冪等、顯式錯誤。
  */
 export const ResearchRunStatusSchema = z.enum([

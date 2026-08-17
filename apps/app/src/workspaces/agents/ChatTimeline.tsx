@@ -1,17 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import Markdown from 'react-markdown';
 import type { ChatItem } from '@cozypad/contracts';
 import { ContextMenu } from '../../components/ContextMenu';
 import {
-  markdownRehypePlugins,
-  markdownRemarkPlugins,
-  normalizeMarkdownMath,
-} from '../../components/markdownPlugins';
-import {
   AgentImagePreviewStrip,
-  createMarkdownComponents,
+  MathAwareMarkdown,
   renderInlineRemotePathLinks,
-  linkifyRemotePathLines,
 } from '../../components/markdownComponents';
 
 interface ChatTimelineProps {
@@ -81,7 +74,9 @@ function isHiddenAgentEventLine(line: string): boolean {
     lower.startsWith('[bailian] turn completed') ||
     lower.startsWith('[baillian] turn started') ||
     lower.startsWith('[baillian] turn complete') ||
-    lower.startsWith('[baillian] turn completed')
+    lower.startsWith('[baillian] turn completed') ||
+    (/^\[cozypad(?: local [^\]]+)?\]/.test(lower) &&
+      (lower.includes('waiting for cli output') || lower.includes('waiting for agent output')))
   );
 }
 
@@ -98,6 +93,68 @@ function isToolishLine(line: string): boolean {
     lower.startsWith('output:') ||
     /^\d{4}-\d{2}-\d{2}t/i.test(lower)
   );
+}
+
+function looksLikeAssistantReplyLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || isAgentEventLine(trimmed) || isToolishLine(trimmed) || isSectionBoundary(trimmed)) return false;
+  if (/^(?:at\s+|traceback\b|file\s+"|error\b|warn(?:ing)?\b|info\b|debug\b|output:|exit code\b)/i.test(trimmed)) {
+    return false;
+  }
+  if (/^(?:[-*]\s+|\d+\.\s+)/.test(trimmed)) return true;
+  if (/[\u4E00-\u9FFF]/.test(trimmed)) return true;
+  return /^(?:I(?:'ll| will| can| found| checked| need)|The |This |It |We |Next |Done|Unable|Failed|Please )/.test(
+    trimmed,
+  );
+}
+
+function splitMixedAgentEventLine(line: string): { eventLine: string; textLine: string } {
+  if (!isAgentEventLine(line)) return { eventLine: line, textLine: '' };
+  if (!/(?:started|waiting|error|failed|warn|exit code|cache|missing field|cli output)/i.test(line)) {
+    return { eventLine: line, textLine: '' };
+  }
+
+  const candidates = [
+    '你好',
+    '我會',
+    '我在',
+    '我已',
+    '我先',
+    '我可以',
+    '目前',
+    '可以',
+    '已經',
+    '已完成',
+    '請',
+    '這個',
+    '這邊',
+    '如果',
+    '根據',
+    '以下',
+    '先',
+    '無法',
+    '完成',
+    '建議',
+    '檢查',
+    'I will',
+    "I'll",
+    'I can',
+    'The ',
+    'This ',
+    'Done',
+  ];
+
+  const eventPrefixEnd = line.search(/\]\s*/);
+  let splitAt = -1;
+  for (const token of candidates) {
+    const index = line.indexOf(token);
+    if (index > Math.max(eventPrefixEnd, 0) && (splitAt < 0 || index < splitAt)) splitAt = index;
+  }
+
+  if (splitAt <= 0) return { eventLine: line, textLine: '' };
+  const eventLine = line.slice(0, splitAt).trimEnd();
+  const textLine = line.slice(splitAt).trimStart();
+  return { eventLine, textLine: looksLikeAssistantReplyLine(textLine) ? textLine : '' };
 }
 
 function isSectionBoundary(line: string): boolean {
@@ -170,6 +227,10 @@ function isMarkdownBlockStart(line: string, afterBlank: boolean): boolean {
     (afterBlank && /^[-*]\s+\*\*[^*]+?\*\*/.test(trimmed)) ||
     /^-{3,}$/.test(trimmed)
   );
+}
+
+function containsMathMarkup(text: string): boolean {
+  return /(?:^|\n)\s*(?:\$\$|\\\$\\\$|\\\[|\\\(|\\begin\{)/m.test(text);
 }
 
 function splitAssistantTextBlocks(text: string): string[] {
@@ -253,7 +314,6 @@ function parseAssistantSections(text: string): AssistantSection[] {
 
   while (index < lines.length) {
     const line = lines[index] ?? '';
-    const trimmed = line.trim();
 
     if (isHiddenAgentEventLine(line)) {
       index += 1;
@@ -262,7 +322,9 @@ function parseAssistantSections(text: string): AssistantSection[] {
 
     if (isAgentEventLine(line) || isToolishLine(line)) {
       flushText();
-      const blockLines = [line];
+      const firstSplit = splitMixedAgentEventLine(line);
+      const blockLines = [firstSplit.eventLine];
+      let pendingTextLine = firstSplit.textLine;
       index += 1;
       while (index < lines.length) {
         const nextLine = lines[index] ?? '';
@@ -270,9 +332,15 @@ function parseAssistantSections(text: string): AssistantSection[] {
           index += 1;
           continue;
         }
+        if (looksLikeAssistantReplyLine(nextLine)) break;
         if (isAgentEventLine(nextLine) || isToolishLine(nextLine)) {
-          blockLines.push(nextLine);
+          const nextSplit = splitMixedAgentEventLine(nextLine);
+          blockLines.push(nextSplit.eventLine);
           index += 1;
+          if (nextSplit.textLine) {
+            pendingTextLine = nextSplit.textLine;
+            break;
+          }
           continue;
         }
         if (isSectionBoundary(nextLine)) break;
@@ -287,6 +355,7 @@ function parseAssistantSections(text: string): AssistantSection[] {
         title: summarizeSection(blockText, kind === 'tool' ? 'Tool output' : 'Agent event'),
         text: blockText,
       });
+      if (pendingTextLine) textBuffer.push(pendingTextLine);
       continue;
     }
 
@@ -316,13 +385,17 @@ function renderAssistantStatusCard(
         <span className="legacy-codex-card-title">{section.title}</span>
         <span className="legacy-codex-card-lines">{lineCount(section.text)} lines</span>
       </summary>
-      <pre>
-        {section.text.split('\n').map((line, lineIndex) => (
-          <span className="legacy-codex-line" key={`${lineIndex}-${line.slice(0, 20)}`}>
-            {renderInlineRemotePathLinks(line, serverId, onOpenFilesPath)}
-          </span>
-        ))}
-      </pre>
+      {containsMathMarkup(section.text) ? (
+        renderMarkdownMessage(section.text, serverId, 'agent-status-markdown', onOpenFilesPath)
+      ) : (
+        <pre>
+          {section.text.split('\n').map((line, lineIndex) => (
+            <span className="legacy-codex-line" key={`${lineIndex}-${line.slice(0, 20)}`}>
+              {renderInlineRemotePathLinks(line, serverId, onOpenFilesPath)}
+            </span>
+          ))}
+        </pre>
+      )}
       <AgentImagePreviewStrip
         maxImages={8}
         onOpenFilesPath={onOpenFilesPath}
@@ -340,24 +413,12 @@ function renderMarkdownMessage(
   onOpenFilesPath?: (target: { serverId: string; path: string }) => void,
 ) {
   return (
-    <div className={`markdown legacy-codex-markdown ${className}`}>
-      <Markdown
-        components={
-          onOpenFilesPath
-            ? createMarkdownComponents(onOpenFilesPath, { serverId })
-            : createMarkdownComponents(undefined, { serverId })
-        }
-        remarkPlugins={markdownRemarkPlugins}
-        rehypePlugins={markdownRehypePlugins}
-      >
-        {normalizeMarkdownMath(linkifyRemotePathLines(text, serverId))}
-      </Markdown>
-      <AgentImagePreviewStrip
-        onOpenFilesPath={onOpenFilesPath}
-        serverId={serverId}
-        text={text}
-      />
-    </div>
+    <MathAwareMarkdown
+      className={className}
+      onOpenFilesPath={onOpenFilesPath}
+      serverId={serverId}
+      text={text}
+    />
   );
 }
 
@@ -459,7 +520,11 @@ export function ChatTimeline({
                     <span className="tool-duration">{item.durationMs}ms</span>
                   ) : null}
                 </summary>
-                {item.output ? <pre className="tool-output">{item.output}</pre> : null}
+                {item.output
+                  ? containsMathMarkup(item.output)
+                    ? renderMarkdownMessage(item.output, serverId, 'agent-tool-markdown', onOpenFilesPath)
+                    : <pre className="tool-output">{item.output}</pre>
+                  : null}
               </details>
             );
           case 'file_diff':

@@ -1,19 +1,13 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Markdown from 'react-markdown';
 import type { ConnectionProfile } from '@cozypad/contracts';
 import {
-  markdownRehypePlugins,
-  markdownRemarkPlugins,
-  normalizeMarkdownMath,
-} from '../../components/markdownPlugins';
-import {
   AgentImagePreviewStrip,
-  createMarkdownComponents,
   dispatchOpenFilePath,
   filePathLinkDataset,
-  linkifyRemotePathLines,
+  MathAwareMarkdown,
 } from '../../components/markdownComponents';
 import { createLegacyWebSocketUrl } from '../../platform/legacyApiRoutes';
+import { V4_STORAGE_KEYS } from '../../platform/storageKeys';
 import { ChatComposer } from './ChatComposer';
 import type { ChatComposerAttachment } from './ChatComposer';
 import { EditSentMessageDialog } from './EditSentMessageDialog';
@@ -23,13 +17,21 @@ import {
   subscribeCodexTrainingTasks,
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
+import {
+  CodexUsageRow,
+  contextRemainingPercent,
+  formatTokenCount,
+  mergeCodexUsageStats,
+  parseCodexUsage,
+  parseCodexUsageControlMessage,
+} from './codexUsage';
 import { commonAgentSlashCommands } from './slashCommands';
 import {
+  applyLegacyCodexModel,
   createLegacyCodexHistory,
   deleteLegacyCodexWorkflow,
   getLegacyCodexStatus,
   listLegacyCodexWorkflows,
-  loadLegacyCodexBinding,
   saveLegacyCodexWorkflow,
   stopLegacyAgentLatestTask,
 } from './legacySshApi';
@@ -41,10 +43,10 @@ import type {
   LegacySshServer,
 } from './legacySshApi';
 
-const STORAGE_KEY = 'cozypad3.legacyCodexTasks.v1';
-const COMPOSER_DRAFT_STORAGE_KEY = 'cozypad3.legacyCodexComposerDraft.v1';
-const CODEX_MODEL_STORAGE_KEY = 'cozypad3.remoteCodex.model.v1';
-const CODEX_EFFORT_STORAGE_KEY = 'cozypad3.remoteCodex.reasoningEffort.v1';
+const STORAGE_KEY = V4_STORAGE_KEYS.agents.codexTasks;
+const COMPOSER_DRAFT_STORAGE_KEY = V4_STORAGE_KEYS.agents.codexComposerDraft;
+const CODEX_MODEL_STORAGE_KEY = V4_STORAGE_KEYS.agentModels.codex;
+const CODEX_EFFORT_STORAGE_KEY = V4_STORAGE_KEYS.agentModels.codexReasoningEffort;
 const RESEARCH_REFRESH_EVENT = 'cozypad-research-runs-updated';
 const MAX_OUTPUT_LENGTH = 160_000;
 const MAX_TASKS = 24;
@@ -88,6 +90,7 @@ type CodexTask = {
   title: string;
   prompt: string;
   output: string;
+  usage?: string;
   status: CodexTaskStatus;
   running: boolean;
   connected: boolean;
@@ -599,6 +602,7 @@ function readStoredTasks(): CodexTask[] {
           title: String(task.title || 'Codex 工作'),
           prompt: String(task.prompt || ''),
           output: String(task.output || IDLE_OUTPUT).slice(-MAX_OUTPUT_LENGTH),
+          usage: String(task.usage || '').slice(-2000),
           status,
           running: status === 'running',
           connected: false,
@@ -665,6 +669,84 @@ function isCodexContentBoundary(line: string): boolean {
   );
 }
 
+function looksLikeCodexReplyLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || isCodexContentBoundary(trimmed) || isCodexEventLine(trimmed)) return false;
+  // A response may begin with a display formula before any prose. Treat it as
+  // the reply boundary so it is sent to the Markdown/KaTeX renderer instead
+  // of remaining inside the preceding CLI event's <pre> block.
+  if (/^(?:\$\$|\\\[|\\\(|\\begin\{)/.test(trimmed)) return true;
+  if (/^(?:at\s+|traceback\b|file\s+"|error\b|warn(?:ing)?\b|info\b|debug\b|output:|exit code\b)/i.test(trimmed)) {
+    return false;
+  }
+  if (/^(?:[-*]\s+|\d+\.\s+)/.test(trimmed)) return true;
+  if (/[\u4E00-\u9FFF]/.test(trimmed)) return true;
+  return /^(?:I(?:'ll| will| can| found| checked| need)|The |This |It |We |Next |Done|Unable|Failed|Please )/.test(
+    trimmed,
+  );
+}
+
+function splitMixedCozyPadStatusLine(line: string): { statusLine: string; replyLine: string } {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('[CozyPad Local Codex]') && !trimmed.startsWith('[CozyPad]')) {
+    return { statusLine: line, replyLine: '' };
+  }
+
+  const outputCueMatch = line.match(/(?:CLI|agent)\s+output/i);
+  if (!outputCueMatch) {
+    return { statusLine: line, replyLine: '' };
+  }
+  const outputCueIndex = outputCueMatch.index ?? -1;
+  if (outputCueIndex < 0) {
+    return { statusLine: line, replyLine: '' };
+  }
+
+  const candidates = [
+    '你好',
+    '我會',
+    '我在',
+    '我已',
+    '我先',
+    '我可以',
+    '目前',
+    '可以',
+    '已經',
+    '已完成',
+    '請',
+    '這個',
+    '這邊',
+    '如果',
+    '根據',
+    '以下',
+    '先',
+    '無法',
+    '完成',
+    '建議',
+    '檢查',
+    'I will',
+    "I'll",
+    'I can',
+    'The ',
+    'This ',
+    'Done',
+  ];
+
+  const minIndex = outputCueIndex + outputCueMatch[0].length;
+  let splitAt = -1;
+  for (const token of candidates) {
+    const index = line.indexOf(token, minIndex);
+    if (index > minIndex && (splitAt < 0 || index < splitAt)) splitAt = index;
+  }
+
+  if (splitAt <= 0) return { statusLine: line, replyLine: '' };
+  const statusLine = line.slice(0, splitAt).trimEnd();
+  const replyLine = line.slice(splitAt).trimStart();
+  return {
+    statusLine,
+    replyLine: looksLikeCodexReplyLine(replyLine) ? replyLine : '',
+  };
+}
+
 function nextNonBlankLineIsCodexEvent(lines: string[], startIndex: number): boolean {
   for (let index = startIndex; index < lines.length; index += 1) {
     const line = lines[index] ?? '';
@@ -717,6 +799,7 @@ function getLineClass(line: string): string {
 function isHiddenLocalCodexLine(line: string): boolean {
   const lower = line.trim().toLowerCase();
   if (isHiddenCodexImagePayloadLine(line)) return true;
+  if (lower.startsWith('[cozypad] usage ')) return true;
   const isLocalStatus = lower.startsWith('[cozypad local codex]');
   const isRemoteStatus = lower.startsWith('[cozypad]');
   const isImportant =
@@ -733,6 +816,8 @@ function isHiddenLocalCodexLine(line: string): boolean {
       lower.includes('connected ') ||
       lower.includes('spawn ') ||
       lower.includes('opening ') ||
+      lower.includes('waiting for cli output') ||
+      lower.includes('waiting for agent output') ||
       lower.includes('queued follow-up') ||
       lower.includes('running queued follow-up') ||
       lower.includes('codex is still running') ||
@@ -792,6 +877,7 @@ function workflowToTask(workflow: LegacyCodexWorkflow): CodexTask {
     title: workflow.title || 'Codex 工作',
     prompt: workflow.prompt || '',
     output: workflow.output || IDLE_OUTPUT,
+    usage: workflow.usage || '',
     status,
     running: status === 'running',
     connected: false,
@@ -818,6 +904,7 @@ function taskToWorkflow(task: CodexTask, server: LegacySshServer): LegacyCodexWo
     mode: 'server',
     prompt: task.prompt,
     output: task.output,
+    usage: task.usage || '',
     model: normalizeCodexModel(task.model || ''),
     reasoningEffort: normalizeCodexReasoningEffort(task.reasoningEffort || ''),
     status: task.status,
@@ -827,18 +914,6 @@ function taskToWorkflow(task: CodexTask, server: LegacySshServer): LegacyCodexWo
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   };
-}
-
-function taskContext(task: CodexTask): string {
-  const transcript = normalizeOutput(task.output).trim();
-  return [
-    `Previous CozyPad Codex task: ${task.title}`,
-    `- server: ${task.profileName || '未綁 SSH'}`,
-    `- remote path: ${task.remotePath || '~'}`,
-    '',
-    'Use this previous transcript as context before answering the new request:',
-    transcript || 'No previous transcript was saved.',
-  ].join('\n');
 }
 
 function normalizeComparableText(text: string): string {
@@ -1173,25 +1248,35 @@ function parseCodexContent(text: string): CodexContentSection[] {
 
     if (trimmed.startsWith('[CozyPad Local Codex]') || trimmed.startsWith('[CozyPad]')) {
       flushText();
-      const statusLines = [line];
+      const firstSplit = splitMixedCozyPadStatusLine(line);
+      const statusLines = [firstSplit.statusLine];
+      const replyLines = firstSplit.replyLine ? [firstSplit.replyLine] : [];
       index += 1;
       while (
         index < lines.length &&
         ((lines[index] ?? '').trim().startsWith('[CozyPad Local Codex]') ||
           (lines[index] ?? '').trim().startsWith('[CozyPad]'))
       ) {
-        statusLines.push(lines[index] ?? '');
+        const nextSplit = splitMixedCozyPadStatusLine(lines[index] ?? '');
+        statusLines.push(nextSplit.statusLine);
+        if (nextSplit.replyLine) {
+          replyLines.push(nextSplit.replyLine);
+        }
         index += 1;
       }
       const visibleStatusLines = statusLines.filter((statusLine) => !isHiddenLocalCodexLine(statusLine));
-      if (visibleStatusLines.length === 0) {
-        continue;
+      if (visibleStatusLines.length > 0) {
+        const statusText = visibleStatusLines.join('\n');
+        const statusLower = statusText.toLowerCase();
+        pushSection(sections, {
+          kind: statusLower.includes('error') || statusLower.includes('failed') ? 'status' : 'meta',
+          title: summarizeOneLine(statusText, 'CozyPad status'),
+          text: statusText,
+        });
       }
-      pushSection(sections, {
-        kind: lower.includes('error') || lower.includes('failed') ? 'status' : 'meta',
-        title: summarizeOneLine(visibleStatusLines.join('\n'), 'CozyPad status'),
-        text: visibleStatusLines.join('\n'),
-      });
+      if (replyLines.length > 0) {
+        pushSection(sections, { kind: 'text', text: replyLines.join('\n') });
+      }
       continue;
     }
 
@@ -1220,6 +1305,12 @@ function parseCodexContent(text: string): CodexContentSection[] {
           break;
         }
         if (isCodexContentBoundary(nextLine)) {
+          break;
+        }
+        // A CLI event can be followed immediately by the assistant's natural
+        // language reply. Keep that reply out of the collapsible event block,
+        // otherwise it is rendered as <pre> text and Markdown/KaTeX cannot run.
+        if (looksLikeCodexReplyLine(nextLine)) {
           break;
         }
         if (
@@ -1354,24 +1445,13 @@ function renderMarkdownText(
   onOpenFilesPath?: OpenFilesPathHandler,
 ) {
   return (
-    <div className={`markdown legacy-codex-markdown${className ? ` ${className}` : ''}`} key={key}>
-      <Markdown
-        components={
-          onOpenFilesPath
-            ? createMarkdownComponents(onOpenFilesPath, { serverId })
-            : createMarkdownComponents(undefined, { serverId })
-        }
-        remarkPlugins={markdownRemarkPlugins}
-        rehypePlugins={markdownRehypePlugins}
-      >
-        {normalizeMarkdownMath(linkifyRemotePathLines(normalizeOutput(text), serverId))}
-      </Markdown>
-      <AgentImagePreviewStrip
-        onOpenFilesPath={onOpenFilesPath}
-        serverId={serverId}
-        text={normalizeOutput(text)}
-      />
-    </div>
+    <MathAwareMarkdown
+      className={className}
+      key={key}
+      onOpenFilesPath={onOpenFilesPath}
+      serverId={serverId}
+      text={normalizeOutput(text)}
+    />
   );
 }
 
@@ -1440,6 +1520,7 @@ function renderCollapsibleSection(
   const lines = textLineCount(section.text);
   const lowerText = normalizeOutput(section.text).toLowerCase();
   const codexEvent = isCodexEventSection(section);
+  const containsMath = /(?:^|\n)\s*(?:\$\$|\\\$\\\$|\\\[|\\\(|\\begin\{)/m.test(normalizeOutput(section.text));
   const kindLabel = codexEvent
     ? 'Codex'
     : section.kind === 'tool'
@@ -1473,7 +1554,11 @@ function renderCollapsibleSection(
         <span className="legacy-codex-card-title">{section.title}</span>
         <span className="legacy-codex-card-lines">{lines} lines</span>
       </summary>
-      <pre>{renderPreLines(section.text, true, serverId, onOpenFilesPath)}</pre>
+      {containsMath ? (
+        renderMarkdownText(section.text, 'legacy-codex-inline-text', undefined, serverId, onOpenFilesPath)
+      ) : (
+        <pre>{renderPreLines(section.text, true, serverId, onOpenFilesPath)}</pre>
+      )}
       <AgentImagePreviewStrip
         maxImages={8}
         onOpenFilesPath={onOpenFilesPath}
@@ -1588,6 +1673,7 @@ export function LegacyCodexPanel({
   const [loadedWorkflowServerId, setLoadedWorkflowServerId] = useState('');
   const [codexStatus, setCodexStatus] = useState<LegacyCodexStatus | null>(null);
   const [checkingCodex, setCheckingCodex] = useState(false);
+  const [applyingCodexModel, setApplyingCodexModel] = useState(false);
   const [codexCheckError, setCodexCheckError] = useState('');
   const [stoppingTaskId, setStoppingTaskId] = useState('');
   const [editingUserPrompt, setEditingUserPrompt] = useState('');
@@ -1614,6 +1700,17 @@ export function LegacyCodexPanel({
     () => (creatingNewTask ? null : (tasks.find((task) => task.id === activeTaskId) ?? tasks[0] ?? null)),
     [activeTaskId, creatingNewTask, tasks],
   );
+  const usageStats = useMemo(
+    () => {
+      const outputStats = parseCodexUsage(activeTask?.output || '');
+      const controlStats = parseCodexUsage(activeTask?.usage || '');
+      return mergeCodexUsageStats(controlStats, outputStats);
+    },
+    [activeTask?.output, activeTask?.usage],
+  );
+  const totalTokens = usageStats.total ?? usageStats.input + usageStats.output;
+  const usageUnavailable = !usageStats.hasData && !activeTask?.running;
+  const remainingContext = contextRemainingPercent(usageStats);
   const currentBinding = useMemo<LegacyCodexBinding | null>(() => {
     if (legacyServer) {
       return {
@@ -1634,12 +1731,16 @@ export function LegacyCodexPanel({
     [codexModelInput, codexReasoningEffort],
   );
   const codexModelOptions = useMemo(
-    () =>
-      mergeCodexModelOptions(
+    () => {
+      // Before the first check, show the compatibility list. After a real
+      // status check, only keep models reported by that remote CLI plus the
+      // currently selected value so a synthetic model cannot be chosen.
+      const discoveredModels = codexStatus ? codexStatus.models || [] : CODEX_MODEL_FALLBACKS;
+      return mergeCodexModelOptions(
         [codexStatus?.defaultModel, codexModelInput, activeTask?.model],
-        codexStatus?.models,
-        CODEX_MODEL_FALLBACKS,
-      ),
+        discoveredModels,
+      );
+    },
     [activeTask?.model, codexModelInput, codexStatus?.defaultModel, codexStatus?.models],
   );
   const checkCodex = useCallback(() => {
@@ -1687,6 +1788,69 @@ export function LegacyCodexPanel({
     setCodexCheckError('');
     setCheckingCodex(false);
   }, [connected, legacyServer?.id]);
+
+  const handleCodexModelChange = useCallback(
+    async (modelValue: string) => {
+      const model = normalizeCodexModel(modelValue);
+      setCodexModelInput(model);
+      if (!legacyServer?.id || !connected) {
+        return;
+      }
+      if (localMode) {
+        setHelperError(
+          model
+            ? `Local Codex will use --model ${model} on the next run.`
+            : 'Local Codex will use the CLI default on the next run.',
+        );
+        return;
+      }
+
+      setApplyingCodexModel(true);
+      setHelperError('');
+      try {
+        const result = await applyLegacyCodexModel(legacyServer.id, model);
+        const appliedModel = normalizeCodexModel(result.model || model);
+        setCodexModelInput(appliedModel);
+        setCodexStatus((current) =>
+          current
+            ? {
+                ...current,
+                defaultModel: appliedModel,
+                models: mergeCodexModelOptions([appliedModel], current.models),
+              }
+            : current,
+        );
+        setHelperError(
+          appliedModel
+            ? `Remote Codex model switched to ${appliedModel}. New prompts will use it.`
+            : 'Remote Codex model reset to the CLI default. New prompts will use it.',
+        );
+      } catch (error) {
+        setHelperError(
+          error instanceof Error ? error.message : 'Remote Codex model update failed.',
+        );
+      } finally {
+        setApplyingCodexModel(false);
+      }
+    },
+    [connected, legacyServer?.id, localMode],
+  );
+
+  useEffect(() => {
+    const availableModels = (codexStatus?.models || [])
+      .map((model) => normalizeCodexModel(String(model || '')))
+      .filter(Boolean);
+    const selectedModel = normalizeCodexModel(codexModelInput);
+    if (!codexStatus?.available || !availableModels.length || !selectedModel) return;
+    if (availableModels.some((model) => model.toLowerCase() === selectedModel.toLowerCase())) return;
+
+    const defaultModel = normalizeCodexModel(codexStatus.defaultModel || '');
+    setCodexModelInput(
+      defaultModel && availableModels.some((model) => model.toLowerCase() === defaultModel.toLowerCase())
+        ? defaultModel
+        : '',
+    );
+  }, [codexModelInput, codexStatus?.available, codexStatus?.defaultModel, codexStatus?.models]);
 
   useEffect(() => {
     if (legacyServer?.defaultPath) {
@@ -1919,21 +2083,6 @@ export function LegacyCodexPanel({
     }
   }, []);
 
-  const resolveBinding = useCallback(
-    async (path: string): Promise<LegacyCodexBinding | null> => {
-      const cleanPath = path.trim() || legacyServer?.defaultPath || '~';
-      if (legacyServer) {
-        const binding = await loadLegacyCodexBinding(legacyServer.id);
-        return {
-          ...binding,
-          defaultPath: cleanPath,
-        };
-      }
-      return createProfileBinding(selectedProfile, connected, cleanPath);
-    },
-    [connected, legacyServer, selectedProfile],
-  );
-
   const connectTask = useCallback(
     (task: CodexTask, payload?: SendPayload) => {
       if (!connected) {
@@ -2054,7 +2203,21 @@ export function LegacyCodexPanel({
       socket.addEventListener('message', (event) => {
         socketActivityRef.current.set(task.id, Date.now());
         const text = String(event.data || '');
+        const usageControl = parseCodexUsageControlMessage(text);
+        if (usageControl) {
+          updateTask(task.id, (current) => ({
+            ...current,
+            usage: usageControl,
+            updatedAt: new Date().toISOString(),
+          }));
+          return;
+        }
         const rawNormalized = normalizeOutput(text);
+        const usageLine = rawNormalized
+          .split('\n')
+          .reverse()
+          .find((line) => /^\s*\[CozyPad\]\s+usage\s+/i.test(line))
+          ?.trim() || '';
         const cwdUpdate = extractCodexCwdUpdate(text);
         const visibleText = stripHiddenCodexImagePayload(text);
         const done =
@@ -2073,6 +2236,7 @@ export function LegacyCodexPanel({
         updateTask(task.id, (current) => ({
           ...current,
           output: visibleText.trim() ? trimOutput(`${current.output}${visibleText}`) : current.output,
+          usage: usageLine || current.usage,
           remotePath: cwdUpdate || current.remotePath,
           status: failed
             ? 'failed'
@@ -2391,6 +2555,70 @@ export function LegacyCodexPanel({
   };
 
   const sendComposerText = async (text: string) => {
+    if (/^\/show\s*$/i.test(text.trim())) {
+      const effectiveModel =
+        codexRunOptions.model || normalizeCodexModel(codexStatus?.defaultModel || '') || 'CLI default';
+      const effectiveLevel = codexRunOptions.reasoningEffort || 'auto';
+      const usageLines = usageStats.hasData
+        ? [
+            `- Total tokens: ${formatTokenCount(totalTokens)}`,
+            `- Context remaining: ${
+              remainingContext !== null
+                ? `${remainingContext}%`
+                : usageStats.contextRemainingTokens !== null
+                  ? `${formatTokenCount(usageStats.contextRemainingTokens)} tokens`
+                  : 'CLI did not report'
+            }`,
+            `- Input: ${formatTokenCount(usageStats.input)}`,
+            `- Cached input: ${formatTokenCount(usageStats.cachedInput)}`,
+            `- Output: ${formatTokenCount(usageStats.output)}`,
+            `- Reasoning: ${formatTokenCount(usageStats.reasoning)}`,
+            `- Current context: ${
+              usageStats.currentContext !== null ? formatTokenCount(usageStats.currentContext) : 'CLI did not report'
+            }`,
+          ]
+        : [
+            '- Total tokens: CLI did not report',
+            '- Context remaining: CLI did not report',
+          ];
+      const runtimeSummary = [
+        'Current Codex runtime',
+        `- Model: ${effectiveModel}`,
+        `- Level: ${effectiveLevel}`,
+        `- Mode: ${localMode ? 'local' : 'remote SSH'}`,
+        '',
+        'Usage',
+        ...usageLines,
+      ].join('\n');
+
+      if (activeTask) {
+        updateTask(activeTask.id, (task) => ({
+          ...task,
+          output: trimOutput(
+            `${task.output}\r\n${CODEX_TRANSCRIPT_MARKER}\r\n${runtimeSummary}\r\n`,
+          ),
+          updatedAt: new Date().toISOString(),
+        }));
+      } else {
+        setHelperError(runtimeSummary);
+      }
+      setComposerText('');
+      clearImageAttachments();
+      return;
+    }
+
+    const modelCommand = text.trim().match(/^\/model(?:\s+(.+))?$/i);
+    if (modelCommand) {
+      const requestedModel = normalizeCodexModel(modelCommand[1] || '');
+      if (!requestedModel) {
+        setHelperError('用法：/model <模型名稱>。模型會套用到下一次 Codex 執行。');
+        return;
+      }
+      await handleCodexModelChange(requestedModel);
+      setComposerText('');
+      clearImageAttachments();
+      return;
+    }
     const attachments = imageAttachmentsRef.current;
     const ok = activeTask ? await continueTask(text, attachments) : await startTask(text, attachments);
     if (ok) {
@@ -2652,6 +2880,11 @@ export function LegacyCodexPanel({
               <p>{creatingNewTask ? '輸入需求後送出，建立新的 Codex 工作。' : '建立一個 Codex 工作開始。'}</p>
             </div>
           )}
+          <CodexUsageRow
+            stats={usageStats}
+            totalTokens={totalTokens}
+            unavailable={usageUnavailable}
+          />
           <ChatComposer
             agentLabel="Codex"
             value={composerText}
@@ -2736,7 +2969,8 @@ export function LegacyCodexPanel({
               <span>Model</span>
               <select
                 value={codexModelInput}
-                onChange={(event) => setCodexModelInput(event.target.value)}
+                disabled={applyingCodexModel}
+                onChange={(event) => void handleCodexModelChange(event.target.value)}
               >
                 <option value="">default</option>
                 {codexModelOptions.map((model) => (
@@ -2745,6 +2979,7 @@ export function LegacyCodexPanel({
                   </option>
                 ))}
               </select>
+              {applyingCodexModel ? <small>Switching remote Codex model...</small> : null}
             </label>
             <div className="legacy-codex-setting">
               <span>Effort</span>
@@ -2764,14 +2999,6 @@ export function LegacyCodexPanel({
               </div>
             </div>
           </div>
-          <h3>Workflow</h3>
-          <p className="hint">
-            {legacyServer
-              ? '工作紀錄會保存到選取的遠端 server。'
-              : '請先選擇 SSH server，Codex 才會綁定遠端執行。'}
-          </p>
-          <h3>Usage</h3>
-          <p className="hint">Codex CLI 輸出會保留在工作分頁中。</p>
         </aside>
       </div>
       {editingUserPrompt ? (

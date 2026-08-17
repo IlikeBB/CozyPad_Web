@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const AgentKindSchema = z.enum(['claude', 'codex', 'agy', 'bailian']);
 export type AgentKind = z.infer<typeof AgentKindSchema>;
 
-/** SPEC_V3 5.2 的 session 狀態。 */
+/** SPEC_V4 5.2 的 session 狀態。 */
 export const AgentSessionStatusSchema = z.enum([
   'starting',
   'ready',

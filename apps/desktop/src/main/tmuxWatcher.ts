@@ -6,7 +6,7 @@ export interface TmuxWatcherEvents {
 
 /**
  * 週期性回報遠端 tmux session 清單，讓 UI 能在遠端 session 結束時
- * 一併關閉本地檢視（SPEC_V3 §5.4 reconciliation 的即時來源）。
+ * 一併關閉本地檢視（SPEC_V4 §5.4 reconciliation 的即時來源）。
  */
 export class TmuxSessionWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
