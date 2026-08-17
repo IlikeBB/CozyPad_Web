@@ -1,6 +1,6 @@
 # CozyPad user isolation / SSH capability UX test report
 
-Date: 2026-08-17  
+Date: 2026-08-17
 Environment: local web `http://localhost:5173`, API `:5174`, local command bridge `:5175`
 
 ## Implementation checkpoint

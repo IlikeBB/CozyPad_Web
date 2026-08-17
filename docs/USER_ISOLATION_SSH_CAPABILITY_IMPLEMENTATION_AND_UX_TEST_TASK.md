@@ -50,7 +50,6 @@ type UserStorage = {
 
 createUserStorage(userId: string): UserStorage;
 ```
-
 正式 key 格式：
 
 ```text
@@ -415,4 +414,3 @@ A1 Storage adapter
 → 提交回饋
 → 討論下一個修正 Goal
 ```
-
