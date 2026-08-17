@@ -5,7 +5,8 @@
   "packageManager": "pnpm@11.17.0",
   "scripts": {
     "dev": "pnpm --filter @cozypad/app dev",
-    "dev:v2-web": "concurrently -k \"pnpm legacy-v2:api\" \"pnpm legacy-v2:local-cmd\" \"pnpm dev\"",
+    "dev:v2-web": "node scripts/dev-v2-web-supervisor.mjs",
+    "dev:v2-web:check": "node scripts/dev-v2-web-supervisor.mjs --check",
     "dev:desktop": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev\"",
     "dev:desktop:ssh": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev:ssh\"",
     "build": "pnpm -r build",
