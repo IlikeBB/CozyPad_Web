@@ -68,7 +68,36 @@ describe('legacyApiRequest', () => {
         method: 'POST',
         body: JSON.stringify({}),
       }),
-    ).rejects.toThrow(/retries safe status\/list requests/);
+    ).rejects.toThrow(/actions that start work/);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses a custom timeout and label for slow action requests', async () => {
+    vi.useFakeTimers();
+    setupWindow();
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal?.reason ?? timeoutError());
+          });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = legacyApiRequest('/api/codex/histories', {
+      method: 'POST',
+      body: JSON.stringify({ serverId: 'local', title: 'Task' }),
+      timeoutLabel: 'Codex history create request',
+      timeoutMs: 1_200,
+    });
+    const expectation = expect(request).rejects.toThrow(
+      /Codex history create request timed out.*actions that start work/,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_200);
+
+    await expectation;
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

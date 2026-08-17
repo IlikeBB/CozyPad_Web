@@ -35,6 +35,13 @@ const LEGACY_API_SAFE_RETRY_DELAYS_MS = [600, 1600, 3200];
 const LEGACY_API_DEFAULT_TIMEOUT_MS = 45_000;
 const LEGACY_API_SAFE_TIMEOUT_MS = 30_000;
 const LEGACY_API_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+const LEGACY_API_SLOW_ACTION_TIMEOUT_MS = 120_000;
+const LEGACY_API_LONG_ACTION_TIMEOUT_MS = 180_000;
+
+export type LegacyApiRequestInit = RequestInit & {
+  timeoutLabel?: string;
+  timeoutMs?: number;
+};
 
 export type LegacySshServer = {
   id: string;
@@ -686,13 +693,18 @@ function localLegacyApiUrl(path: string): string | null {
   return `http://127.0.0.1:5174${normalizedPath}`;
 }
 
-function createLegacyNetworkError(error: unknown): LegacyApiError {
+function createLegacyNetworkError(error: unknown, init?: LegacyApiRequestInit): LegacyApiError {
   const detail = error instanceof Error && error.message ? error.message : String(error || '');
   const name = error instanceof Error ? error.name : '';
   if (/AbortError|TimeoutError/i.test(name) || /timed out|timeout/i.test(detail)) {
+    const label = init?.timeoutLabel?.trim();
+    const prefix = label ? `${label} timed out.` : 'CozyPad API request timed out.';
+    const retryHint = isSafeLegacyApiMethod(init)
+      ? 'CozyPad retries safe status/list requests automatically.'
+      : 'For actions that start work, check whether the task was submitted before retrying.';
     return new LegacyApiError(
       0,
-      'CozyPad API request timed out. CozyPad retries safe status/list requests automatically; for actions that start work, check whether the task was submitted before retrying.',
+      `${prefix} ${retryHint}`,
     );
   }
   return new LegacyApiError(
@@ -703,13 +715,14 @@ function createLegacyNetworkError(error: unknown): LegacyApiError {
   );
 }
 
-function isSafeLegacyApiMethod(init?: RequestInit): boolean {
+function isSafeLegacyApiMethod(init?: LegacyApiRequestInit): boolean {
   const method = String(init?.method || 'GET').trim().toUpperCase();
   return method === 'GET' || method === 'HEAD';
 }
 
-function legacyApiTimeoutMs(init?: RequestInit): number {
+function legacyApiTimeoutMs(init?: LegacyApiRequestInit): number {
   if (init?.signal) return 0;
+  if (Number.isFinite(init?.timeoutMs)) return Math.max(0, Number(init?.timeoutMs));
   return isSafeLegacyApiMethod(init) ? LEGACY_API_SAFE_TIMEOUT_MS : LEGACY_API_DEFAULT_TIMEOUT_MS;
 }
 
@@ -764,13 +777,22 @@ async function probeLegacyApiHealth(path: string, signal?: AbortSignal | null): 
   }
 }
 
-function withLegacyApiTimeout(init?: RequestInit): {
+function stripLegacyRequestOptions(init?: LegacyApiRequestInit): RequestInit | undefined {
+  if (!init) return undefined;
+  const requestInit: LegacyApiRequestInit = { ...init };
+  delete requestInit.timeoutLabel;
+  delete requestInit.timeoutMs;
+  return requestInit;
+}
+
+function withLegacyApiTimeout(init?: LegacyApiRequestInit): {
   init?: RequestInit;
   cleanup: () => void;
 } {
+  const requestInit = stripLegacyRequestOptions(init);
   const timeoutMs = legacyApiTimeoutMs(init);
   if (timeoutMs <= 0) {
-    return { init, cleanup: () => undefined };
+    return { init: requestInit, cleanup: () => undefined };
   }
 
   const controller = new AbortController();
@@ -780,7 +802,7 @@ function withLegacyApiTimeout(init?: RequestInit): {
   );
 
   return {
-    init: { ...init, signal: controller.signal },
+    init: { ...requestInit, signal: controller.signal },
     cleanup: () => window.clearTimeout(timer),
   };
 }
@@ -839,7 +861,11 @@ async function readLegacyApiResponse<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-async function fetchLegacyApi(path: string, init?: RequestInit, extraHeaders: Record<string, string> = {}) {
+async function fetchLegacyApi(
+  path: string,
+  init?: LegacyApiRequestInit,
+  extraHeaders: Record<string, string> = {},
+) {
   let response: Response;
   const request = withLegacyApiTimeout(init);
   try {
@@ -856,7 +882,7 @@ async function fetchLegacyApi(path: string, init?: RequestInit, extraHeaders: Re
       },
     });
   } catch (error) {
-    throw createLegacyNetworkError(error);
+    throw createLegacyNetworkError(error, init);
   } finally {
     request.cleanup();
   }
@@ -864,7 +890,7 @@ async function fetchLegacyApi(path: string, init?: RequestInit, extraHeaders: Re
   return response;
 }
 
-export async function legacyApiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export async function legacyApiRequest<T>(path: string, init?: LegacyApiRequestInit): Promise<T> {
   const retryDelays = isSafeLegacyApiMethod(init) ? LEGACY_API_SAFE_RETRY_DELAYS_MS : [];
 
   for (let attempt = 0; ; attempt += 1) {
@@ -905,7 +931,7 @@ async function legacyTextRpcRequest<T>(path: string, payload: unknown): Promise<
 
 async function legacyApiRequestWithLocalFallback<T>(
   path: string,
-  init?: RequestInit,
+  init?: LegacyApiRequestInit,
   fallbackPath = path,
 ): Promise<T> {
   try {
@@ -1111,11 +1137,20 @@ export function summarizeLegacyMarkdown(
   return legacyApiRequest<LegacyMarkdownSummaryResponse>('/api/markdown/summarize', {
     method: 'POST',
     body: JSON.stringify({ serverId, files, instruction }),
+    timeoutLabel: 'Markdown summary request',
+    timeoutMs: LEGACY_API_LONG_ACTION_TIMEOUT_MS,
   });
 }
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function legacyRemoteAgentLabel(agent: LegacyRemoteAgentKind): string {
+  if (agent === 'claude') return 'Claude';
+  if (agent === 'codex') return 'Codex';
+  if (agent === 'bailian') return 'bailian';
+  return 'agy';
 }
 
 function agentRunResultFromJob<T extends LegacyAgyRunResponse>(
@@ -1165,6 +1200,8 @@ async function runLegacyRemoteAgentPromptJob<T extends LegacyAgyRunResponse>(
       {
         method: 'POST',
         body: JSON.stringify(options),
+        timeoutLabel: `${legacyRemoteAgentLabel(agent)} job create request`,
+        timeoutMs: LEGACY_API_SLOW_ACTION_TIMEOUT_MS,
       },
     );
   } catch (error) {
@@ -1414,6 +1451,8 @@ export async function createLegacyCodexHistory(
   const data = await legacyApiRequest<{ history: LegacyCodexHistory }>('/api/codex/histories', {
     method: 'POST',
     body: JSON.stringify({ serverId, title }),
+    timeoutLabel: 'Codex history create request',
+    timeoutMs: LEGACY_API_SLOW_ACTION_TIMEOUT_MS,
   });
   return data.history;
 }
@@ -1603,5 +1642,7 @@ export function startLegacyPublicWorkflow(
   return legacyApiRequest<LegacyPublicWorkflowStartResponse>('/api/public/start', {
     method: 'POST',
     body: JSON.stringify({ restartTunnel }),
+    timeoutLabel: 'Public workflow start request',
+    timeoutMs: LEGACY_API_SLOW_ACTION_TIMEOUT_MS,
   });
 }
