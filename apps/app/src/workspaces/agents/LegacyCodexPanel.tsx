@@ -1710,7 +1710,7 @@ export function LegacyCodexPanel({
   );
   const totalTokens = usageStats.total ?? usageStats.input + usageStats.output;
   const usageUnavailable = !usageStats.hasData && !activeTask?.running;
-  const remainingContext = contextRemainingPercent(usageStats);
+  const remainingTokenPercent = contextRemainingPercent(usageStats);
   const currentBinding = useMemo<LegacyCodexBinding | null>(() => {
     if (legacyServer) {
       return {
@@ -2562,26 +2562,17 @@ export function LegacyCodexPanel({
       const usageLines = usageStats.hasData
         ? [
             `- Total tokens: ${formatTokenCount(totalTokens)}`,
-            `- Context remaining: ${
-              remainingContext !== null
-                ? `${remainingContext}%`
-                : usageStats.contextRemainingTokens !== null
-                  ? `${formatTokenCount(usageStats.contextRemainingTokens)} tokens`
-                  : 'CLI did not include context data'
+            `- Token remaining: ${
+              remainingTokenPercent !== null ? `${remainingTokenPercent}%` : 'CLI did not include context data'
             }`,
             `- Input: ${formatTokenCount(usageStats.input)}`,
             `- Cached input: ${formatTokenCount(usageStats.cachedInput)}`,
             `- Output: ${formatTokenCount(usageStats.output)}`,
             `- Reasoning: ${formatTokenCount(usageStats.reasoning)}`,
-            `- Current context: ${
-              usageStats.currentContext !== null
-                ? formatTokenCount(usageStats.currentContext)
-                : 'CLI did not include context data'
-            }`,
           ]
         : [
             '- Total tokens: CLI did not report',
-            '- Context remaining: CLI did not report',
+            '- Token remaining: CLI did not report',
           ];
       const runtimeSummary = [
         'Current Codex runtime',

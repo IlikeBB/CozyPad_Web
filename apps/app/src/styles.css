@@ -3222,7 +3222,7 @@ button.danger:hover {
 
 .legacy-codex-usage-row {
   display: grid;
-  grid-template-columns: minmax(124px, 1.15fr) minmax(220px, 2fr) repeat(5, minmax(74px, 1fr));
+  grid-template-columns: minmax(124px, 1.15fr) minmax(132px, 1.05fr) repeat(4, minmax(74px, 1fr));
   gap: 6px;
   align-items: stretch;
   padding: 5px 8px;
@@ -3262,47 +3262,14 @@ button.danger:hover {
   font-variant-numeric: tabular-nums;
 }
 
-.legacy-codex-usage-stat-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  width: 100%;
-}
-
-.legacy-codex-usage-stat-heading span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-faint);
-}
-
-.legacy-codex-usage-stat-heading strong {
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
 .legacy-codex-usage-total {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
 }
 
-.legacy-codex-usage-context {
-  gap: 6px;
-}
-
-.legacy-codex-usage-context small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-faint);
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
+.legacy-codex-usage-remaining {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
 }
 
 .legacy-codex-segmented button:hover {
@@ -8642,7 +8609,7 @@ section.research-markdown-card:not([hidden]) {
   }
 
   .legacy-codex-usage-total,
-  .legacy-codex-usage-context {
+  .legacy-codex-usage-remaining {
     grid-column: span 2;
   }
 

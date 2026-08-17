@@ -213,19 +213,6 @@ export function contextRemainingPercent(stats: CodexUsageStats): number | null {
   );
 }
 
-export function contextUsageDetail(stats: CodexUsageStats, unavailable: boolean): string {
-  if (stats.hasData && stats.currentContext !== null) {
-    return `Used ${stats.currentContext.toLocaleString()} / ${stats.contextLimit?.toLocaleString() || 'unknown'}`;
-  }
-  if (stats.hasData && stats.contextRemainingTokens !== null) {
-    return `Remaining ${stats.contextRemainingTokens.toLocaleString()} tokens`;
-  }
-  if (stats.hasData) {
-    return 'CLI did not include context data';
-  }
-  return unavailable ? 'CLI did not return usage data' : 'CLI has not reported usage yet';
-}
-
 export function mergeCodexUsageStats(
   primary: CodexUsageStats,
   secondary: CodexUsageStats,
@@ -255,7 +242,7 @@ export function CodexUsageRow({
   totalTokens: number;
   unavailable: boolean;
 }) {
-  const remainingContext = contextRemainingPercent(stats);
+  const tokenRemaining = contextRemainingPercent(stats);
   const value = (reported: boolean, number: number) =>
     reported
       ? formatTokenCount(number)
@@ -271,20 +258,15 @@ export function CodexUsageRow({
           {stats.hasData ? formatTokenCount(totalTokens) : unavailable ? 'Unavailable' : 'Not reported'}
         </strong>
       </div>
-      <div className="legacy-codex-usage-stat legacy-codex-usage-context">
-        <div className="legacy-codex-usage-stat-heading">
-          <span>Context remaining</span>
-          <strong>
-            {stats.hasData && remainingContext !== null
-              ? `${remainingContext}%`
-              : unavailable
-                ? 'Unavailable'
-                : 'Not reported'}
-          </strong>
-          <small>
-            {contextUsageDetail(stats, unavailable)}
-          </small>
-        </div>
+      <div className="legacy-codex-usage-stat legacy-codex-usage-remaining">
+        <span>Token remaining</span>
+        <strong>
+          {stats.hasData && tokenRemaining !== null
+            ? `${tokenRemaining}%`
+            : unavailable
+              ? 'Unavailable'
+              : 'Not reported'}
+        </strong>
       </div>
       <div className="legacy-codex-usage-stat">
         <span>Input</span>
@@ -301,16 +283,6 @@ export function CodexUsageRow({
       <div className="legacy-codex-usage-stat">
         <span>Reasoning</span>
         <strong>{value(stats.hasData, stats.reasoning)}</strong>
-      </div>
-      <div className="legacy-codex-usage-stat">
-        <span>Current context</span>
-        <strong>
-          {stats.hasData && stats.currentContext !== null
-            ? formatTokenCount(stats.currentContext)
-            : unavailable
-              ? 'Unavailable'
-              : 'Not reported'}
-        </strong>
       </div>
     </div>
   );
