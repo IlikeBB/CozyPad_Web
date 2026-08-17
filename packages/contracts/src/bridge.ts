@@ -21,6 +21,7 @@ import type {
 } from './files';
 import type { HostKeyDecision, HostKeyPromptEvent } from './hostkey';
 import type { RemoteSettings, RemoteSettingsPatch } from './remoteSettings';
+import type { SshConfigImportRequest, SshConfigImportResult } from './sshConfig';
 import type {
   TmuxInstallLog,
   TmuxInstallProgress,
@@ -66,6 +67,7 @@ export interface PlatformBridge {
   listProfiles(): Promise<ConnectionProfile[]>;
   saveProfile(draft: ConnectionProfileDraft): Promise<ConnectionProfile>;
   deleteProfile(request: DeleteProfileRequest): Promise<void>;
+  importSshConfig(request?: SshConfigImportRequest): Promise<SshConfigImportResult>;
   connect(request: ConnectRequest): Promise<void>;
   disconnect(request: ConnectRequest): Promise<void>;
   onConnectionState(listener: (event: ConnectionStateChanged) => void): Unsubscribe;

@@ -148,6 +148,8 @@ type CodexContentSection =
 const USER_TRANSCRIPT_MARKER = '[CozyPad User]';
 const CODEX_TRANSCRIPT_MARKER = '[CozyPad Codex]';
 const CODEX_STREAM_WAITING_TEXT = '[CozyPad] codex stream connected; waiting for agent output';
+const LOCAL_CODEX_LOGIN_COMMAND = 'codex logout && codex login';
+const REMOTE_CODEX_LOGIN_COMMAND = 'codex logout && codex login --device-auth';
 const INLINE_REMOTE_PATH_PATTERN =
   /((?:~(?:\/[^\s`"'<>]*)?)|(?:\/(?:home|ssd\d*|mnt|data|workspace|work|project|projects|tmp|var|opt|root|usr|srv)(?:\/[^\s`"'<>]*)?))/g;
 const TRAILING_INLINE_PATH_PUNCTUATION = /[),.，。；;：:、\]}）】》」』]+$/;
@@ -335,14 +337,11 @@ function isHiddenRemoteCodexTransportLine(line: string): boolean {
     lower === '[cozypad] codex is still running in background' ||
     lower === '[cozypad local codex] ready' ||
     lower === '[cozypad] remote codex websocket error' ||
+    isRawCodexOpenAiAuthErrorText(trimmed) ||
     lower.includes('remote codex retry scheduled') ||
     lower.includes('remote codex ssh transport was interrupted') ||
     lower.includes('cozypad will retry automatically') ||
     lower.includes('cozypad will continue this task automatically') ||
-    (lower.includes('401 unauthorized') &&
-      (lower.includes('api.openai.com') ||
-        lower.includes('responses_websocket') ||
-        lower.includes('codex_api::endpoint'))) ||
     /^connection closed by .+ port \d+$/i.test(trimmed) ||
     /^banner exchange:\s*connection to unknown port -1:\s*connection refused$/i.test(trimmed) ||
     /^banner exchange:/i.test(trimmed) ||
@@ -516,6 +515,29 @@ function normalizeOutput(output: string): string {
     .replace(/\r/g, '\n');
 }
 
+function isRawCodexOpenAiAuthErrorText(text: string): boolean {
+  const lower = String(text || '').toLowerCase();
+  return (
+    (lower.includes('401 unauthorized') &&
+      (lower.includes('api.openai.com') ||
+        lower.includes('responses_websocket') ||
+        lower.includes('codex_api::endpoint'))) ||
+    lower.includes('invalid_refresh_token') ||
+    lower.includes('token_expired') ||
+    lower.includes('could not validate your refresh token') ||
+    lower.includes('provided authentication token is expired') ||
+    lower.includes('access token could not be refreshed') ||
+    lower.includes('please log out and sign in again') ||
+    (lower.includes('refresh token') && lower.includes('try signing in again')) ||
+    (lower.includes('authentication token') && lower.includes('signing in again'))
+  );
+}
+
+function hasCodexOpenAiAuthFailure(text: string): boolean {
+  const lower = String(text || '').toLowerCase();
+  return isRawCodexOpenAiAuthErrorText(lower) || lower.includes('codex openai login is invalid');
+}
+
 function normalizeTaskStatus(value: unknown, fallback: CodexTaskStatus = 'completed'): CodexTaskStatus {
   return value === 'completed' || value === 'running' || value === 'failed'
     ? value
@@ -529,6 +551,7 @@ function hasFatalCodexStatus(text: string): boolean {
       const lower = line.trim().toLowerCase();
       if (!lower) return false;
       return (
+        hasCodexOpenAiAuthFailure(lower) ||
         lower.startsWith('[cozypad] remote codex failed') ||
         lower.startsWith('[cozypad] codex failed') ||
         (lower.startsWith('[cozypad local codex]') && lower.includes('failed')) ||
@@ -544,8 +567,6 @@ function hasFatalCodexStatus(text: string): boolean {
         lower.includes('not a socket') ||
         lower.includes('remote codex cli not found') ||
         lower.includes('codex cli not found') ||
-        lower.includes('codex openai login is invalid') ||
-        lower.includes('401 unauthorized') ||
         lower.includes('spawn eperm')
       );
     });
@@ -1645,6 +1666,35 @@ function renderDialogue(
   });
 }
 
+function CodexLoginRepairAlert({
+  localMode,
+  serverName,
+  command,
+  onCopyCommand,
+}: {
+  localMode: boolean;
+  serverName: string;
+  command: string;
+  onCopyCommand: () => void;
+}) {
+  return (
+    <div className="legacy-codex-alert legacy-codex-auth-alert">
+      <strong>{localMode ? 'Local Codex login required' : 'Remote Codex login required'}</strong>
+      <span>
+        {localMode
+          ? 'Local Codex OpenAI login is expired.'
+          : `${serverName || 'SSH server'} is connected, but that remote user needs to sign in to Codex again.`}
+      </span>
+      <div className="legacy-codex-alert-actions">
+        <code>{command}</code>
+        <button type="button" onClick={onCopyCommand}>
+          Copy
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function LegacyCodexPanel({
   selectedProfile,
   connected,
@@ -2706,18 +2756,39 @@ export function LegacyCodexPanel({
     ? `${localMode ? 'Local' : 'Remote'} Codex on ${legacyServer.name}`
     : '請先選擇 SSH server';
 
+  const codexLoginCommand = localMode ? LOCAL_CODEX_LOGIN_COMMAND : REMOTE_CODEX_LOGIN_COMMAND;
+  const handleCopyCodexLoginCommand = useCallback(() => {
+    const fallback = `Run this on ${localMode ? 'this computer' : 'the SSH server'}: ${codexLoginCommand}`;
+    if (!navigator.clipboard) {
+      setHelperError(fallback);
+      return;
+    }
+    void navigator.clipboard
+      .writeText(codexLoginCommand)
+      .then(() => setHelperError(`Copied Codex login command: ${codexLoginCommand}`))
+      .catch(() => setHelperError(fallback));
+  }, [codexLoginCommand, localMode]);
+
   const visibleHelperError = stripHiddenCodexImagePayload(helperError);
   const codexAvailable = Boolean(legacyServer && codexStatus?.available);
   const codexHasChecked = Boolean(codexStatus || codexCheckError);
+  const codexAuthRequired = Boolean(
+    codexStatus?.authRequired ||
+      hasCodexOpenAiAuthFailure(codexCheckError) ||
+      (activeTask && hasCodexOpenAiAuthFailure(activeTask.output)),
+  );
   const codexModeLabel =
     codexStatus?.transport === 'terminal' ? 'terminal bridge' : localMode ? 'local mode' : 'server mode';
   const codexStatusLabel = codexAvailable
     ? codexModeLabel
+    : codexAuthRequired
+      ? 'login required'
     : codexHasChecked
       ? 'no service'
       : codexReady
         ? 'unchecked'
         : 'no server';
+  const codexStatusChip = codexAvailable ? 'ready' : codexAuthRequired ? 'error' : 'disconnected';
 
   return (
     <div className="legacy-codex-panel">
@@ -2733,7 +2804,7 @@ export function LegacyCodexPanel({
           <span className="chip chip-ready">
             {codexRunOptions.model || 'default'} · {codexRunOptions.reasoningEffort || 'auto'}
           </span>
-          <span className={`chip chip-${codexAvailable ? 'ready' : 'disconnected'}`}>
+          <span className={`chip chip-${codexStatusChip}`}>
             {codexStatusLabel}
           </span>
         </div>
@@ -2745,7 +2816,16 @@ export function LegacyCodexPanel({
         </div>
       ) : null}
 
-      {legacyServer && connected && codexCheckError ? (
+      {legacyServer && connected && codexAuthRequired ? (
+        <CodexLoginRepairAlert
+          localMode={localMode}
+          serverName={legacyServer.name}
+          command={codexLoginCommand}
+          onCopyCommand={handleCopyCodexLoginCommand}
+        />
+      ) : null}
+
+      {legacyServer && connected && codexCheckError && !codexAuthRequired ? (
         <div className="legacy-codex-alert">
           <strong>{localMode ? 'Local Codex' : 'Remote Codex'}</strong>
           <span>{checkingCodex ? 'Checking Codex CLI...' : codexCheckError}</span>
@@ -2951,7 +3031,7 @@ export function LegacyCodexPanel({
             </dd>
             <dt>Status</dt>
             <dd>
-              <span className={`chip chip-${codexAvailable ? 'ready' : 'disconnected'}`}>
+              <span className={`chip chip-${codexStatusChip}`}>
                 {codexStatusLabel}
               </span>
             </dd>

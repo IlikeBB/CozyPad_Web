@@ -169,6 +169,7 @@ export type LegacyAgyRunResponse = {
 export type LegacyCodexStatus = LegacyAgyStatus & {
   models?: string[];
   defaultModel?: string;
+  authRequired?: boolean;
 };
 export type LegacyCodexRunResponse = LegacyAgyRunResponse;
 
@@ -381,6 +382,20 @@ export type LegacyServerCreatePayload = {
   port: number;
   password: string;
   defaultPath: string;
+};
+
+export type LegacyServerSavePayload = Omit<LegacyServerCreatePayload, 'password'> & {
+  id?: string;
+  password?: string;
+};
+
+export type LegacySshConfigImportResult = {
+  ok?: boolean;
+  imported: number;
+  skipped?: number;
+  source?: string;
+  changed?: boolean;
+  servers: LegacySshServer[];
 };
 
 export type LegacySshFileItem = {
@@ -1025,9 +1040,33 @@ export async function createLegacyServer(
   return data.server;
 }
 
+export async function saveLegacyServer(
+  payload: LegacyServerSavePayload,
+): Promise<LegacySshServer> {
+  const { id, ...body } = payload;
+  const data = await legacyApiRequest<{ server: LegacySshServer }>(
+    id === undefined ? '/api/ssh/servers' : `/api/ssh/servers/${encodeURIComponent(id)}/update`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
+  return data.server;
+}
+
 export function deleteLegacyServer(serverId: string): Promise<void> {
-  return legacyApiRequest<void>(`/api/ssh/servers/${encodeURIComponent(serverId)}`, {
-    method: 'DELETE',
+  return legacyApiRequest<void>(`/api/ssh/servers/${encodeURIComponent(serverId)}/delete`, {
+    method: 'POST',
+  });
+}
+
+export function importLegacySshConfig(
+  rawConfig: string,
+  sourceName = 'ssh_config',
+): Promise<LegacySshConfigImportResult> {
+  return legacyApiRequest<LegacySshConfigImportResult>('/api/ssh/servers/import-config', {
+    method: 'POST',
+    body: JSON.stringify({ rawConfig, sourceName }),
   });
 }
 

@@ -1,18 +1,38 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   AuthenticationMethod,
   ConnectionProfile,
   HostKeyPromptEvent,
+  SshConfigImportResult,
 } from '@cozypad/contracts';
 import { getBridge } from '../platform/bridge';
+import {
+  deleteLegacyServer,
+  importLegacySshConfig,
+  saveLegacyServer,
+} from '../workspaces/agents/legacySshApi';
+import type { LegacySshConfigImportResult } from '../workspaces/agents/legacySshApi';
+import type { LegacySshServer } from '../workspaces/agents/legacySshApi';
+
+type ConnectionManagerSource = 'bridge' | 'legacy';
+
+export type ConnectionManagerProfile = ConnectionProfile & {
+  managerSource?: ConnectionManagerSource;
+  legacySource?: LegacySshServer['source'];
+  sourceName?: string;
+  defaultPath?: string;
+};
 
 interface ConnectionManagerProps {
-  profiles: ConnectionProfile[];
+  profiles: ConnectionManagerProfile[];
+  defaultSource?: ConnectionManagerSource;
   onClose(): void;
   onChanged(): void | Promise<void>;
 }
 
 interface FormState {
+  source: ConnectionManagerSource;
+  legacySource?: LegacySshServer['source'];
   id?: string;
   name: string;
   host: string;
@@ -23,9 +43,11 @@ interface FormState {
   privateKey: string;
   passphrase: string;
   rememberCredential: boolean;
+  defaultPath: string;
 }
 
 const EMPTY_FORM: FormState = {
+  source: 'bridge',
   name: '',
   host: '',
   port: '22',
@@ -35,6 +57,7 @@ const EMPTY_FORM: FormState = {
   privateKey: '',
   passphrase: '',
   rememberCredential: true,
+  defaultPath: '~',
 };
 
 const profileAuthMethod = (profile: ConnectionProfile): AuthenticationMethod =>
@@ -48,12 +71,63 @@ const hasCredential = (
     ? profile.hasPrivateKey === true
     : profile.hasPassword === true;
 
-export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionManagerProps) {
+const profileSource = (profile: ConnectionManagerProfile): ConnectionManagerSource =>
+  profile.managerSource ?? 'bridge';
+
+const profileKey = (profile: ConnectionManagerProfile): string =>
+  `${profileSource(profile)}:${profile.id}`;
+
+const sourceLabel = (profile: ConnectionManagerProfile | FormState): string => {
+  if ('sourceName' in profile && profile.sourceName) return profile.sourceName;
+  const source = 'source' in profile ? profile.source : profileSource(profile);
+  if (source === 'legacy') {
+    if ('legacySource' in profile && profile.legacySource === 'ssh-config') return 'SSH config';
+    return 'Web SSH';
+  }
+  return 'Bridge';
+};
+
+function formFromProfile(profile: ConnectionManagerProfile): FormState {
+  return {
+    source: profileSource(profile),
+    legacySource: profile.legacySource,
+    id: profile.id,
+    name: profile.name,
+    host: profile.host,
+    port: String(profile.port),
+    username: profile.username,
+    authMethod: profileAuthMethod(profile),
+    password: '',
+    privateKey: '',
+    passphrase: '',
+    rememberCredential: profile.credentialPersisted === true,
+    defaultPath: profile.defaultPath ?? '~',
+  };
+}
+
+function importSummary(
+  result: SshConfigImportResult | LegacySshConfigImportResult,
+): string {
+  const skipped = result.skipped ?? 0;
+  return skipped > 0
+    ? `已匯入 ${result.imported} 個 Host，略過 ${skipped} 個 pattern。`
+    : `已匯入 ${result.imported} 個 Host。`;
+}
+
+export function ConnectionManager({
+  profiles,
+  defaultSource = 'bridge',
+  onClose,
+  onChanged,
+}: ConnectionManagerProps) {
   const bridge = getBridge();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const set = (patch: Partial<FormState>) =>
     setForm((current) => (current ? { ...current, ...patch } : current));
@@ -61,18 +135,59 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
   const save = async () => {
     if (!form) return;
     const port = Number(form.port);
-    if (!form.name || !form.host || !form.username || !Number.isInteger(port)) {
+    if (
+      !form.name ||
+      !form.host ||
+      !form.username ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > 65535
+    ) {
       setError('name / host / port / username 為必填');
       return;
     }
     const existing = form.id
-      ? profiles.find((profile) => profile.id === form.id)
+      ? profiles.find(
+          (profile) => profile.id === form.id && profileSource(profile) === form.source,
+        )
       : undefined;
     const targetUnchanged =
       existing !== undefined &&
       existing.host === form.host &&
       existing.port === port &&
       existing.username === form.username;
+
+    if (form.source === 'legacy') {
+      const passwordRequired =
+        existing === undefined ||
+        (existing.legacySource !== 'ssh-config' &&
+          (!targetUnchanged || existing.hasPrivateKey !== true));
+      if (passwordRequired && form.password === '') {
+        setError('請輸入 SSH 密碼以安裝或更新 CozyPad SSH key');
+        return;
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        await saveLegacyServer({
+          ...(form.id === undefined ? {} : { id: form.id }),
+          name: form.name,
+          host: form.host,
+          port,
+          user: form.username,
+          ...(form.password === '' ? {} : { password: form.password }),
+          defaultPath: form.defaultPath.trim() || '~',
+        });
+        await onChanged();
+        setForm(null);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     const keepsExistingCredential =
       existing !== undefined &&
       targetUnchanged &&
@@ -118,22 +233,65 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
       await onChanged();
       setForm(null);
     } catch (err: unknown) {
-      setError(String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   };
 
-  const remove = async (profileId: string) => {
+  const remove = async (profile: ConnectionManagerProfile) => {
     setBusy(true);
+    setError(null);
     try {
-      await bridge.deleteProfile({ profileId });
+      if (profileSource(profile) === 'legacy') {
+        await deleteLegacyServer(profile.id);
+      } else {
+        await bridge.deleteProfile({ profileId: profile.id });
+      }
       await onChanged();
       setConfirmDelete(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   };
+
+  const importSshConfigText = async (rawConfig: string, sourcePath: string) => {
+    setImporting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result =
+        defaultSource === 'legacy'
+          ? await importLegacySshConfig(rawConfig, sourcePath)
+          : await bridge.importSshConfig({ rawConfig, sourcePath });
+      await onChanged();
+      setNotice(importSummary(result));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const scanLocalSshConfig = async () => {
+    setImporting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await bridge.importSshConfig();
+      await onChanged();
+      setNotice(importSummary(result));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const canScanLocalSshConfig = defaultSource === 'bridge' && bridge.kind === 'electron';
+  const controlsDisabled = busy || importing;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -147,66 +305,107 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
 
         {form === null ? (
           <>
+            {error ? <p className="form-error">{error}</p> : null}
+            {notice ? <p className="form-success">{notice}</p> : null}
+            <div className="profile-import-actions">
+              {canScanLocalSshConfig ? (
+                <button disabled={controlsDisabled} onClick={() => void scanLocalSshConfig()}>
+                  掃描本機 ssh_config
+                </button>
+              ) : null}
+              <button
+                disabled={controlsDisabled}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                匯入 ssh_config
+              </button>
+              <input
+                ref={fileInputRef}
+                className="sr-only"
+                type="file"
+                accept=".conf,.config,.sshconfig,text/plain"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = '';
+                  if (!file) return;
+                  const filePath =
+                    'path' in file && typeof file.path === 'string' && file.path
+                      ? file.path
+                      : file.name;
+                  void file
+                    .text()
+                    .then((rawConfig) => importSshConfigText(rawConfig, filePath));
+                }}
+              />
+            </div>
             <div className="profile-list">
-              {profiles.map((profile) => (
-                <div key={profile.id} className="profile-row">
-                  <div className="profile-row-main">
-                    <span className="profile-row-name">
-                      {profile.name}
-                      {hasCredential(profile) ? (
-                        <span
-                          className="lock"
-                          title={
-                            profileAuthMethod(profile) === 'privateKey'
-                              ? '已有 SSH 私鑰'
-                              : '已有密碼'
-                          }
-                        >
-                          {profileAuthMethod(profile) === 'privateKey' ? '🔑' : '🔒'}
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="profile-row-meta mono">
-                      {profile.username}@{profile.host}:{profile.port} ·{' '}
-                      {profileAuthMethod(profile) === 'privateKey' ? 'Key' : 'Password'}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() =>
-                      setForm({
-                        id: profile.id,
-                        name: profile.name,
-                        host: profile.host,
-                        port: String(profile.port),
-                        username: profile.username,
-                        authMethod: profileAuthMethod(profile),
-                        password: '',
-                        privateKey: '',
-                        passphrase: '',
-                        rememberCredential: profile.credentialPersisted === true,
-                      })
-                    }
-                  >
-                    編輯
-                  </button>
-                  {confirmDelete === profile.id ? (
+              {profiles.map((profile) => {
+                const key = profileKey(profile);
+                return (
+                  <div key={key} className="profile-row">
+                    <div className="profile-row-main">
+                      <span className="profile-row-name">
+                        {profile.name}
+                        <span className="profile-source-tag">{sourceLabel(profile)}</span>
+                        {hasCredential(profile) ? (
+                          <span
+                            className="lock"
+                            title={
+                              profileAuthMethod(profile) === 'privateKey'
+                                ? '已有 SSH 私鑰'
+                                : '已有密碼'
+                            }
+                          >
+                            {profileAuthMethod(profile) === 'privateKey' ? '🔑' : '🔒'}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="profile-row-meta mono">
+                        {profile.username}@{profile.host}:{profile.port} ·{' '}
+                        {profileAuthMethod(profile) === 'privateKey' ? 'Key' : 'Password'}
+                        {profile.defaultPath ? ` · ${profile.defaultPath}` : ''}
+                      </span>
+                    </div>
                     <button
-                      className="danger"
                       disabled={busy}
-                      onClick={() => void remove(profile.id)}
+                      onClick={() => {
+                        setConfirmDelete(null);
+                        setError(null);
+                        setNotice(null);
+                        setForm(formFromProfile(profile));
+                      }}
                     >
-                      確定刪除
+                      編輯
                     </button>
-                  ) : (
-                    <button onClick={() => setConfirmDelete(profile.id)}>刪除</button>
-                  )}
-                </div>
-              ))}
+                    {confirmDelete === key ? (
+                      <button
+                        className="danger"
+                        disabled={busy}
+                        onClick={() => void remove(profile)}
+                      >
+                        確定刪除
+                      </button>
+                    ) : (
+                      <button disabled={busy} onClick={() => setConfirmDelete(key)}>
+                        刪除
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
               {profiles.length === 0 ? (
                 <p className="hint">還沒有連線，先新增一個。</p>
               ) : null}
             </div>
-            <button className="primary" onClick={() => setForm({ ...EMPTY_FORM })}>
+            <button
+              className="primary"
+              onClick={() => {
+                setConfirmDelete(null);
+                setError(null);
+                setNotice(null);
+                setForm({ ...EMPTY_FORM, source: defaultSource });
+              }}
+            >
               ＋ 新增連線
             </button>
           </>
@@ -244,82 +443,112 @@ export function ConnectionManager({ profiles, onClose, onChanged }: ConnectionMa
                 onChange={(event) => set({ username: event.target.value })}
               />
             </label>
-            <div className="auth-method-field">
-              <span>驗證方式</span>
-              <div className="auth-method-switch" role="group" aria-label="SSH 驗證方式">
-                {(['password', 'privateKey'] as const).map((authMethod) => (
-                  <button
-                    key={authMethod}
-                    type="button"
-                    className={form.authMethod === authMethod ? 'active' : ''}
-                    onClick={() =>
-                      set({
-                        authMethod,
-                        password: '',
-                        privateKey: '',
-                        passphrase: '',
-                      })
-                    }
-                  >
-                    {authMethod === 'password' ? '密碼' : 'SSH Key'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {form.authMethod === 'password' ? (
-              <label>
-                Password{form.id !== undefined ? '（留空表示不變更）' : ''}
-                <input
-                  type="password"
-                  value={form.password}
-                  onChange={(event) => set({ password: event.target.value })}
-                  autoComplete="new-password"
-                />
-              </label>
-            ) : (
+            {form.source === 'legacy' ? (
               <>
+                {form.legacySource !== 'ssh-config' ? (
+                  <label>
+                    Default path
+                    <input
+                      value={form.defaultPath}
+                      onChange={(event) => set({ defaultPath: event.target.value })}
+                      placeholder="~"
+                    />
+                  </label>
+                ) : null}
                 <label>
-                  SSH 私鑰{form.id !== undefined ? '（留空表示不變更）' : ''}
-                  <textarea
-                    className="private-key-input mono"
-                    value={form.privateKey}
-                    onChange={(event) => set({ privateKey: event.target.value })}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    spellCheck={false}
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                  />
-                </label>
-                <label className="credential-file">
-                  <span>或從檔案載入 OpenSSH／PEM 私鑰</span>
-                  <input
-                    type="file"
-                    accept=".pem,.key,application/x-pem-file,text/plain"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) void file.text().then((privateKey) => set({ privateKey }));
-                    }}
-                  />
-                </label>
-                <label>
-                  Key passphrase（未加密私鑰可留空）
+                  SSH Password
+                  {form.id !== undefined ? '（只在重新安裝 key 時需要）' : ''}
                   <input
                     type="password"
-                    value={form.passphrase}
-                    onChange={(event) => set({ passphrase: event.target.value })}
+                    value={form.password}
+                    onChange={(event) => set({ password: event.target.value })}
                     autoComplete="new-password"
                   />
                 </label>
+                <p className="hint">
+                  類型：{sourceLabel(form)}。修改 host / port / username 時會重新安裝 CozyPad SSH key。
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="auth-method-field">
+                  <span>驗證方式</span>
+                  <div className="auth-method-switch" role="group" aria-label="SSH 驗證方式">
+                    {(['password', 'privateKey'] as const).map((authMethod) => (
+                      <button
+                        key={authMethod}
+                        type="button"
+                        className={form.authMethod === authMethod ? 'active' : ''}
+                        onClick={() =>
+                          set({
+                            authMethod,
+                            password: '',
+                            privateKey: '',
+                            passphrase: '',
+                          })
+                        }
+                      >
+                        {authMethod === 'password' ? '密碼' : 'SSH Key'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {form.authMethod === 'password' ? (
+                  <label>
+                    Password{form.id !== undefined ? '（留空表示不變更）' : ''}
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(event) => set({ password: event.target.value })}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                ) : (
+                  <>
+                    <label>
+                      SSH 私鑰{form.id !== undefined ? '（留空表示不變更）' : ''}
+                      <textarea
+                        className="private-key-input mono"
+                        value={form.privateKey}
+                        onChange={(event) => set({ privateKey: event.target.value })}
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                      />
+                    </label>
+                    <label className="credential-file">
+                      <span>或從檔案載入 OpenSSH／PEM 私鑰</span>
+                      <input
+                        type="file"
+                        accept=".pem,.key,application/x-pem-file,text/plain"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) void file.text().then((privateKey) => set({ privateKey }));
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Key passphrase（未加密私鑰可留空）
+                      <input
+                        type="password"
+                        value={form.passphrase}
+                        onChange={(event) => set({ passphrase: event.target.value })}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                  </>
+                )}
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={form.rememberCredential}
+                    onChange={(event) => set({ rememberCredential: event.target.checked })}
+                  />
+                  以 OS 安全儲存保留驗證資料（關閉時只保留到 app 結束）
+                </label>
               </>
             )}
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={form.rememberCredential}
-                onChange={(event) => set({ rememberCredential: event.target.checked })}
-              />
-              以 OS 安全儲存保留驗證資料（關閉時只保留到 app 結束）
-            </label>
             {error ? <p className="form-error">{error}</p> : null}
             <div className="form-actions">
               <button onClick={() => setForm(null)}>取消</button>

@@ -2744,7 +2744,7 @@ async function getRemoteCodexStatus(session, serverId = "") {
     "else",
     '  probe_file=$(mktemp "${TMPDIR:-/tmp}/cozypad-codex-probe.XXXXXX") || probe_file=""',
     '  if [ -n "$probe_file" ]; then',
-    '    trap \'rm -f "$probe_file" "$models_file"\' EXIT',
+    '    trap \'rm -f "$probe_file" "$models_file" "$models_error_file"\' EXIT',
     "    if command -v timeout >/dev/null 2>&1; then",
     '      timeout 6s codex --help >"$probe_file" 2>&1 </dev/null',
     "      probe_status=$?",
@@ -2766,11 +2766,28 @@ async function getRemoteCodexStatus(session, serverId = "") {
     `    grep -E '^[[:space:]]*model[[:space:]]*=' "$HOME/.codex/config.toml" | head -n 1 | cut -d= -f2- | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr -d '"' | sed -E 's/^/__COZYPAD_CODEX_DEFAULT_MODEL__:/'`,
     "  fi",
     '  models_file=$(mktemp "${TMPDIR:-/tmp}/cozypad-codex-models.XXXXXX") || models_file=""',
+    '  models_error_file=$(mktemp "${TMPDIR:-/tmp}/cozypad-codex-models-error.XXXXXX") || models_error_file=""',
     '  if [ -n "$models_file" ]; then',
-    "    if command -v timeout >/dev/null 2>&1; then",
-    '      timeout 8s codex debug models >"$models_file" 2>/dev/null',
+    '    if [ -n "$models_error_file" ]; then',
+    "      if command -v timeout >/dev/null 2>&1; then",
+    '        timeout 8s codex debug models >"$models_file" 2>"$models_error_file"',
+    "      else",
+    '        codex debug models >"$models_file" 2>"$models_error_file"',
+    "      fi",
     "    else",
-    '      codex debug models >"$models_file" 2>/dev/null',
+    "      if command -v timeout >/dev/null 2>&1; then",
+    '        timeout 8s codex debug models >"$models_file" 2>/dev/null',
+    "      else",
+    '        codex debug models >"$models_file" 2>/dev/null',
+    "      fi",
+    "    fi",
+    "    codex_auth_required=0",
+    '    if [ -n "$models_error_file" ] && grep -Eqi "invalid_refresh_token|token_expired|refresh token|access token could not be refreshed|authentication token is expired|please log out and sign in again|401 unauthorized" "$models_error_file"; then codex_auth_required=1; fi',
+    '    if grep -Eqi "invalid_refresh_token|token_expired|refresh token|access token could not be refreshed|authentication token is expired|please log out and sign in again|401 unauthorized" "$models_file"; then codex_auth_required=1; fi',
+    '    if [ "$codex_auth_required" = "1" ]; then',
+    "      printf '__COZYPAD_CODEX_AUTH_REQUIRED__\\n'",
+    '      [ -n "$models_error_file" ] && cat "$models_error_file" >&2',
+    '      cat "$models_file" >&2',
     "    fi",
     '    if [ -s "$models_file" ]; then',
     "      if command -v python3 >/dev/null 2>&1; then",
@@ -2790,7 +2807,7 @@ async function getRemoteCodexStatus(session, serverId = "") {
     `        grep -o '"slug"[[:space:]]*:[[:space:]]*"[^"]*"' "$models_file" | sed -E 's/.*"slug"[[:space:]]*:[[:space:]]*"([^"]*)".*/__COZYPAD_CODEX_MODEL__:\\1/'`,
     "      fi",
     "    fi",
-    '    rm -f "$models_file"',
+    '    rm -f "$models_file" "$models_error_file"',
     "  fi",
     "  exit 0",
     "fi",
@@ -2817,7 +2834,10 @@ async function getRemoteCodexStatus(session, serverId = "") {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const available = lines.includes("__COZYPAD_CODEX_AVAILABLE__");
+  const authRequired =
+    lines.includes("__COZYPAD_CODEX_AUTH_REQUIRED__") ||
+    isRemoteCodexOpenAiAuthError(result.stderr || "");
+  const available = lines.includes("__COZYPAD_CODEX_AVAILABLE__") && !authRequired;
   const markerIndex = lines.indexOf("__COZYPAD_CODEX_AVAILABLE__");
   const modelInfo = parseCodexModelMarkers(result.stdout);
 
@@ -2828,10 +2848,13 @@ async function getRemoteCodexStatus(session, serverId = "") {
     version: available && markerIndex >= 0 ? lines[markerIndex + 2] || "" : "",
     error: available
       ? ""
-      : blockedByTransport
+      : authRequired
+        ? codexOpenAiAuthMessage(server, false)
+        : blockedByTransport
         ? remoteAgentCooldownMessage("Codex", getRemoteAgentBlock(blockKey))
         : truncateForApi(result.stderr || "Remote Codex CLI not found"),
     checkedAt: new Date().toISOString(),
+    authRequired,
     models: normalizeCodexModelList([
       modelInfo.defaultModel,
       ...modelInfo.models,
@@ -3917,7 +3940,7 @@ function collectChildProcess(child, options = {}) {
       const authError = openAiAuthError || isRemoteCodexOpenAiAuthError(stderr);
       const visibleError = visibleRemoteCodexStderr(stderr);
       const parsedStdout = authError
-        ? "Codex OpenAI login is invalid. Run `codex login`, then retry."
+        ? codexOpenAiAuthMessage(null, false)
         : assistantOutput.trim() || stdout.trim();
       resolve({
         ...result,
@@ -3964,7 +3987,7 @@ function normalizeCodexCliProcessResult(result, stdoutLimit = 2 * 1024 * 1024) {
   parser.flush();
 
   const authError = openAiAuthError || isRemoteCodexOpenAiAuthError(result?.stderr || "");
-  const authMessage = "Codex OpenAI login is invalid. Run `codex login`, then retry.";
+  const authMessage = codexOpenAiAuthMessage(null, false);
   return {
     output: authError
       ? authMessage
@@ -4597,6 +4620,51 @@ async function refreshProjectSshConfigFromLocal(session) {
   };
 }
 
+async function importProjectSshConfigText(session, body) {
+  const rawConfig = String(body?.rawConfig || "").replace(/^\uFEFF/, "");
+  if (!rawConfig.trim()) {
+    throw new Error("SSH config content is empty");
+  }
+
+  if (Buffer.byteLength(rawConfig, "utf8") > 1024 * 1024) {
+    throw new Error("SSH config is too large");
+  }
+
+  const configFile = getProjectSshConfigFile(session);
+  const sourceName = sanitizeText(body?.sourceName || "client ssh_config").slice(0, 120);
+  const importedAt = new Date().toISOString();
+  const parsedServers = parseSshConfig(rawConfig, configFile);
+  if (parsedServers.length === 0) {
+    throw new Error("No concrete Host entries were found in SSH config");
+  }
+
+  await mkdir(path.dirname(configFile), { recursive: true });
+
+  let previousText = "";
+  try {
+    previousText = await readFile(configFile, "utf8");
+  } catch {
+    previousText = "";
+  }
+
+  const nextText = `# Imported from ${sourceName || "client ssh_config"} at ${importedAt}\n${rawConfig.replace(
+    /\s+$/g,
+    "",
+  )}\n`;
+  const changed = previousText !== nextText;
+  if (changed) {
+    await writeFile(configFile, nextText, "utf8");
+  }
+
+  return {
+    changed,
+    imported: parsedServers.length,
+    skipped: 0,
+    source: sourceName || "client ssh_config",
+    importedAt,
+  };
+}
+
 function parseSshConfig(raw, configFile = SSH_CONFIG_FILE) {
   const servers = [];
   let currentHosts = [];
@@ -4604,7 +4672,7 @@ function parseSshConfig(raw, configFile = SSH_CONFIG_FILE) {
 
   function flush() {
     for (const alias of currentHosts) {
-      if (!alias || /[*?\[\]]/.test(alias)) {
+      if (!alias || alias.startsWith("!") || /[*?\[\]]/.test(alias)) {
         continue;
       }
 
@@ -4819,6 +4887,27 @@ async function deleteSshConfigServer(server, session) {
   }
 
   await writeFile(configFile, next.text, "utf8");
+}
+
+async function deleteSavedSshServer(session, server) {
+  if (isSystemLocalServer(server)) {
+    throw new Error("localhost is a built-in server and cannot be deleted");
+  }
+
+  if (server.source === "ssh-config") {
+    await deleteSshConfigServer(server, session);
+    return;
+  }
+
+  if (server.source !== "local") {
+    throw new Error("Unsupported SSH server source");
+  }
+
+  const servers = await readLocalServers(session);
+  await writeLocalServers(
+    session,
+    servers.filter((item) => item.id !== server.id),
+  );
 }
 
 function getServerTargetLabel(server) {
@@ -5079,11 +5168,10 @@ function appendSshControlMasterArgs(args, server, options = {}) {
   );
 }
 
-function createServerProfile(input) {
+function normalizeServerProfileFields(input) {
   const name = sanitizeText(input.name);
   const host = sanitizeText(input.host);
   const user = sanitizeText(input.user);
-  const identityFile = "";
   const defaultPath = sanitizeText(input.defaultPath) || "~";
   const port = Number(input.port || 22);
 
@@ -5099,6 +5187,12 @@ function createServerProfile(input) {
     throw new Error("Port must be between 1 and 65535");
   }
 
+  return { name, host, user, port, defaultPath };
+}
+
+function createServerProfile(input) {
+  const { name, host, user, port, defaultPath } = normalizeServerProfileFields(input);
+  const identityFile = "";
   const slug = toSafeServerSlug(name);
   const now = new Date().toISOString();
 
@@ -6059,25 +6153,14 @@ async function installPublicKeyWithPassword(server, password, publicKey) {
   }
 }
 
-async function createDirectServerProfile(session, input) {
-  const password = String(input.password || "");
-  const server = createServerProfile(input);
-  const knownHostsFile = getUserKnownHostsFile(session);
-
-  if (!server.user) {
-    throw new Error("User is required");
-  }
-
-  if (!password) {
-    throw new Error("SSH password is required");
-  }
-
+async function installAndValidateDirectServerKey(session, server, password) {
   const key = await ensureDirectSshKey(session, server);
   const directServer = {
     ...server,
     identityFile: key.identityFile,
-    knownHostsFile,
-    strictHostKeyChecking: "accept-new",
+    knownHostsFile: getUserKnownHostsFile(session),
+    strictHostKeyChecking: server.strictHostKeyChecking || "accept-new",
+    updatedAt: new Date().toISOString(),
   };
 
   await installPublicKeyWithPassword(directServer, password, key.publicKey);
@@ -6094,6 +6177,182 @@ async function createDirectServerProfile(session, input) {
   }
 
   return directServer;
+}
+
+async function createDirectServerProfile(session, input) {
+  const password = String(input.password || "");
+  const server = createServerProfile(input);
+
+  if (!server.user) {
+    throw new Error("User is required");
+  }
+
+  if (!password) {
+    throw new Error("SSH password is required");
+  }
+
+  return installAndValidateDirectServerKey(session, server, password);
+}
+
+async function updateDirectServerProfile(session, existing, input) {
+  if (existing.source !== "local") {
+    throw new Error("Only CozyPad local servers can be edited here");
+  }
+
+  const fields = normalizeServerProfileFields(input);
+  const password = String(input.password || "");
+
+  if (!fields.user) {
+    throw new Error("User is required");
+  }
+
+  const targetChanged =
+    sanitizeText(existing.host) !== fields.host ||
+    sanitizeText(existing.user) !== fields.user ||
+    Number(existing.port || 22) !== fields.port;
+  const needsKeyInstall = targetChanged || !existing.identityFile || Boolean(password);
+  const updatedServer = {
+    ...existing,
+    source: "local",
+    name: fields.name,
+    alias: fields.name,
+    host: fields.host,
+    user: fields.user,
+    port: fields.port,
+    defaultPath: fields.defaultPath,
+    knownHostsFile: existing.knownHostsFile || getUserKnownHostsFile(session),
+    strictHostKeyChecking: existing.strictHostKeyChecking || "accept-new",
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (!needsKeyInstall) {
+    return updatedServer;
+  }
+
+  if (!password) {
+    throw new Error("SSH password is required when host, user, port, or key state changes");
+  }
+
+  return installAndValidateDirectServerKey(session, updatedServer, password);
+}
+
+function updateSshConfigServerText(raw, server, input) {
+  const fields = normalizeServerProfileFields(input);
+  const target = String(server.alias || server.name || "").trim();
+
+  if (!target) {
+    throw new Error("SSH config host is missing");
+  }
+
+  if (/\s/.test(fields.name)) {
+    throw new Error("SSH config host name cannot contain spaces");
+  }
+
+  const lines = String(raw || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  const output = [];
+  let block = [];
+  let updated = false;
+
+  function flushBlock() {
+    if (!block.length) {
+      return;
+    }
+
+    const hostMatch = block[0].match(/^(\s*Host\s+)(.+)$/i);
+    if (!hostMatch) {
+      output.push(...block);
+      block = [];
+      return;
+    }
+
+    const hosts = splitSshHostPatterns(hostMatch[2]);
+    if (!hosts.includes(target)) {
+      output.push(...block);
+      block = [];
+      return;
+    }
+
+    updated = true;
+    const nextHosts = Array.from(
+      new Set(hosts.map((host) => (host === target ? fields.name : host))),
+    );
+    const optionIndent =
+      block
+        .slice(1)
+        .map((line) => line.match(/^(\s*)\S/)?.[1])
+        .find((indent) => indent !== undefined) || "  ";
+    const rest = block
+      .slice(1)
+      .filter((line) => !/^\s*(HostName|User|Port)\s+/i.test(line));
+    const normalizedOptions = [
+      `${optionIndent}HostName ${fields.host}`,
+      ...(fields.user ? [`${optionIndent}User ${fields.user}`] : []),
+      `${optionIndent}Port ${fields.port}`,
+    ];
+
+    output.push(`${hostMatch[1]}${nextHosts.join(" ")}`, ...normalizedOptions, ...rest);
+    block = [];
+  }
+
+  for (const line of lines) {
+    if (/^\s*Host\s+/i.test(line)) {
+      flushBlock();
+      block = [line];
+    } else if (block.length) {
+      block.push(line);
+    } else {
+      output.push(line);
+    }
+  }
+
+  flushBlock();
+
+  if (!updated) {
+    throw new Error("SSH config host was not found in CozyPad project config");
+  }
+
+  return `${output.join("\n").replace(/\n+$/g, "")}\n`;
+}
+
+async function updateSshConfigServer(server, session, input) {
+  await ensureProjectSshConfigFile(session);
+  const configFile = server.configFile || getProjectSshConfigFile(session);
+  const raw = await readFile(configFile, "utf8");
+  const nextText = updateSshConfigServerText(raw, server, input);
+  await writeFile(configFile, nextText, "utf8");
+
+  const updated = (await readSshConfigServers(session)).find(
+    (item) => item.id === `config:${sanitizeText(input.name)}`,
+  );
+
+  if (!updated) {
+    throw new Error("Updated SSH config host could not be loaded");
+  }
+
+  return updated;
+}
+
+async function updateSavedSshServer(session, server, body) {
+  if (isSystemLocalServer(server)) {
+    throw new Error("localhost is a built-in server and cannot be edited");
+  }
+
+  if (server.source === "ssh-config") {
+    return updateSshConfigServer(server, session, body);
+  }
+
+  if (server.source !== "local") {
+    throw new Error("Unsupported SSH server source");
+  }
+
+  const updated = await updateDirectServerProfile(session, server, body);
+  const servers = await readLocalServers(session);
+  const nextServers = servers.map((item) => (item.id === server.id ? updated : item));
+  if (!servers.some((item) => item.id === server.id)) {
+    nextServers.push(updated);
+  }
+  await writeLocalServers(session, nextServers);
+  return updated;
 }
 
 async function repairDirectServerKey(session, server, password) {
@@ -15240,13 +15499,40 @@ function isHiddenRemoteCodexStderrLine(line) {
   );
 }
 
+function codexOpenAiLoginCommand(localCodex = false) {
+  return localCodex ? "codex logout && codex login" : "codex logout && codex login --device-auth";
+}
+
+function codexOpenAiAuthMessage(server = null, localCodex = false) {
+  const command = codexOpenAiLoginCommand(localCodex);
+  if (localCodex) {
+    return `Local Codex OpenAI login is invalid. Run \`${command}\` on this computer, then retry.`;
+  }
+
+  const serverName = String(server?.name || "").trim();
+  const serverUser = String(server?.user || "").trim();
+  const serverHost = String(server?.host || "").trim();
+  const serverPort = Number(server?.port) > 0 ? `:${Number(server.port)}` : "";
+  const target = serverHost ? `${serverUser ? `${serverUser}@` : ""}${serverHost}${serverPort}` : "";
+  const location = [serverName || "Remote Codex", target ? `(${target})` : ""].filter(Boolean).join(" ");
+  return `${location} OpenAI login is invalid. Run \`${command}\` on that SSH server, then retry.`;
+}
+
 function isRemoteCodexOpenAiAuthError(text) {
   const lower = String(text || "").toLowerCase();
   return (
-    lower.includes("401 unauthorized") &&
-    (lower.includes("api.openai.com") ||
-      lower.includes("responses_websocket") ||
-      lower.includes("codex_api::endpoint"))
+    (lower.includes("401 unauthorized") &&
+      (lower.includes("api.openai.com") ||
+        lower.includes("responses_websocket") ||
+        lower.includes("codex_api::endpoint"))) ||
+    lower.includes("invalid_refresh_token") ||
+    lower.includes("token_expired") ||
+    lower.includes("could not validate your refresh token") ||
+    lower.includes("provided authentication token is expired") ||
+    lower.includes("access token could not be refreshed") ||
+    lower.includes("please log out and sign in again") ||
+    (lower.includes("refresh token") && lower.includes("try signing in again")) ||
+    (lower.includes("authentication token") && lower.includes("signing in again"))
   );
 }
 
@@ -15770,9 +16056,7 @@ async function runCodexSessionPrompt(codexSession, selectedServer, prompt) {
     appendCodexSessionOutput(codexSession, "[CozyPad] codex is still processing; waiting for CLI output\r\n");
   }, 15000);
   progressTimer.unref?.();
-  const openAiAuthMessage = localCodex
-    ? "Local Codex OpenAI login is invalid. Run `codex login` on this computer, then retry."
-    : `${selectedServer.name} Codex OpenAI login is invalid. Run \`codex login\` on that SSH server, then retry.`;
+  const openAiAuthMessage = codexOpenAiAuthMessage(selectedServer, localCodex);
   const markOpenAiAuthError = () => {
     if (openAiAuthError) return;
     openAiAuthError = true;
@@ -17637,6 +17921,23 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "POST" && pathname === "/api/ssh/servers/import-config") {
+    try {
+      const result = await importProjectSshConfigText(session, await readBody(request));
+      sendJson(response, 200, {
+        ok: true,
+        ...result,
+        servers: await listServers(session),
+      });
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : "SSH config import failed",
+      });
+    }
+    return;
+  }
+
   if (request.method === "POST" && pathname === "/api/ssh/servers") {
     try {
       const body = await readBody(request);
@@ -17652,6 +17953,34 @@ async function handleRequest(request, response) {
       });
     }
     return;
+  }
+
+  if (request.method === "PUT" && pathname.startsWith("/api/ssh/servers/")) {
+    const updateMatch = pathname.match(/^\/api\/ssh\/servers\/([^/]+)$/);
+    if (updateMatch) {
+      const server = await findServer(updateMatch[1], session);
+      if (!server) {
+        sendJson(response, 404, { ok: false, error: "SSH server not found" });
+        return;
+      }
+
+      if (isSystemLocalServer(server)) {
+        sendJson(response, 400, { ok: false, error: "localhost is a built-in server and cannot be edited" });
+        return;
+      }
+
+      try {
+        const body = await readBody(request);
+        const updated = await updateSavedSshServer(session, server, body);
+        sendJson(response, 200, { server: publicSshServer(updated) });
+      } catch (error) {
+        sendJson(response, 400, {
+          ok: false,
+          error: error instanceof Error ? error.message : "更新 server 失敗",
+        });
+      }
+      return;
+    }
   }
 
   if (request.method === "POST" && pathname === "/api/ssh/tools/auto-login") {
@@ -17757,29 +18086,33 @@ async function handleRequest(request, response) {
     return;
   }
 
-  if (request.method === "DELETE" && !action) {
-    if (isSystemLocalServer(server)) {
-      sendJson(response, 400, { ok: false, error: "localhost is a built-in server and cannot be deleted" });
-      return;
-    }
-
-    if (server.source === "ssh-config") {
-      await deleteSshConfigServer(server, session);
+  if (
+    (request.method === "DELETE" && !action) ||
+    (request.method === "POST" && action === "delete")
+  ) {
+    try {
+      await deleteSavedSshServer(session, server);
       sendEmpty(response, 204);
-      return;
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : "刪除 server 失敗",
+      });
     }
+    return;
+  }
 
-    if (server.source !== "local") {
-      sendJson(response, 400, { ok: false, error: "Unsupported SSH server source" });
-      return;
+  if (request.method === "POST" && action === "update") {
+    try {
+      const body = await readBody(request);
+      const updated = await updateSavedSshServer(session, server, body);
+      sendJson(response, 200, { server: publicSshServer(updated) });
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : "更新 server 失敗",
+      });
     }
-
-    const servers = await readLocalServers(session);
-    await writeLocalServers(
-      session,
-      servers.filter((item) => item.id !== server.id),
-    );
-    sendEmpty(response, 204);
     return;
   }
 

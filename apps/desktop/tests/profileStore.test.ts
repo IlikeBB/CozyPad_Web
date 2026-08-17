@@ -319,6 +319,45 @@ describe('ProfileStore', () => {
     });
   });
 
+  it('imports OpenSSH config entries and resolves IdentityFile in the main process', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'cozypad-profiles-'));
+    const file = path.join(dir, 'profiles.json');
+    const keyFile = path.join(dir, 'id_ed25519');
+    const configFile = path.join(dir, 'config');
+    writeFileSync(keyFile, 'test-private-key-material', 'utf8');
+    writeFileSync(
+      configFile,
+      [
+        'Host ncku-91',
+        '  HostName 140.113.110.133',
+        '  User ru035',
+        '  Port 7735',
+        '  IdentityFile id_ed25519',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const store = new ProfileStore(file, fakeCrypto());
+    const result = await store.importSshConfig({ sourcePath: configFile });
+
+    expect(result.imported).toBe(1);
+    expect(store.get('ssh-config:ncku-91')).toMatchObject({
+      name: 'ncku-91',
+      host: '140.113.110.133',
+      port: 7735,
+      username: 'ru035',
+      authMethod: 'privateKey',
+      hasPrivateKey: true,
+      credentialPersisted: true,
+    });
+    expect(store.getCredential('ssh-config:ncku-91')).toEqual({
+      authMethod: 'privateKey',
+      privateKey: 'test-private-key-material',
+    });
+    expect(JSON.stringify(store.list())).not.toContain('id_ed25519');
+    expect(readFileSync(file, 'utf8')).not.toContain('id_ed25519');
+  });
+
   it('clears credentials from the previous authentication mode', async () => {
     const store = tempStore();
     const saved = await store.save({

@@ -13,6 +13,7 @@ import {
   HostKeyDecisionSchema,
   IpcChannels,
   RemoteSettingsPatchSchema,
+  SshConfigImportRequestSchema,
   TerminalCloseRequestSchema,
   TerminalInputSchema,
   TerminalOpenRequestSchema,
@@ -144,6 +145,11 @@ export function registerIpc(services: IpcServices, win: BrowserWindow): void {
   ipcMain.handle(IpcChannels.deleteProfile, (event, raw: unknown) => {
     assertSender(event);
     return profileStore.remove(DeleteProfileRequestSchema.parse(raw).profileId);
+  });
+
+  ipcMain.handle(IpcChannels.importSshConfig, (event, raw: unknown) => {
+    assertSender(event);
+    return profileStore.importSshConfig(SshConfigImportRequestSchema.parse(raw ?? {}));
   });
 
   ipcMain.handle(IpcChannels.connect, (event, raw: unknown) => {

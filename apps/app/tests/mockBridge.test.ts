@@ -67,6 +67,51 @@ describe('createMockBridge', () => {
     expect(restored?.credentialPersisted).toBe(false);
   });
 
+  it('removes stored browser profiles across refreshes', async () => {
+    vi.stubGlobal('window', { localStorage: createMemoryStorage() });
+
+    const bridge = createMockBridge();
+    const saved = await bridge.saveProfile({
+      name: 'Delete Me',
+      host: '10.0.0.92',
+      port: 22,
+      username: 'ru035',
+      authMethod: 'password',
+      password: 'secret',
+      rememberCredential: true,
+    });
+    await bridge.deleteProfile({ profileId: saved.id });
+
+    const refreshedBridge = createMockBridge();
+    const profiles = await refreshedBridge.listProfiles();
+    expect(profiles.some((profile) => profile.id === saved.id)).toBe(false);
+  });
+
+  it('imports SSH config entries into browser profile metadata', async () => {
+    vi.stubGlobal('window', { localStorage: createMemoryStorage() });
+
+    const bridge = createMockBridge();
+    const result = await bridge.importSshConfig({
+      rawConfig: [
+        'Host ncku-91',
+        '  HostName 140.113.110.133',
+        '  User ru035',
+        '  Port 7735',
+      ].join('\n'),
+      sourcePath: 'config',
+    });
+
+    expect(result.imported).toBe(1);
+    const refreshedBridge = createMockBridge();
+    const profiles = await refreshedBridge.listProfiles();
+    expect(profiles.find((profile) => profile.id === 'ssh-config:ncku-91')).toMatchObject({
+      name: 'ncku-91',
+      host: '140.113.110.133',
+      port: 7735,
+      username: 'ru035',
+    });
+  });
+
   it('walks connecting → connected on connect', async () => {
     const bridge = createMockBridge();
     const states: ConnectionStateChanged['state'][] = [];

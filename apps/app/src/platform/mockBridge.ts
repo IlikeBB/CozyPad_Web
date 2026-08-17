@@ -4,12 +4,18 @@ import type {
   ConnectionStateChanged,
   PlatformBridge,
   RemoteSettings,
+  SshConfigImportResult,
   TelemetrySnapshot,
   TmuxStatus,
   TerminalClosedEvent,
   TerminalOutputEvent,
 } from '@cozypad/contracts';
-import { ConnectionProfileSchema, base64ToBytes, bytesToBase64 } from '@cozypad/contracts';
+import {
+  ConnectionProfileSchema,
+  base64ToBytes,
+  bytesToBase64,
+  parseSshConfigEntries,
+} from '@cozypad/contracts';
 import {
   MockPtyEngine,
   MockRemoteFs,
@@ -179,6 +185,35 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
       privateKeys.delete(profileId);
       writeStoredBrowserProfiles(profiles);
       return Promise.resolve();
+    },
+
+    importSshConfig(request = {}): Promise<SshConfigImportResult> {
+      const parsed = parseSshConfigEntries(request.rawConfig ?? '');
+      const importedIds = new Set<string>();
+      for (const entry of parsed.entries) {
+        const id = `ssh-config:${entry.alias}`;
+        const authMethod = entry.identityFile ? 'privateKey' : 'password';
+        const profile: ConnectionProfile = {
+          id,
+          name: entry.alias,
+          host: entry.host,
+          port: entry.port,
+          username: entry.username || 'ssh',
+          authMethod,
+          hasPassword: passwords.has(id),
+          hasPrivateKey: privateKeys.has(id),
+          credentialPersisted: false,
+        };
+        profiles = [...profiles.filter((item) => item.id !== id), profile];
+        importedIds.add(id);
+      }
+      writeStoredBrowserProfiles(profiles);
+      return Promise.resolve({
+        source: request.sourcePath,
+        imported: importedIds.size,
+        skipped: parsed.skipped,
+        profiles: [...profiles],
+      });
     },
 
     async connect({ profileId }) {

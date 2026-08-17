@@ -14,6 +14,7 @@ import {
   HostKeyPromptEventSchema,
   IpcChannels,
   RemoteSettingsPatchSchema,
+  SshConfigImportRequestSchema,
   TelemetrySnapshotSchema,
   TmuxInstallLogSchema,
   TmuxInstallProgressSchema,
@@ -64,6 +65,12 @@ const bridge: PlatformBridge = {
     ipcRenderer.invoke(
       IpcChannels.deleteProfile,
       DeleteProfileRequestSchema.parse(request),
+    ),
+
+  importSshConfig: (request) =>
+    ipcRenderer.invoke(
+      IpcChannels.importSshConfig,
+      SshConfigImportRequestSchema.parse(request ?? {}),
     ),
 
   connect: (request) =>

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { legacyApiRequest } from '../src/workspaces/agents/legacySshApi';
+import {
+  deleteLegacyServer,
+  importLegacySshConfig,
+  legacyApiRequest,
+  saveLegacyServer,
+} from '../src/workspaces/agents/legacySshApi';
 
 function setupWindow(hostname = 'localhost'): void {
   vi.stubGlobal('window', {
@@ -98,6 +103,90 @@ describe('legacyApiRequest', () => {
     await vi.advanceTimersByTimeAsync(1_200);
 
     await expectation;
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('updates existing SSH servers with a POST action', async () => {
+    setupWindow();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(String(input)).toBe('/api/ssh/servers/local%3Ancku-91/update');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        name: 'NCKU 91',
+        host: '10.0.0.91',
+        user: 'ru035',
+        port: 22,
+        defaultPath: '~/project',
+      });
+      return jsonResponse({
+        server: {
+          id: 'local:ncku-91',
+          source: 'local',
+          name: 'NCKU 91',
+          host: '10.0.0.91',
+          user: 'ru035',
+          port: 22,
+          defaultPath: '~/project',
+          hasIdentityFile: true,
+          identityFileReady: true,
+        },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      saveLegacyServer({
+        id: 'local:ncku-91',
+        name: 'NCKU 91',
+        host: '10.0.0.91',
+        user: 'ru035',
+        port: 22,
+        defaultPath: '~/project',
+      }),
+    ).resolves.toMatchObject({
+      id: 'local:ncku-91',
+      defaultPath: '~/project',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('deletes SSH servers with a POST action', async () => {
+    setupWindow();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(String(input)).toBe('/api/ssh/servers/local%3Ancku-91/delete');
+      expect(init?.method).toBe('POST');
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteLegacyServer('local:ncku-91')).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('imports client SSH config with a POST action', async () => {
+    setupWindow();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(String(input)).toBe('/api/ssh/servers/import-config');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        rawConfig: 'Host ncku-91\n  HostName 140.113.110.133',
+        sourceName: 'config',
+      });
+      return jsonResponse({
+        ok: true,
+        imported: 1,
+        skipped: 0,
+        servers: [],
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      importLegacySshConfig('Host ncku-91\n  HostName 140.113.110.133', 'config'),
+    ).resolves.toMatchObject({
+      imported: 1,
+      servers: [],
+    });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

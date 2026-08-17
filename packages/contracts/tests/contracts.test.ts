@@ -5,12 +5,14 @@ import {
   ConnectionProfileSchema,
   ConnectionStateChangedSchema,
   SaveDownloadRequestSchema,
+  SshConfigImportRequestSchema,
   TerminalInputSchema,
   TerminalOpenRequestSchema,
   TerminalResizeRequestSchema,
   base64ToBytes,
   base64ToText,
   bytesToBase64,
+  parseSshConfigEntries,
   textToBase64,
 } from '../src/index';
 
@@ -141,6 +143,55 @@ describe('download schemas', () => {
         }),
       ).toThrow();
     }
+  });
+});
+
+describe('SSH config import helpers', () => {
+  it('parses concrete Host entries and ignores wildcard patterns', () => {
+    const parsed = parseSshConfigEntries(`
+Host *
+  User default-user
+
+Host ncku-91 gpu-01
+  HostName 140.113.110.133
+  User ru035
+  Port 7735
+  IdentityFile ~/.ssh/id_ed25519
+
+Host *.internal !blocked
+  User ignored
+`);
+
+    expect(parsed.entries).toEqual([
+      {
+        alias: 'ncku-91',
+        host: '140.113.110.133',
+        port: 7735,
+        username: 'ru035',
+        identityFile: '~/.ssh/id_ed25519',
+      },
+      {
+        alias: 'gpu-01',
+        host: '140.113.110.133',
+        port: 7735,
+        username: 'ru035',
+        identityFile: '~/.ssh/id_ed25519',
+      },
+    ]);
+    expect(parsed.skipped).toBe(3);
+  });
+
+  it('validates bounded SSH config import requests', () => {
+    expect(SshConfigImportRequestSchema.parse(undefined)).toEqual({});
+    expect(
+      SshConfigImportRequestSchema.parse({
+        rawConfig: 'Host lab\n  HostName lab.local',
+        sourcePath: '~/.ssh/config',
+      }),
+    ).toEqual({
+      rawConfig: 'Host lab\n  HostName lab.local',
+      sourcePath: '~/.ssh/config',
+    });
   });
 });
 

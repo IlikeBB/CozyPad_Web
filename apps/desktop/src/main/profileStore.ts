@@ -1,11 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   AuthenticationMethod,
   ConnectionProfile,
   ConnectionProfileDraft,
+  SshConfigEntry,
+  SshConfigImportRequest,
+  SshConfigImportResult,
 } from '@cozypad/contracts';
+import { parseSshConfigEntries } from '@cozypad/contracts';
 
 export type ProfileCredential =
   | { authMethod: 'password'; password: string }
@@ -23,6 +29,7 @@ export interface ProfileStorePort {
   save(draft: ConnectionProfileDraft): Promise<ConnectionProfile>;
   remove(profileId: string): Promise<void>;
   getCredential(profileId: string): ProfileCredential | null;
+  importSshConfig(request?: SshConfigImportRequest): Promise<SshConfigImportResult>;
 }
 
 interface StoredProfile {
@@ -35,6 +42,7 @@ interface StoredProfile {
   encryptedPassword?: string;
   encryptedPrivateKey?: string;
   encryptedKeyPassphrase?: string;
+  identityFile?: string;
 }
 
 const PROFILE_STORE_FORMAT = 'cozypad-profile-store';
@@ -69,8 +77,74 @@ function isStoredProfile(value: unknown): value is StoredProfile {
     (profile.encryptedPrivateKey === undefined ||
       typeof profile.encryptedPrivateKey === 'string') &&
     (profile.encryptedKeyPassphrase === undefined ||
-      typeof profile.encryptedKeyPassphrase === 'string')
+      typeof profile.encryptedKeyPassphrase === 'string') &&
+    (profile.identityFile === undefined || typeof profile.identityFile === 'string')
   );
+}
+
+function defaultSshConfigPath(): string {
+  return path.join(os.homedir(), '.ssh', 'config');
+}
+
+function safeLocalUsername(): string {
+  try {
+    return os.userInfo().username || 'ssh';
+  } catch {
+    return 'ssh';
+  }
+}
+
+function profileIdFromSshAlias(alias: string): string {
+  return `ssh-config:${alias}`;
+}
+
+function trimMatchingQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function resolveIdentityFilePath(
+  identityFile: string | undefined,
+  entry: SshConfigEntry,
+  sourcePath: string,
+): string | undefined {
+  if (!identityFile) return undefined;
+
+  const localUser = safeLocalUsername();
+  const username = entry.username || localUser;
+  let resolved = trimMatchingQuotes(identityFile)
+    .replace(/%h/g, entry.host)
+    .replace(/%p/g, String(entry.port))
+    .replace(/%r/g, username)
+    .replace(/%u/g, localUser);
+
+  if (resolved === '~') {
+    resolved = os.homedir();
+  } else if (resolved.startsWith('~/') || resolved.startsWith('~\\')) {
+    resolved = path.join(os.homedir(), resolved.slice(2));
+  }
+
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(path.dirname(sourcePath), resolved);
+  }
+
+  return resolved;
+}
+
+function canReadIdentityFile(identityFile: string | undefined): boolean {
+  if (!identityFile || !existsSync(identityFile)) return false;
+  try {
+    readFileSync(identityFile, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseProfiles(value: unknown): StoredProfile[] {
@@ -176,10 +250,12 @@ export class ProfileStore implements ProfileStorePort {
     let encryptedKeyPassphrase = canReuseExisting
       ? existing?.encryptedKeyPassphrase
       : undefined;
+    let identityFile = canReuseExisting ? existing?.identityFile : undefined;
 
     if (authMethod === 'password') {
       encryptedPrivateKey = undefined;
       encryptedKeyPassphrase = undefined;
+      identityFile = undefined;
       if (draft.password !== undefined && draft.password !== '') {
         if (draft.rememberCredential) {
           encryptedPassword = this.crypto.encrypt(draft.password);
@@ -200,6 +276,7 @@ export class ProfileStore implements ProfileStorePort {
     } else {
       encryptedPassword = undefined;
       if (draft.privateKey !== undefined && draft.privateKey.trim() !== '') {
+        identityFile = undefined;
         const credential: ProfileCredential = {
           authMethod,
           privateKey: draft.privateKey,
@@ -229,6 +306,13 @@ export class ProfileStore implements ProfileStorePort {
             ? undefined
             : this.crypto.encrypt(existingTransient.passphrase);
         this.transientCredentials.delete(id);
+      } else if (
+        identityFile !== undefined &&
+        draft.rememberCredential &&
+        draft.passphrase !== undefined &&
+        draft.passphrase !== ''
+      ) {
+        encryptedKeyPassphrase = this.crypto.encrypt(draft.passphrase);
       } else if (!draft.rememberCredential && existingTransient === undefined) {
         encryptedPrivateKey = undefined;
         encryptedKeyPassphrase = undefined;
@@ -245,6 +329,7 @@ export class ProfileStore implements ProfileStorePort {
       ...(encryptedPassword === undefined ? {} : { encryptedPassword }),
       ...(encryptedPrivateKey === undefined ? {} : { encryptedPrivateKey }),
       ...(encryptedKeyPassphrase === undefined ? {} : { encryptedKeyPassphrase }),
+      ...(identityFile === undefined ? {} : { identityFile }),
     };
     this.profiles = [...this.profiles.filter((profile) => profile.id !== id), stored];
     await this.persist();
@@ -270,23 +355,99 @@ export class ProfileStore implements ProfileStorePort {
           ? null
           : { authMethod, password: this.crypto.decrypt(stored.encryptedPassword) };
       }
-      return stored.encryptedPrivateKey === undefined
-        ? null
-        : {
-            authMethod,
-            privateKey: this.crypto.decrypt(stored.encryptedPrivateKey),
-            ...(stored.encryptedKeyPassphrase === undefined
-              ? {}
-              : {
-                  passphrase: this.crypto.decrypt(stored.encryptedKeyPassphrase),
-                }),
-          };
+      const passphrase =
+        stored.encryptedKeyPassphrase === undefined
+          ? undefined
+          : this.crypto.decrypt(stored.encryptedKeyPassphrase);
+      if (stored.encryptedPrivateKey !== undefined) {
+        return {
+          authMethod,
+          privateKey: this.crypto.decrypt(stored.encryptedPrivateKey),
+          ...(passphrase === undefined ? {} : { passphrase }),
+        };
+      }
+      if (stored.identityFile !== undefined) {
+        return {
+          authMethod,
+          privateKey: readFileSync(stored.identityFile, 'utf8'),
+          ...(passphrase === undefined ? {} : { passphrase }),
+        };
+      }
+      return null;
     } catch {
       return null;
     }
   }
 
+  async importSshConfig(
+    request: SshConfigImportRequest = {},
+  ): Promise<SshConfigImportResult> {
+    this.requireCrypto();
+    const sourcePath = request.sourcePath?.trim() || defaultSshConfigPath();
+    const rawConfig =
+      request.rawConfig === undefined
+        ? await fs.readFile(sourcePath, 'utf8')
+        : request.rawConfig;
+    const parsed = parseSshConfigEntries(rawConfig);
+    const localUsername = safeLocalUsername();
+    const nextProfiles = new Map(this.profiles.map((profile) => [profile.id, profile]));
+    const importedIds = new Set<string>();
+
+    for (const entry of parsed.entries) {
+      const username = entry.username || localUsername;
+      if (!username) continue;
+      const id = profileIdFromSshAlias(entry.alias);
+      const existing = nextProfiles.get(id);
+      const identityFile = resolveIdentityFilePath(entry.identityFile, entry, sourcePath);
+      const targetUnchanged =
+        existing !== undefined &&
+        existing.host === entry.host &&
+        existing.port === entry.port &&
+        existing.username === username;
+      const authMethod: AuthenticationMethod = identityFile ? 'privateKey' : 'password';
+      const existingAuthMethod = existing?.authMethod ?? 'password';
+      const canReuseCredential =
+        existing !== undefined && targetUnchanged && existingAuthMethod === authMethod;
+
+      nextProfiles.set(id, {
+        id,
+        name: entry.alias,
+        host: entry.host,
+        port: entry.port,
+        username,
+        authMethod,
+        ...(canReuseCredential && existing?.encryptedPassword !== undefined
+          ? { encryptedPassword: existing.encryptedPassword }
+          : {}),
+        ...(canReuseCredential && existing?.encryptedPrivateKey !== undefined
+          ? { encryptedPrivateKey: existing.encryptedPrivateKey }
+          : {}),
+        ...(canReuseCredential && existing?.encryptedKeyPassphrase !== undefined
+          ? { encryptedKeyPassphrase: existing.encryptedKeyPassphrase }
+          : {}),
+        ...(identityFile === undefined ? {} : { identityFile }),
+      });
+      importedIds.add(id);
+    }
+
+    if (importedIds.size > 0) {
+      this.profiles = Array.from(nextProfiles.values());
+      await this.persist();
+    }
+
+    return {
+      source: sourcePath,
+      imported: importedIds.size,
+      skipped: parsed.skipped,
+      profiles: this.list(),
+    };
+  }
+
   private toPublic(profile: StoredProfile): ConnectionProfile {
+    const privateKeyReady =
+      profile.encryptedPrivateKey !== undefined ||
+      this.transientCredentials.get(profile.id)?.authMethod === 'privateKey' ||
+      canReadIdentityFile(profile.identityFile);
     return {
       id: profile.id,
       name: profile.name,
@@ -297,13 +458,11 @@ export class ProfileStore implements ProfileStorePort {
       hasPassword:
         profile.encryptedPassword !== undefined ||
         this.transientCredentials.get(profile.id)?.authMethod === 'password',
-      hasPrivateKey:
-        profile.encryptedPrivateKey !== undefined ||
-        this.transientCredentials.get(profile.id)?.authMethod === 'privateKey',
+      hasPrivateKey: privateKeyReady,
       credentialPersisted:
         (profile.authMethod ?? 'password') === 'password'
           ? profile.encryptedPassword !== undefined
-          : profile.encryptedPrivateKey !== undefined,
+          : privateKeyReady,
     };
   }
 
@@ -404,5 +563,50 @@ export class MemoryProfileStore implements ProfileStorePort {
 
   getCredential(profileId: string): ProfileCredential | null {
     return this.credentials.get(profileId) ?? null;
+  }
+
+  importSshConfig(request: SshConfigImportRequest = {}): Promise<SshConfigImportResult> {
+    const rawConfig = request.rawConfig ?? '';
+    const parsed = parseSshConfigEntries(rawConfig);
+    const localUsername = safeLocalUsername();
+    const importedIds = new Set<string>();
+
+    for (const entry of parsed.entries) {
+      const username = entry.username || localUsername;
+      if (!username) continue;
+      const id = profileIdFromSshAlias(entry.alias);
+      const existing = this.profiles.find((profile) => profile.id === id);
+      const authMethod: AuthenticationMethod = entry.identityFile ? 'privateKey' : 'password';
+      const targetUnchanged =
+        existing !== undefined &&
+        existing.host === entry.host &&
+        existing.port === entry.port &&
+        existing.username === username;
+      if (existing !== undefined && (!targetUnchanged || existing.authMethod !== authMethod)) {
+        this.credentials.delete(id);
+      }
+
+      const nextCredential = this.credentials.get(id);
+      const profile: ConnectionProfile = {
+        id,
+        name: entry.alias,
+        host: entry.host,
+        port: entry.port,
+        username,
+        authMethod,
+        hasPassword: nextCredential?.authMethod === 'password',
+        hasPrivateKey: nextCredential?.authMethod === 'privateKey',
+        credentialPersisted: false,
+      };
+      this.profiles = [...this.profiles.filter((item) => item.id !== id), profile];
+      importedIds.add(id);
+    }
+
+    return Promise.resolve({
+      source: request.sourcePath,
+      imported: importedIds.size,
+      skipped: parsed.skipped,
+      profiles: this.list(),
+    });
   }
 }

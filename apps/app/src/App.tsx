@@ -11,7 +11,10 @@ import {
   CredentialPrompt,
   HostKeyDialog,
 } from './components/ConnectionManager';
-import type { CredentialSubmission } from './components/ConnectionManager';
+import type {
+  ConnectionManagerProfile,
+  CredentialSubmission,
+} from './components/ConnectionManager';
 import { LoginScreen } from './components/LoginScreen';
 import {
   AgentsIcon,
@@ -135,6 +138,52 @@ function mergeProfileOptions(
   return options;
 }
 
+function manageableLegacyServers(servers: LegacySshServer[]): LegacySshServer[] {
+  return servers.filter((server) => !isLocalLegacyServer(server));
+}
+
+function legacyServerToManagerProfile(server: LegacySshServer): ConnectionManagerProfile {
+  return {
+    ...legacyServerToConnectionProfile(server),
+    managerSource: 'legacy',
+    legacySource: server.source,
+    defaultPath: server.defaultPath ?? '~',
+  };
+}
+
+function isDefaultMockProfile(profile: ConnectionProfile): boolean {
+  return profile.id === 'mock-local' || profile.host === 'mock.local';
+}
+
+function chooseSelectedProfileId(
+  current: string | null,
+  profiles: ConnectionProfile[],
+  legacyProfiles: ConnectionProfile[],
+): string | null {
+  const currentProfile = current === null
+    ? undefined
+    : profiles.find((profile) => profile.id === current);
+  if (currentProfile !== undefined && !isDefaultMockProfile(currentProfile)) {
+    return current;
+  }
+
+  if (current !== null) {
+    const currentLegacy = legacyProfiles.find((profile) => profile.id === current);
+    if (currentLegacy && canUseLegacyProfile(currentLegacy)) return currentLegacy.id;
+  }
+
+  const rememberedId = readLastSelectedLegacyServerId();
+  const remembered = legacyProfiles.find(
+    (profile) => profile.id === rememberedId && canUseLegacyProfile(profile),
+  );
+  if (remembered) return remembered.id;
+
+  const remote = legacyProfiles.find(
+    (profile) => profile.id !== 'system:localhost' && canUseLegacyProfile(profile),
+  );
+  return remote?.id ?? profiles[0]?.id ?? legacyProfiles[0]?.id ?? null;
+}
+
 export function App() {
   const bridge = useMemo(() => getBridge(), []);
   const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>(
@@ -145,6 +194,7 @@ export function App() {
   const [agentTaskOpenTarget, setAgentTaskOpenTarget] = useState<AgentTaskOpenTarget | null>(null);
   const [filesOpenTarget, setFilesOpenTarget] = useState<FilesOpenTarget | null>(null);
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
+  const [legacyServers, setLegacyServers] = useState<LegacySshServer[]>([]);
   const [legacyProfileOptions, setLegacyProfileOptions] = useState<ConnectionProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [state, setState] = useState<ConnectionState>('disconnected');
@@ -224,6 +274,7 @@ export function App() {
 
   useEffect(() => {
     if (bridge.kind !== 'mock' || authState !== 'authenticated') {
+      setLegacyServers([]);
       setLegacyProfileOptions([]);
       return;
     }
@@ -232,32 +283,48 @@ export function App() {
     void listLegacyServers(false)
       .then((servers) => {
         if (!active) return;
-        const nextLegacyProfiles = servers
-          .filter((server) => !isLocalLegacyServer(server))
-          .map(legacyServerToConnectionProfile);
+        const nextLegacyServers = manageableLegacyServers(servers);
+        const nextLegacyProfiles = nextLegacyServers.map(legacyServerToConnectionProfile);
+        setLegacyServers(nextLegacyServers);
         setLegacyProfileOptions(nextLegacyProfiles);
-        setSelectedId((current) => {
-          const currentProfile = nextLegacyProfiles.find((profile) => profile.id === current);
-          if (currentProfile && canUseLegacyProfile(currentProfile)) return currentProfile.id;
-          const rememberedId = readLastSelectedLegacyServerId();
-          const remembered = nextLegacyProfiles.find(
-            (profile) => profile.id === rememberedId && canUseLegacyProfile(profile),
-          );
-          if (remembered) return remembered.id;
-          const remote = nextLegacyProfiles.find(
-            (profile) => profile.id !== 'system:localhost' && canUseLegacyProfile(profile),
-          );
-          return remote?.id ?? current ?? nextLegacyProfiles[0]?.id ?? null;
-        });
+        setSelectedId((current) => chooseSelectedProfileId(current, profiles, nextLegacyProfiles));
       })
       .catch(() => {
-        if (active) setLegacyProfileOptions([]);
+        if (active) {
+          setLegacyServers([]);
+          setLegacyProfileOptions([]);
+        }
       });
 
     return () => {
       active = false;
     };
-  }, [authState, bridge.kind]);
+  }, [authState, bridge.kind, profiles]);
+
+  const refreshConnectionSources = useCallback(async () => {
+    const nextProfiles = await bridge.listProfiles();
+    setProfiles(nextProfiles);
+
+    if (bridge.kind !== 'mock' || authState !== 'authenticated') {
+      setLegacyServers([]);
+      setLegacyProfileOptions([]);
+      setSelectedId((current) =>
+        current !== null && nextProfiles.some((profile) => profile.id === current)
+          ? current
+          : (nextProfiles[0]?.id ?? null),
+      );
+      return;
+    }
+
+    const servers = await listLegacyServers(false);
+    const nextLegacyServers = manageableLegacyServers(servers);
+    const nextLegacyProfiles = nextLegacyServers.map(legacyServerToConnectionProfile);
+    setLegacyServers(nextLegacyServers);
+    setLegacyProfileOptions(nextLegacyProfiles);
+    setSelectedId((current) =>
+      chooseSelectedProfileId(current, nextProfiles, nextLegacyProfiles),
+    );
+  }, [authState, bridge]);
 
   useEffect(() => bridge.onHostKeyPrompt(setHostKeyPrompt), [bridge]);
 
@@ -376,6 +443,23 @@ export function App() {
     () => mergeProfileOptions(profiles, legacyProfileOptions),
     [legacyProfileOptions, profiles],
   );
+  const connectionManagerProfiles = useMemo<ConnectionManagerProfile[]>(
+    () => [
+      ...profiles.map((profile) => ({
+        ...profile,
+        managerSource: 'bridge' as const,
+        sourceName: profile.id.startsWith('ssh-config:')
+          ? 'SSH config'
+          : bridge.kind === 'mock'
+            ? 'Browser'
+            : 'Desktop',
+      })),
+      ...legacyServers.map(legacyServerToManagerProfile),
+    ],
+    [bridge.kind, legacyServers, profiles],
+  );
+  const connectionManagerDefaultSource =
+    bridge.kind === 'mock' && authState === 'authenticated' ? 'legacy' : 'bridge';
   const selectedProfile = profileOptions.find((profile) => profile.id === selectedId) ?? null;
   const selectedLegacyProfile = legacyProfileOptions.some((profile) => profile.id === selectedId);
   const effectiveMockData = mockData && !selectedLegacyProfile;
@@ -672,9 +756,10 @@ export function App() {
       </div>
       {managerOpen ? (
         <ConnectionManager
-          profiles={profiles}
+          profiles={connectionManagerProfiles}
+          defaultSource={connectionManagerDefaultSource}
           onClose={() => setManagerOpen(false)}
-          onChanged={refreshProfiles}
+          onChanged={refreshConnectionSources}
         />
       ) : null}
       {credentialPrompt ? (

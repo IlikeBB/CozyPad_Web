@@ -15,3 +15,4 @@ export * from './tmuxSetup';
 export * from './agentSession';
 export * from './agentEvents';
 export * from './acp';
+export * from './sshConfig';
