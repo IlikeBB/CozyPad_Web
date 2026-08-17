@@ -7,6 +7,7 @@ interface SettingsWorkspaceProps {
   bridgeKind: string;
   mockData: boolean;
   connected: boolean;
+  allowDeveloperTools?: boolean;
 }
 
 function Toggle({
@@ -37,9 +38,10 @@ export function SettingsWorkspace({
   bridgeKind,
   mockData,
   connected,
+  allowDeveloperTools = false,
 }: SettingsWorkspaceProps) {
   const bridge = useMemo(() => getBridge(), []);
-  const canSimulateDrop = 'simulateDrop' in bridge;
+  const canSimulateDrop = allowDeveloperTools && 'simulateDrop' in bridge;
   const [remote, setRemote] = useState<RemoteSettings | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

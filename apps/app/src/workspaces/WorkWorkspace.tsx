@@ -4,7 +4,7 @@ import {
   formatWorkDate,
   readWorkRuns,
   WORK_REFRESH_EVENT,
-  WORK_STORAGE_KEYS,
+  currentWorkStorageKeys,
   type WorkRun,
 } from './workRuns';
 import { CODEX_TASK_QUEUE_EVENT } from './agents/codexTaskQueue';
@@ -26,7 +26,7 @@ export function WorkWorkspace({
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
-      if (event.key === null || WORK_STORAGE_KEYS.some((key) => key === event.key)) {
+      if (event.key === null || currentWorkStorageKeys().some((key) => key === event.key)) {
         refreshRuns();
       }
     };

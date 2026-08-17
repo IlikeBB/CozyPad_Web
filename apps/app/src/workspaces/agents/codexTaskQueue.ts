@@ -1,3 +1,5 @@
+import { scopedStorageKey, userStorage } from '../../platform/userStorage';
+
 export const CODEX_TASK_QUEUE_STORAGE_KEY = 'cozypad3.pendingCodexTrainingTasks.v1';
 
 export const CODEX_TASK_QUEUE_EVENT = 'cozypad3:codex-training-task-queued';
@@ -67,7 +69,7 @@ function dedupeQueuedTrainingTasks(tasks: QueuedCodexTrainingTask[]): QueuedCode
 export function readQueuedCodexTrainingTasks(): QueuedCodexTrainingTask[] {
   if (!hasWindow()) return [];
   try {
-    const raw = window.localStorage.getItem(CODEX_TASK_QUEUE_STORAGE_KEY);
+    const raw = userStorage.getItem(CODEX_TASK_QUEUE_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     return parsed
@@ -90,7 +92,7 @@ export function readQueuedCodexTrainingTasks(): QueuedCodexTrainingTask[] {
 function writeQueuedCodexTrainingTasks(tasks: QueuedCodexTrainingTask[]): void {
   if (!hasWindow()) return;
   try {
-    window.localStorage.setItem(CODEX_TASK_QUEUE_STORAGE_KEY, JSON.stringify(dedupeQueuedTrainingTasks(tasks).slice(-24)));
+    userStorage.setItem(CODEX_TASK_QUEUE_STORAGE_KEY, JSON.stringify(dedupeQueuedTrainingTasks(tasks).slice(-24)));
   } catch {
     // Browser storage is best-effort.
   }
@@ -185,7 +187,7 @@ export function subscribeCodexTrainingTasks(callback: (detail?: Record<string, u
     callback(event instanceof CustomEvent ? event.detail : undefined);
   };
   const onStorage = (event: StorageEvent) => {
-    if (event.key === CODEX_TASK_QUEUE_STORAGE_KEY) callback();
+    if (event.key === scopedStorageKey(CODEX_TASK_QUEUE_STORAGE_KEY)) callback();
   };
   window.addEventListener(CODEX_TASK_QUEUE_EVENT, onQueueEvent);
   window.addEventListener('storage', onStorage);

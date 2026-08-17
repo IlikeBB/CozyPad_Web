@@ -1,4 +1,5 @@
 import type { LegacySshServer } from './agents/legacySshApi';
+import { scopedStorageKey, userStorage } from '../platform/userStorage';
 
 const LAST_SELECTED_LEGACY_SERVER_KEY = 'cozypad3.lastSelectedLegacyServerId';
 const LAST_SELECTED_LEGACY_SERVER_EVENT = 'cozypad3:last-selected-legacy-server';
@@ -10,7 +11,7 @@ function hasWindow(): boolean {
 export function readLastSelectedLegacyServerId(): string {
   if (!hasWindow()) return '';
   try {
-    return window.localStorage.getItem(LAST_SELECTED_LEGACY_SERVER_KEY) || '';
+    return userStorage.getItem(LAST_SELECTED_LEGACY_SERVER_KEY) || '';
   } catch {
     return '';
   }
@@ -21,9 +22,9 @@ export function rememberLastSelectedLegacyServerId(serverId: string): void {
   const nextServerId = serverId.trim();
   try {
     if (nextServerId) {
-      window.localStorage.setItem(LAST_SELECTED_LEGACY_SERVER_KEY, nextServerId);
+      userStorage.setItem(LAST_SELECTED_LEGACY_SERVER_KEY, nextServerId);
     } else {
-      window.localStorage.removeItem(LAST_SELECTED_LEGACY_SERVER_KEY);
+      userStorage.removeItem(LAST_SELECTED_LEGACY_SERVER_KEY);
     }
   } catch {
     // Ignore private-mode or quota storage failures.
@@ -59,7 +60,7 @@ export function subscribeLastSelectedLegacyServerId(
     callback((event as CustomEvent<{ serverId?: string }>).detail?.serverId || '');
   };
   const onStorage = (event: StorageEvent) => {
-    if (event.key === LAST_SELECTED_LEGACY_SERVER_KEY) {
+    if (event.key === scopedStorageKey(LAST_SELECTED_LEGACY_SERVER_KEY)) {
       callback(event.newValue || '');
     }
   };

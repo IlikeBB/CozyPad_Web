@@ -18,6 +18,7 @@ import {
   takeQueuedCodexTrainingTasks,
 } from './codexTaskQueue';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
+import { userStorage } from '../../platform/userStorage';
 
 const STORAGE_KEY = 'cozypad3.legacyClaudeTasks.v1';
 const CLAUDE_MODEL_STORAGE_KEY = 'cozypad3.remoteClaude.model.v1';
@@ -132,7 +133,7 @@ function normalizeAgentModel(value: string): string {
 
 function readStoredAgentModel(storageKey: string): string {
   try {
-    return normalizeAgentModel(window.localStorage.getItem(storageKey) || '');
+    return normalizeAgentModel(userStorage.getItem(storageKey) || '');
   } catch {
     return '';
   }
@@ -221,7 +222,7 @@ function dedupeClaudeTasks(tasks: ClaudeTask[]): ClaudeTask[] {
 
 function readStoredTasks(): ClaudeTask[] {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = userStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const tasks = parsed
@@ -267,7 +268,7 @@ function writeStoredTasks(tasks: ClaudeTask[]): void {
       status: task.running ? 'running' : task.status,
       output: task.output.slice(-MAX_OUTPUT_LENGTH),
     }));
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+    userStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     window.dispatchEvent(new Event(WORK_REFRESH_EVENT));
   } catch {
     // Browser storage is best-effort.
@@ -531,7 +532,7 @@ export function LegacyClaudePanel({
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(CLAUDE_MODEL_STORAGE_KEY, claudeModel);
+      userStorage.setItem(CLAUDE_MODEL_STORAGE_KEY, claudeModel);
     } catch {
       // Browser storage is best-effort.
     }

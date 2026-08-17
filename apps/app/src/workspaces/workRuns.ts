@@ -3,6 +3,7 @@ import {
   readQueuedCodexTrainingTasks,
   removeQueuedCodexTrainingTask,
 } from './agents/codexTaskQueue';
+import { scopedStorageKey, userStorage } from '../platform/userStorage';
 
 const CODEX_TASKS_STORAGE_KEY = 'cozypad3.legacyCodexTasks.v1';
 const CLAUDE_TASKS_STORAGE_KEY = 'cozypad3.legacyClaudeTasks.v1';
@@ -20,6 +21,10 @@ export const WORK_STORAGE_KEYS = [
   CODEX_TASK_QUEUE_STORAGE_KEY,
   DELETED_WORK_RUNS_STORAGE_KEY,
 ] as const;
+
+export function currentWorkStorageKeys(): string[] {
+  return WORK_STORAGE_KEYS.map((key) => scopedStorageKey(key)).filter(Boolean);
+}
 
 type AgentKind = 'codex' | 'claude' | 'agy' | 'bailian';
 
@@ -107,7 +112,7 @@ function formatDuration(start: Date | null, end: Date | null): string {
 
 function readTaskArray(key: string): StoredAgentTask[] {
   try {
-    const raw = window.localStorage.getItem(key);
+    const raw = userStorage.getItem(key);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -117,7 +122,7 @@ function readTaskArray(key: string): StoredAgentTask[] {
 
 function writeTaskArray(key: string, tasks: StoredAgentTask[]): void {
   try {
-    window.localStorage.setItem(key, JSON.stringify(tasks));
+    userStorage.setItem(key, JSON.stringify(tasks));
   } catch {
     // Browser storage is best-effort.
   }
@@ -125,7 +130,7 @@ function writeTaskArray(key: string, tasks: StoredAgentTask[]): void {
 
 function readDeletedWorkRunIds(): Set<string> {
   try {
-    const raw = window.localStorage.getItem(DELETED_WORK_RUNS_STORAGE_KEY);
+    const raw = userStorage.getItem(DELETED_WORK_RUNS_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed.map((value) => String(value)) : []);
   } catch {
@@ -135,7 +140,7 @@ function readDeletedWorkRunIds(): Set<string> {
 
 function writeDeletedWorkRunIds(ids: Set<string>): void {
   try {
-    window.localStorage.setItem(
+    userStorage.setItem(
       DELETED_WORK_RUNS_STORAGE_KEY,
       JSON.stringify([...ids].slice(-MAX_DELETED_WORK_RUNS)),
     );

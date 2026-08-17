@@ -31,6 +31,7 @@ import {
 } from './codexTaskQueue';
 import { isWorkRunDeleted, markWorkRunDeleted } from '../workRuns';
 import { commonAgentSlashCommands } from './slashCommands';
+import { userStorage } from '../../platform/userStorage';
 
 const AGENT_CONFIG = {
   codex: {
@@ -175,7 +176,7 @@ function normalizeAgentModel(value: string): string {
 function readStoredAgentModel(storageKey: string): string {
   if (!storageKey) return '';
   try {
-    return normalizeAgentModel(window.localStorage.getItem(storageKey) || '');
+    return normalizeAgentModel(userStorage.getItem(storageKey) || '');
   } catch {
     return '';
   }
@@ -455,7 +456,7 @@ function dedupeAgentTasks(tasks: AgentTask[]): AgentTask[] {
 
 function readStoredTasks(storageKey: string, agentName: LegacyAgentName): AgentTask[] {
   try {
-    const raw = window.localStorage.getItem(storageKey);
+    const raw = userStorage.getItem(storageKey);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const tasks = parsed
@@ -500,7 +501,7 @@ function writeStoredTasks(storageKey: string, tasks: AgentTask[]): void {
       status: task.running ? 'running' : task.status,
       output: task.output.slice(-MAX_OUTPUT_LENGTH),
     }));
-    window.localStorage.setItem(storageKey, JSON.stringify(serializable));
+    userStorage.setItem(storageKey, JSON.stringify(serializable));
     window.dispatchEvent(new Event(WORK_REFRESH_EVENT));
   } catch {
     // Browser storage is best-effort.
@@ -690,7 +691,7 @@ export function LegacyAgyPanel({
       return;
     }
     try {
-      window.localStorage.setItem(agentModelStorageKey, agentModel);
+      userStorage.setItem(agentModelStorageKey, agentModel);
     } catch {
       // Browser storage is best-effort.
     }

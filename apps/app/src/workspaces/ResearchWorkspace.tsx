@@ -7,6 +7,7 @@ import {
   normalizeMarkdownMath,
 } from '../components/markdownPlugins';
 import { createLegacyWebSocketUrl } from '../platform/legacyApiRoutes';
+import { userStorage } from '../platform/userStorage';
 import {
   createLegacyCodexHistory,
   listLegacyCondaEnvs,
@@ -178,7 +179,7 @@ function readResearchAgentModel(agent: ResearchAnalysisAgent): string {
   let model = '';
   if (storageKey) {
     try {
-      model = normalizeResearchAgentModel(window.localStorage.getItem(storageKey) || '');
+      model = normalizeResearchAgentModel(userStorage.getItem(storageKey) || '');
     } catch {
       model = '';
     }
@@ -977,7 +978,7 @@ function isEditableKeyTarget(target: EventTarget | null): boolean {
 
 function readResearchMarkdown(): string {
   try {
-    return window.localStorage.getItem(RESEARCH_MARKDOWN_STORAGE_KEY) || '';
+    return userStorage.getItem(RESEARCH_MARKDOWN_STORAGE_KEY) || '';
   } catch {
     return '';
   }
@@ -998,7 +999,7 @@ function normalizeFlowchartMarkdownEntry(value: unknown): FlowchartMarkdownEntry
 function readResearchMarkdownByFlowchart(activeFlowchartId: string): FlowchartMarkdownStore {
   const byFlowchart: FlowchartMarkdownStore = {};
   try {
-    const raw = window.localStorage.getItem(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
+    const raw = userStorage.getItem(RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       for (const [flowchartId, value] of Object.entries(parsed)) {
@@ -2070,7 +2071,7 @@ async function runResearchCodexStreamPrompt(options: {
 
 function readPipelineNodes(): PipelineNode[] {
   try {
-    const raw = window.localStorage.getItem(PIPELINE_NODES_STORAGE_KEY);
+    const raw = userStorage.getItem(PIPELINE_NODES_STORAGE_KEY);
     if (!raw) return PIPELINE_NODES;
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return PIPELINE_NODES;
@@ -2178,7 +2179,7 @@ function readPipelineNodes(): PipelineNode[] {
 function readPipelineEdges(nodes: PipelineNode[]): PipelineEdge[] {
   const nodeIds = new Set(nodes.map((node) => node.id));
   try {
-    const raw = window.localStorage.getItem(PIPELINE_EDGES_STORAGE_KEY);
+    const raw = userStorage.getItem(PIPELINE_EDGES_STORAGE_KEY);
     if (!raw) {
       return DEFAULT_PIPELINE_EDGES.filter(
         (edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to),
@@ -2324,7 +2325,7 @@ function sanitizeFlowchartTitle(value: unknown, fallback: string): string {
 function readResearchFlowchartLibrary(): ResearchFlowchartLibrary {
   let flowcharts: ResearchFlowchart[] = [];
   try {
-    const raw = window.localStorage.getItem(RESEARCH_FLOWCHARTS_STORAGE_KEY);
+    const raw = userStorage.getItem(RESEARCH_FLOWCHARTS_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (Array.isArray(parsed)) {
       const used = new Set<string>();
@@ -2361,7 +2362,7 @@ function readResearchFlowchartLibrary(): ResearchFlowchartLibrary {
 
   let activeFlowchartId = '';
   try {
-    activeFlowchartId = window.localStorage.getItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY) || '';
+    activeFlowchartId = userStorage.getItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY) || '';
   } catch {
     activeFlowchartId = '';
   }
@@ -2446,11 +2447,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
     const serializedNodes = serializePipelineNodes(nodes);
     const serializedEdges = serializePipelineEdges(edges);
     try {
-      window.localStorage.setItem(
+      userStorage.setItem(
         PIPELINE_NODES_STORAGE_KEY,
         JSON.stringify(serializedNodes),
       );
-      window.localStorage.setItem(PIPELINE_EDGES_STORAGE_KEY, JSON.stringify(serializedEdges));
+      userStorage.setItem(PIPELINE_EDGES_STORAGE_KEY, JSON.stringify(serializedEdges));
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2471,11 +2472,11 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(
+      userStorage.setItem(
         RESEARCH_FLOWCHARTS_STORAGE_KEY,
         JSON.stringify(flowchartLibrary.flowcharts.slice(0, MAX_RESEARCH_FLOWCHARTS)),
       );
-      window.localStorage.setItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY, flowchartLibrary.activeFlowchartId);
+      userStorage.setItem(RESEARCH_ACTIVE_FLOWCHART_STORAGE_KEY, flowchartLibrary.activeFlowchartId);
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2545,7 +2546,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
       };
     });
     try {
-      window.localStorage.setItem(RESEARCH_MARKDOWN_STORAGE_KEY, remoteMarkdown);
+      userStorage.setItem(RESEARCH_MARKDOWN_STORAGE_KEY, remoteMarkdown);
     } catch {
       // Ignore quota or private-mode storage failures.
     }
@@ -2553,7 +2554,7 @@ export function ResearchWorkspace({ connected = false }: ResearchWorkspaceProps)
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(
+      userStorage.setItem(
         RESEARCH_MARKDOWN_BY_FLOWCHART_STORAGE_KEY,
         JSON.stringify(markdownByFlowchart),
       );

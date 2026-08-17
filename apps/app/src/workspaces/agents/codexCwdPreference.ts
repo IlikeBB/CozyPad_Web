@@ -1,3 +1,5 @@
+import { scopedStorageKey, userStorage } from '../../platform/userStorage';
+
 const CODEX_CWD_STORAGE_KEY = 'cozypad3.codexCwdByServer.v1';
 const CODEX_CWD_EVENT = 'cozypad:codex-cwd-changed';
 
@@ -10,7 +12,7 @@ function normalize(value: string, fallback = '~'): string {
 function readMap(): CodexCwdMap {
   if (typeof window === 'undefined') return {};
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(CODEX_CWD_STORAGE_KEY) || '{}');
+    const parsed = JSON.parse(userStorage.getItem(CODEX_CWD_STORAGE_KEY) || '{}');
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed as CodexCwdMap
       : {};
@@ -29,7 +31,7 @@ export function rememberCodexCwd(serverId: string, remotePath: string): string {
   const path = normalize(remotePath);
   if (typeof window === 'undefined' || !serverId) return path;
   const next = { ...readMap(), [serverId]: path };
-  window.localStorage.setItem(CODEX_CWD_STORAGE_KEY, JSON.stringify(next));
+  userStorage.setItem(CODEX_CWD_STORAGE_KEY, JSON.stringify(next));
   window.dispatchEvent(new CustomEvent(CODEX_CWD_EVENT, {
     detail: { serverId, path },
   }));
@@ -48,7 +50,7 @@ export function subscribeCodexCwd(
     }
   };
   const onStorage = (event: StorageEvent) => {
-    if (event.key === CODEX_CWD_STORAGE_KEY) listener(readCodexCwd(serverId));
+    if (event.key === scopedStorageKey(CODEX_CWD_STORAGE_KEY)) listener(readCodexCwd(serverId));
   };
   window.addEventListener(CODEX_CWD_EVENT, onPreference);
   window.addEventListener('storage', onStorage);
