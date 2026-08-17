@@ -1,4 +1,7 @@
 export const V4_STORAGE_KEYS = {
+  connections: {
+    browserProfiles: 'cozypad4.browserConnectionProfiles.v1',
+  },
   agents: {
     codexTasks: 'cozypad4.legacyCodexTasks.v1',
     claudeTasks: 'cozypad4.legacyClaudeTasks.v1',

@@ -9,12 +9,13 @@ import type {
   TerminalClosedEvent,
   TerminalOutputEvent,
 } from '@cozypad/contracts';
-import { base64ToBytes, bytesToBase64 } from '@cozypad/contracts';
+import { ConnectionProfileSchema, base64ToBytes, bytesToBase64 } from '@cozypad/contracts';
 import {
   MockPtyEngine,
   MockRemoteFs,
   MockTelemetryGenerator,
 } from '@cozypad/test-fixtures';
+import { V4_STORAGE_KEYS } from './storageKeys';
 
 const MOCK_PROFILE: ConnectionProfile = {
   id: 'mock-local',
@@ -26,6 +27,60 @@ const MOCK_PROFILE: ConnectionProfile = {
   hasPassword: true,
   credentialPersisted: false,
 };
+
+function browserLocalStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeStoredBrowserProfile(profile: ConnectionProfile): ConnectionProfile {
+  return {
+    ...profile,
+    authMethod: profile.authMethod ?? 'password',
+    hasPassword: false,
+    hasPrivateKey: false,
+    credentialPersisted: false,
+  };
+}
+
+function readStoredBrowserProfiles(): ConnectionProfile[] {
+  const storage = browserLocalStorage();
+  if (storage === null) return [];
+  try {
+    const raw = storage.getItem(V4_STORAGE_KEYS.connections.browserProfiles);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const profiles: ConnectionProfile[] = [];
+    for (const item of parsed) {
+      const result = ConnectionProfileSchema.safeParse(item);
+      if (!result.success || result.data.id === MOCK_PROFILE.id) continue;
+      profiles.push(sanitizeStoredBrowserProfile(result.data));
+    }
+    return profiles;
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredBrowserProfiles(profiles: ConnectionProfile[]): void {
+  const storage = browserLocalStorage();
+  if (storage === null) return;
+  try {
+    const serializable = profiles
+      .filter((profile) => profile.id !== MOCK_PROFILE.id)
+      .map(sanitizeStoredBrowserProfile);
+    storage.setItem(
+      V4_STORAGE_KEYS.connections.browserProfiles,
+      JSON.stringify(serializable),
+    );
+  } catch {
+    // Browser storage is best-effort.
+  }
+}
 
 const MOCK_TMUX_STATUS: TmuxStatus = {
   installed: true,
@@ -57,7 +112,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
   const terminals = new Map<string, MockPtyEngine>();
   const remoteFs = new MockRemoteFs();
   const telemetry = new MockTelemetryGenerator();
-  let profiles: ConnectionProfile[] = [MOCK_PROFILE];
+  let profiles: ConnectionProfile[] = [MOCK_PROFILE, ...readStoredBrowserProfiles()];
   const passwords = new Map<string, string>([[MOCK_PROFILE.id, 'mock']]);
   const privateKeys = new Map<string, string>();
   let connectedProfileId: string | null = null;
@@ -114,6 +169,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
           (passwords.has(id) || privateKeys.has(id)),
       };
       profiles = [...profiles.filter((entry) => entry.id !== id), profile];
+      writeStoredBrowserProfiles(profiles);
       return Promise.resolve(profile);
     },
 
@@ -121,6 +177,7 @@ export function createMockBridge(): PlatformBridge & MockBridgeExtras {
       profiles = profiles.filter((profile) => profile.id !== profileId);
       passwords.delete(profileId);
       privateKeys.delete(profileId);
+      writeStoredBrowserProfiles(profiles);
       return Promise.resolve();
     },
 
