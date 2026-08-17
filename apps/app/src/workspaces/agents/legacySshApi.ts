@@ -34,6 +34,7 @@ const AGENT_RPC_PREFIX = '/cozypad-rpc/ssh';
 const LEGACY_API_SAFE_RETRY_DELAYS_MS = [600, 1600, 3200];
 const LEGACY_API_DEFAULT_TIMEOUT_MS = 45_000;
 const LEGACY_API_SAFE_TIMEOUT_MS = 30_000;
+const LEGACY_API_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 
 export type LegacySshServer = {
   id: string;
@@ -691,7 +692,7 @@ function createLegacyNetworkError(error: unknown): LegacyApiError {
   if (/AbortError|TimeoutError/i.test(name) || /timed out|timeout/i.test(detail)) {
     return new LegacyApiError(
       0,
-      'CozyPad API request timed out. Please retry; if the page was idle, CozyPad will refresh stale connections automatically.',
+      'CozyPad API request timed out. CozyPad retries safe status/list requests automatically; for actions that start work, check whether the task was submitted before retrying.',
     );
   }
   return new LegacyApiError(
@@ -710,6 +711,57 @@ function isSafeLegacyApiMethod(init?: RequestInit): boolean {
 function legacyApiTimeoutMs(init?: RequestInit): number {
   if (init?.signal) return 0;
   return isSafeLegacyApiMethod(init) ? LEGACY_API_SAFE_TIMEOUT_MS : LEGACY_API_DEFAULT_TIMEOUT_MS;
+}
+
+function legacyApiHealthPathFor(path: string): string {
+  if (!/^https?:\/\//i.test(path)) return '/api/health';
+
+  try {
+    const url = new URL(path);
+    url.pathname = '/api/health';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '/api/health';
+  }
+}
+
+async function probeLegacyApiHealth(path: string, signal?: AbortSignal | null): Promise<void> {
+  if (typeof window === 'undefined' || signal?.aborted) return;
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(
+    () =>
+      controller.abort(
+        new DOMException(
+          `CozyPad API health probe timed out after ${LEGACY_API_HEALTH_PROBE_TIMEOUT_MS}ms`,
+          'TimeoutError',
+        ),
+      ),
+    LEGACY_API_HEALTH_PROBE_TIMEOUT_MS,
+  );
+  const onAbort = () => controller.abort(new DOMException('Request aborted', 'AbortError'));
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    await fetch(resolveLegacyHttpPath(legacyApiHealthPathFor(path)), {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        'cache-control': 'no-cache',
+        'x-cozypad-request': 'app',
+      },
+    });
+  } catch {
+    // The original request retry remains authoritative; the probe only nudges
+    // idle browser/proxy connections before the next safe request attempt.
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 function withLegacyApiTimeout(init?: RequestInit): {
@@ -825,6 +877,7 @@ export async function legacyApiRequest<T>(path: string, init?: RequestInit): Pro
       if (retryDelayMs === undefined || !isRetryableLegacyApiError(error)) {
         throw error;
       }
+      await probeLegacyApiHealth(path, init?.signal);
       await waitForLegacyApiRetry(retryDelayMs, init?.signal);
     }
   }
