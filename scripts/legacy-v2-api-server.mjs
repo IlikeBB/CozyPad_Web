@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import os from "node:os";
@@ -16,6 +16,7 @@ import {
   CodexRuntimeManager,
   normalizeCodexRuntimeMode,
 } from "./lib/codex-runtime-manager.mjs";
+import { capabilitiesForIdentity } from "./lib/capabilities.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1626,7 +1627,15 @@ function publicUser(user) {
   return {
     username: user.username,
     role: user.role || "user",
+    capabilities: capabilitiesForUser(user),
   };
+}
+
+function capabilitiesForUser(user) {
+  return capabilitiesForIdentity(user, {
+    adminUsername: ADMIN_USERNAME,
+    nodeEnv: process.env.NODE_ENV,
+  });
 }
 
 function getGoogleEmailsForUser(user) {
@@ -4602,6 +4611,10 @@ async function refreshProjectSshConfigFromLocal(session) {
 
   const importedAt = new Date().toISOString();
   const raw = (await readFile(LEGACY_SSH_CONFIG_FILE, "utf8")).replace(/^\uFEFF/, "");
+  const importedServers = parseSshConfig(raw, LEGACY_SSH_CONFIG_FILE);
+  if (!importedServers.length) {
+    throw new Error("No concrete SSH Host entries were found; the existing CozyPad config was kept unchanged");
+  }
   const nextText = `# Synced from ${LEGACY_SSH_CONFIG_FILE} at ${importedAt}\n${raw}`;
   let previousText = "";
 
@@ -4847,6 +4860,134 @@ async function deleteSshConfigServer(server, session) {
   }
 
   await writeFile(configFile, next.text, "utf8");
+}
+
+async function removeManagedServerKey(session, server) {
+  if (server?.source !== "local" || !server.identityFile) return;
+  const keysRoot = path.resolve(getUserDataDir(session), "keys");
+  const identityFile = path.resolve(String(server.identityFile));
+  if (!identityFile.startsWith(`${keysRoot}${path.sep}`)) return;
+  await rm(path.dirname(identityFile), { recursive: true, force: true });
+}
+
+function normalizeSshServerUpdate(input) {
+  const name = sanitizeText(input.name);
+  const host = sanitizeText(input.host);
+  const user = sanitizeText(input.user);
+  const defaultPath = sanitizeText(input.defaultPath) || "~";
+  const port = Number(input.port || 22);
+
+  if (!name) throw new Error("Name is required");
+  if (!host) throw new Error("Host is required");
+  if (!user) throw new Error("User is required");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Port must be between 1 and 65535");
+  }
+  return { name, host, user, port, defaultPath };
+}
+
+function updateHostInSshConfig(raw, alias, input) {
+  const target = String(alias || "").trim();
+  const lines = String(raw || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  const output = [];
+  let block = [];
+  let updated = false;
+
+  const flushBlock = () => {
+    if (!block.length) return;
+    const hostMatch = block[0].match(/^(\s*)Host\s+(.+)$/i);
+    if (!hostMatch) {
+      output.push(...block);
+      block = [];
+      return;
+    }
+    const hosts = splitSshHostPatterns(hostMatch[2]);
+    if (!hosts.includes(target)) {
+      output.push(...block);
+      block = [];
+      return;
+    }
+    if (hosts.length !== 1) {
+      throw new Error("Shared SSH Host blocks cannot be edited in Connection Manager");
+    }
+    const indent = `${hostMatch[1]}  `;
+    const preserved = block.slice(1).filter(
+      (line) => !/^\s*(HostName|User|Port)\s+/i.test(line),
+    );
+    output.push(
+      `${hostMatch[1]}Host ${input.name}`,
+      `${indent}HostName ${input.host}`,
+      `${indent}User ${input.user}`,
+      `${indent}Port ${input.port}`,
+      ...preserved,
+    );
+    updated = true;
+    block = [];
+  };
+
+  for (const line of lines) {
+    if (/^\s*Host\s+/i.test(line)) {
+      flushBlock();
+      block = [line];
+    } else if (block.length) {
+      block.push(line);
+    } else {
+      output.push(line);
+    }
+  }
+  flushBlock();
+  if (!updated) throw new Error("SSH config host was not found in CozyPad project config");
+  return `${output.join("\n").replace(/\n+$/g, "")}\n`;
+}
+
+async function assertUniqueSshServerName(session, name, excludeId = "") {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  const servers = await listServers(session, { includeInternal: true });
+  const duplicate = servers.find((candidate) =>
+    candidate.id !== excludeId
+    && String(candidate.alias || candidate.name || "").trim().toLowerCase() === normalizedName,
+  );
+  if (duplicate) throw new Error(`SSH Host alias already exists: ${name}`);
+}
+
+async function updateSshServer(server, session, input) {
+  const normalized = normalizeSshServerUpdate(input);
+  await assertUniqueSshServerName(session, normalized.name, server.id);
+  const brokerKey = getSsh2BrokerKey(session, server);
+  const broker = ssh2Brokers.get(brokerKey);
+  if (broker) disposeSsh2Broker(broker, "server settings updated");
+
+  if (server.source === "ssh-config") {
+    if (/[\s*?\[\]]/.test(normalized.name)) {
+      throw new Error("Name must be a single SSH Host alias without wildcards");
+    }
+    const configFile = server.configFile || getProjectSshConfigFile(session);
+    const raw = await readFile(configFile, "utf8");
+    const nextText = updateHostInSshConfig(raw, server.alias || server.name, normalized);
+    await writeFile(configFile, nextText, "utf8");
+    const updated = parseSshConfig(nextText, configFile)
+      .find((candidate) => candidate.alias === normalized.name);
+    if (!updated) throw new Error("Updated SSH config host could not be reloaded");
+    return updated;
+  }
+
+  if (server.source !== "local") throw new Error("Unsupported SSH server source");
+  const servers = await readLocalServers(session);
+  const updated = {
+    ...server,
+    name: normalized.name,
+    alias: normalized.name,
+    host: normalized.host,
+    user: normalized.user,
+    port: normalized.port,
+    defaultPath: normalized.defaultPath,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeLocalServers(
+    session,
+    servers.map((candidate) => candidate.id === server.id ? updated : candidate),
+  );
+  return updated;
 }
 
 function getServerTargetLabel(server) {
@@ -5651,6 +5792,12 @@ function buildSsh2ConnectConfig(server) {
     keepaliveInterval: 30000,
     keepaliveCountMax: 6,
     tryKeyboard: false,
+    ...(server.hostFingerprintSha256
+      ? {
+          hostVerifier: (key) =>
+            crypto.createHash("sha256").update(key).digest("base64") === server.hostFingerprintSha256,
+        }
+      : {}),
   };
 }
 
@@ -6031,7 +6178,11 @@ function execSsh2Command(connection, command) {
   });
 }
 
-function connectSshWithPassword(server, password) {
+function sshFingerprint(key) {
+  return crypto.createHash("sha256").update(key).digest("base64");
+}
+
+function connectSshWithPassword(server, password, expectedHostFingerprint = "") {
   return new Promise((resolve, reject) => {
     const connection = new SshClient();
     let settled = false;
@@ -6060,68 +6211,286 @@ function connectSshWithPassword(server, password) {
       username: server.user,
       password: String(password || ""),
       readyTimeout: 15000,
+      hostVerifier: (key) => !expectedHostFingerprint || sshFingerprint(key) === expectedHostFingerprint,
     });
   });
 }
 
+function probeSshHostKey(server) {
+  return new Promise((resolve, reject) => {
+    const connection = new SshClient();
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      connection.end();
+      if (error) reject(error);
+      else resolve(result);
+    };
+    connection.once("error", (error) => {
+      if (!settled) finish(error);
+    });
+    connection.once("timeout", () => finish(new Error("SSH host key probe timed out")));
+    connection.connect({
+      host: server.host,
+      port: Number(server.port || 22) || 22,
+      username: server.user || "cozypad-probe",
+      readyTimeout: 10000,
+      hostVerifier: (key) => {
+        finish(null, { fingerprintSha256: sshFingerprint(key), keyType: "SSH host key" });
+        return false;
+      },
+    });
+  });
+}
+
+async function installPublicKeyOnConnection(connection, publicKey) {
+  const command = [
+    "umask 077",
+    "mkdir -p ~/.ssh",
+    "touch ~/.ssh/authorized_keys",
+    `(grep -qxF ${shellQuote(publicKey)} ~/.ssh/authorized_keys || printf '%s\\n' ${shellQuote(publicKey)} >> ~/.ssh/authorized_keys)`,
+    "chmod 700 ~/.ssh",
+    "chmod 600 ~/.ssh/authorized_keys",
+    "printf 'COZYPAD_KEY_READY\\n'",
+  ].join(" && ");
+  const result = await execSsh2Command(connection, command);
+  if (!result.ok || !result.stdout.includes("COZYPAD_KEY_READY")) {
+    throw new Error(result.stderr || "SSH key install failed");
+  }
+}
+
+async function removePublicKeyOnConnection(connection, publicKey) {
+  const command = [
+    "umask 077",
+    "test -f ~/.ssh/authorized_keys || exit 0",
+    `tmp=~/.ssh/authorized_keys.cozypad.$$`,
+    `(grep -vxF ${shellQuote(publicKey)} ~/.ssh/authorized_keys > "$tmp" || true)`,
+    `mv "$tmp" ~/.ssh/authorized_keys`,
+    "chmod 600 ~/.ssh/authorized_keys",
+    "printf 'COZYPAD_KEY_REMOVED\\n'",
+  ].join(" && ");
+  const result = await execSsh2Command(connection, command);
+  if (!result.ok || !result.stdout.includes("COZYPAD_KEY_REMOVED")) {
+    throw new Error(result.stderr || "Remote SSH key cleanup failed");
+  }
+}
+
 async function installPublicKeyWithPassword(server, password, publicKey) {
-  const connection = await connectSshWithPassword(server, password);
-
+  const connection = await connectSshWithPassword(
+    server,
+    password,
+    server.hostFingerprintSha256 || "",
+  );
   try {
-    const command = [
-      "umask 077",
-      "mkdir -p ~/.ssh",
-      "touch ~/.ssh/authorized_keys",
-      `(grep -qxF ${shellQuote(publicKey)} ~/.ssh/authorized_keys || printf '%s\\n' ${shellQuote(publicKey)} >> ~/.ssh/authorized_keys)`,
-      "chmod 700 ~/.ssh",
-      "chmod 600 ~/.ssh/authorized_keys",
-      "printf 'COZYPAD_KEY_READY\\n'",
-    ].join(" && ");
-    const result = await execSsh2Command(connection, command);
+    await installPublicKeyOnConnection(connection, publicKey);
+  } finally {
+    connection.end();
+  }
+}
 
-    if (!result.ok || !result.stdout.includes("COZYPAD_KEY_READY")) {
-      throw new Error(result.stderr || "SSH key install failed");
+class SshProvisioningError extends Error {
+  constructor(code, stage, message, options = {}) {
+    super(message);
+    this.name = "SshProvisioningError";
+    this.code = code;
+    this.stage = stage;
+    this.retryable = options.retryable ?? false;
+    this.cleanup = options.cleanup || "not-needed";
+    this.confirmation = options.confirmation;
+  }
+}
+
+const sshProvisioningLocks = new Set();
+
+function publicSshFailure(error, fallbackStage = "failed") {
+  if (error instanceof SshProvisioningError) {
+    return {
+      ok: false,
+      code: error.code,
+      stage: error.stage,
+      message: error.message,
+      error: error.message,
+      retryable: error.retryable,
+      cleanup: error.cleanup,
+      ...(error.confirmation ? { confirmation: error.confirmation } : {}),
+    };
+  }
+  return {
+    ok: false,
+    code: "HOST_UNREACHABLE",
+    stage: fallbackStage,
+    message: error instanceof Error ? error.message : "SSH provisioning failed",
+    error: error instanceof Error ? error.message : "SSH provisioning failed",
+    retryable: true,
+    cleanup: "not-needed",
+  };
+}
+
+async function createPendingServerProfile(session, input) {
+  const server = {
+    ...createServerProfile(input),
+    provisioningStatus: "pending",
+  };
+  const servers = await readLocalServers(session);
+  servers.push(server);
+  await writeLocalServers(session, servers);
+  return server;
+}
+
+async function verifyGeneratedKey(server, identityFile, expectedHostFingerprint) {
+  const connection = new SshClient();
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve();
+      };
+      connection.once("ready", () => finish());
+      connection.once("error", (error) => finish(error));
+      connection.once("timeout", () => finish(new Error("SSH key verification timed out")));
+      connection.connect({
+        host: server.host,
+        port: Number(server.port || 22) || 22,
+        username: server.user,
+        privateKey: readFileSync(identityFile),
+        readyTimeout: 15000,
+        hostVerifier: (key) => sshFingerprint(key) === expectedHostFingerprint,
+      });
+    });
+    const result = await execSsh2Command(connection, "printf 'COZYPAD_SSH_OK\\n'; hostname; pwd");
+    if (!result.ok || !result.stdout.includes("COZYPAD_SSH_OK")) {
+      throw new Error(result.stderr || "SSH key verification failed");
     }
   } finally {
     connection.end();
   }
 }
 
-async function createDirectServerProfile(session, input) {
+async function provisionDirectServerProfile(session, server, input) {
   const password = String(input.password || "");
-  const server = createServerProfile(input);
-  const knownHostsFile = getUserKnownHostsFile(session);
-
-  if (!server.user) {
-    throw new Error("User is required");
+  const expectedHostFingerprint = String(input.expectedHostFingerprint || "");
+  if (server.provisioningStatus === "cleanup-required") {
+    throw new SshProvisioningError(
+      "CLEANUP_FAILED",
+      "cleanup-required",
+      "Resolve the previous remote key cleanup before retrying this profile",
+      { cleanup: "required" },
+    );
   }
+  if (!server.user) throw new SshProvisioningError("INVALID_INPUT", "validating", "User is required");
+  if (!password) throw new SshProvisioningError("SSH_AUTH_FAILED", "validating", "SSH password is required", { retryable: true });
 
-  if (!password) {
-    throw new Error("SSH password is required");
+  const lockKey = `${normalizeUsername(session?.username)}|${server.user}|${server.host}|${server.port || 22}`.toLowerCase();
+  if (sshProvisioningLocks.has(lockKey)) {
+    throw new SshProvisioningError("DUPLICATE_PROFILE", "validating", "SSH provisioning is already running for this host", { retryable: true });
   }
+  sshProvisioningLocks.add(lockKey);
 
-  const key = await ensureDirectSshKey(session, server);
-  const directServer = {
-    ...server,
-    identityFile: key.identityFile,
-    knownHostsFile,
-    strictHostKeyChecking: "accept-new",
-  };
+  let passwordConnection = null;
+  let tempDir = "";
+  let taggedPublicKey = "";
+  let remoteKeyInstalled = false;
+  let finalDir = "";
+  const operationId = crypto.randomBytes(8).toString("hex");
+  try {
+    const observed = await probeSshHostKey(server).catch((error) => {
+      throw new SshProvisioningError("HOST_UNREACHABLE", "verifying-host", error.message, { retryable: true });
+    });
+    if (!expectedHostFingerprint) {
+      throw new SshProvisioningError("HOST_KEY_UNKNOWN", "verifying-host", "Confirm the SSH host key before sending the password", {
+        retryable: true,
+        confirmation: { ...observed, host: server.host, port: server.port || 22 },
+      });
+    }
+    if (observed.fingerprintSha256 !== expectedHostFingerprint) {
+      throw new SshProvisioningError("HOST_KEY_CHANGED", "verifying-host", "The SSH host key changed; the password was not sent", {
+        confirmation: { ...observed, previousFingerprint: expectedHostFingerprint, host: server.host, port: server.port || 22 },
+      });
+    }
 
-  await installPublicKeyWithPassword(directServer, password, key.publicKey);
+    const keysRoot = path.join(getUserDataDir(session), "keys");
+    await mkdir(keysRoot, { recursive: true });
+    tempDir = await mkdtemp(path.join(keysRoot, ".provision-"));
+    const tempPrivateKey = path.join(tempDir, "id_ed25519");
+    const comment = `cozypad:${normalizeUsername(session?.username)}:${server.id}:${operationId}`;
+    const generated = await runProcess("ssh-keygen.exe", ["-t", "ed25519", "-N", "", "-f", tempPrivateKey, "-C", comment], { timeoutMs: 20000 });
+    if (!generated.ok) throw new SshProvisioningError("KEY_GENERATION_FAILED", "generating-key", generated.stderr || "SSH key generation failed");
+    taggedPublicKey = (await readFile(`${tempPrivateKey}.pub`, "utf8")).trim();
 
-  const test = await runRemoteCommand(
-    session,
-    directServer,
-    "printf 'COZYPAD_SSH_OK\\n'; hostname; pwd",
-    15000,
-  );
+    passwordConnection = await connectSshWithPassword(server, password, expectedHostFingerprint).catch((error) => {
+      throw new SshProvisioningError("SSH_AUTH_FAILED", "installing-key", error.message || "SSH password authentication failed", { retryable: true });
+    });
+    await installPublicKeyOnConnection(passwordConnection, taggedPublicKey).catch((error) => {
+      throw new SshProvisioningError("KEY_INSTALL_FAILED", "installing-key", error.message, { retryable: true });
+    });
+    remoteKeyInstalled = true;
 
-  if (!test.ok || !test.stdout.includes("COZYPAD_SSH_OK")) {
-    throw new Error(test.stderr || "SSH key direct connection failed");
+    await verifyGeneratedKey(server, tempPrivateKey, expectedHostFingerprint).catch((error) => {
+      throw new SshProvisioningError("KEY_VERIFICATION_FAILED", "testing-key", error.message, { retryable: true });
+    });
+
+    finalDir = path.join(keysRoot, `${toSafeServerSlug(server.name) || "server"}-${server.id.split("-").pop()}`);
+    await rename(tempDir, finalDir);
+    tempDir = "";
+    const readyServer = {
+      ...server,
+      identityFile: path.join(finalDir, "id_ed25519"),
+      knownHostsFile: getUserKnownHostsFile(session),
+      strictHostKeyChecking: "yes",
+      hostFingerprintSha256: expectedHostFingerprint,
+      provisioningStatus: "ready",
+      provisioningError: undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    const servers = await readLocalServers(session);
+    await writeLocalServers(session, servers.map((item) => item.id === server.id ? readyServer : item)).catch((error) => {
+      throw new SshProvisioningError("PROFILE_COMMIT_FAILED", "saving-profile", error.message || "Profile commit failed");
+    });
+    return readyServer;
+  } catch (error) {
+    let cleanup = remoteKeyInstalled ? "complete" : "not-needed";
+    if (remoteKeyInstalled && passwordConnection) {
+      try {
+        await removePublicKeyOnConnection(passwordConnection, taggedPublicKey);
+      } catch {
+        cleanup = "required";
+      }
+    }
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    if (finalDir) await rm(finalDir, { recursive: true, force: true }).catch(() => {});
+    let failure = error instanceof SshProvisioningError
+      ? error
+      : new SshProvisioningError("HOST_UNREACHABLE", "failed", error instanceof Error ? error.message : "SSH provisioning failed", { retryable: true });
+    failure.cleanup = cleanup;
+    if (failure.code === "HOST_KEY_UNKNOWN") {
+      throw failure;
+    }
+    if (cleanup === "required") {
+      const primaryCode = failure.code;
+      failure = new SshProvisioningError(
+        "CLEANUP_FAILED",
+        "cleanup-required",
+        `${failure.message}; remote rollback failed after ${primaryCode}`,
+        { cleanup: "required" },
+      );
+    }
+    const servers = await readLocalServers(session);
+    const failedServer = {
+      ...server,
+      provisioningStatus: cleanup === "required" ? "cleanup-required" : "failed",
+      provisioningError: { code: failure.code, stage: failure.stage, message: failure.message, cleanup },
+      updatedAt: new Date().toISOString(),
+    };
+    await writeLocalServers(session, servers.map((item) => item.id === server.id ? failedServer : item)).catch(() => {});
+    throw failure;
+  } finally {
+    passwordConnection?.end();
+    sshProvisioningLocks.delete(lockKey);
   }
-
-  return directServer;
 }
 
 async function repairDirectServerKey(session, server, password) {
@@ -6270,6 +6639,12 @@ function requireAdmin(response, session) {
   }
 
   sendJson(response, 403, { ok: false, error: "Admin account required" });
+  return false;
+}
+
+function requireCapability(response, session, capability) {
+  if (capabilitiesForUser(session).includes(capability)) return true;
+  sendJson(response, 403, { ok: false, error: "Capability required", capability });
   return false;
 }
 
@@ -15924,6 +16299,7 @@ const CODEX_APP_SERVER_RPC_METHODS = new Set([
   "thread/resume",
   "thread/read",
   "thread/list",
+  "thread/settings/update",
   "thread/archive",
   "thread/name/set",
   "thread/goal/set",
@@ -16598,6 +16974,33 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "GET" && pathname === "/api/suite/health") {
+    const probe = async (url, headers = {}) => {
+      try {
+        const result = await fetch(url, {
+          headers,
+          signal: AbortSignal.timeout(900),
+        });
+        return result.ok;
+      } catch {
+        return false;
+      }
+    };
+    const [web, localCmd] = await Promise.all([
+      probe("http://127.0.0.1:5173/"),
+      probe("http://127.0.0.1:5175/api/local-cmd/health", {
+        Origin: "http://localhost:5173",
+      }),
+    ]);
+    const services = { web, api: true, localCmd };
+    sendJson(response, 200, {
+      ok: web && localCmd,
+      ready: web && localCmd,
+      services,
+    });
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/auth/google/config") {
     sendJson(response, 200, {
       ok: true,
@@ -16695,7 +17098,7 @@ async function handleRequest(request, response) {
     const session = getSession(request);
     sendJson(response, 200, {
       authenticated: Boolean(session),
-      user: session ? { username: session.username, role: session.role || "user" } : null,
+      user: session ? publicUser(session) : null,
     });
     return;
   }
@@ -17535,6 +17938,7 @@ async function handleRequest(request, response) {
   }
 
   if (request.method === "POST" && pathname === "/api/ssh/servers/refresh") {
+    if (!requireCapability(response, session, "ssh.import-system-config")) return;
     const limit = consumeSshConfigRefreshLimit(session);
 
     if (!limit.ok) {
@@ -17571,16 +17975,18 @@ async function handleRequest(request, response) {
   if (request.method === "POST" && pathname === "/api/ssh/servers") {
     try {
       const body = await readBody(request);
-      const nextServer = await createDirectServerProfile(session, body);
-      const servers = await readLocalServers(session);
-      servers.push(nextServer);
-      await writeLocalServers(session, servers);
+      await assertUniqueSshServerName(session, sanitizeText(body.name));
+      const nextServer = await createPendingServerProfile(session, body);
       sendJson(response, 201, { server: publicSshServer(nextServer) });
     } catch (error) {
-      sendJson(response, 400, {
-        ok: false,
-        error: error instanceof Error ? error.message : "新增 server 失敗",
-      });
+      const code = String(error?.message || "").includes("already exists")
+        ? "DUPLICATE_PROFILE"
+        : "INVALID_INPUT";
+      sendJson(response, 400, publicSshFailure(new SshProvisioningError(
+        code,
+        "validating",
+        error instanceof Error ? error.message : "SSH profile save failed",
+      )));
     }
     return;
   }
@@ -17710,7 +18116,22 @@ async function handleRequest(request, response) {
       session,
       servers.filter((item) => item.id !== server.id),
     );
+    await removeManagedServerKey(session, server).catch(() => {});
     sendEmpty(response, 204);
+    return;
+  }
+
+  if (request.method === "PUT" && !action) {
+    try {
+      const body = await readBody(request);
+      const updated = await updateSshServer(server, session, body);
+      sendJson(response, 200, { ok: true, server: publicSshServer(updated) });
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : "SSH server update failed",
+      });
+    }
     return;
   }
 
@@ -17745,6 +18166,26 @@ async function handleRequest(request, response) {
         ok: false,
         error: error instanceof Error ? error.message : "SSH key repair failed",
       });
+    }
+    return;
+  }
+
+  if (request.method === "POST" && action === "provision") {
+    if (server.source !== "local") {
+      sendJson(response, 400, publicSshFailure(new SshProvisioningError(
+        "INVALID_INPUT",
+        "validating",
+        "Only CozyPad-managed profiles can be provisioned",
+      )));
+      return;
+    }
+    try {
+      const body = await readBody(request);
+      const provisioned = await provisionDirectServerProfile(session, server, body);
+      sendJson(response, 200, { ok: true, stage: "ready", server: publicSshServer(provisioned) });
+    } catch (error) {
+      const failure = publicSshFailure(error);
+      sendJson(response, failure.code === "HOST_KEY_UNKNOWN" ? 409 : 400, failure);
     }
     return;
   }

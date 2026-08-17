@@ -3,7 +3,17 @@ import { createLegacyWebSocketUrl, resolveLegacyHttpPath } from '../../platform/
 export type LegacyAuthUser = {
   username: string;
   role: string;
+  capabilities: LegacyCapability[];
 };
+
+export type LegacyCapability =
+  | 'agent.use'
+  | 'research.use'
+  | 'ssh.manage-own'
+  | 'ssh.import-system-config'
+  | 'public.read'
+  | 'public.manage'
+  | 'developer.simulate-drop';
 
 export type LegacySessionResponse = {
   authenticated: boolean;
@@ -51,7 +61,26 @@ export type LegacySshServer = {
   strictHostKeyChecking?: string;
   defaultPath?: string;
   localOnly?: boolean;
+  provisioningStatus?: 'pending' | 'ready' | 'failed' | 'cleanup-required';
+  provisioningError?: {
+    code: string;
+    stage: LegacySshProvisioningStage;
+    message: string;
+    cleanup: string;
+  };
 };
+
+export type LegacySshProvisioningStage =
+  | 'validating'
+  | 'verifying-host'
+  | 'generating-key'
+  | 'installing-key'
+  | 'testing-key'
+  | 'saving-profile'
+  | 'ready'
+  | 'rolling-back'
+  | 'failed'
+  | 'cleanup-required';
 
 export type LegacyCondaEnv = {
   name: string;
@@ -364,6 +393,8 @@ export type LegacyServerCreatePayload = {
   defaultPath: string;
 };
 
+export type LegacyServerUpdatePayload = Omit<LegacyServerCreatePayload, 'password'>;
+
 export type LegacySshFileItem = {
   name: string;
   path: string;
@@ -500,13 +531,25 @@ export class LegacyApiError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly confirmation?: unknown;
+  readonly stage?: LegacySshProvisioningStage;
+  readonly retryable?: boolean;
+  readonly cleanup?: string;
 
-  constructor(status: number, message: string, details: { code?: string; confirmation?: unknown } = {}) {
+  constructor(status: number, message: string, details: {
+    code?: string;
+    confirmation?: unknown;
+    stage?: LegacySshProvisioningStage;
+    retryable?: boolean;
+    cleanup?: string;
+  } = {}) {
     super(message);
     this.name = 'LegacyApiError';
     this.status = status;
     this.code = details.code;
     this.confirmation = details.confirmation;
+    this.stage = details.stage;
+    this.retryable = details.retryable;
+    this.cleanup = details.cleanup;
   }
 }
 
@@ -587,6 +630,9 @@ type LegacyApiErrorBody = {
   stdout?: string;
   traceback?: string;
   confirmation?: unknown;
+  stage?: LegacySshProvisioningStage;
+  retryable?: boolean;
+  cleanup?: string;
   result?: {
     stderr?: string;
     stdout?: string;
@@ -757,6 +803,9 @@ async function readLegacyApiResponse<T>(response: Response): Promise<T> {
       {
         code: body?.code,
         confirmation: body?.confirmation,
+        stage: body?.stage,
+        retryable: body?.retryable,
+        cleanup: body?.cleanup,
       },
     );
   }
@@ -932,6 +981,30 @@ export async function createLegacyServer(
     method: 'POST',
     body: JSON.stringify(payload),
   });
+  return data.server;
+}
+
+export function provisionLegacyServer(
+  serverId: string,
+  payload: { password: string; expectedHostFingerprint?: string },
+): Promise<{ ok: true; stage: 'ready'; server: LegacySshServer }> {
+  return legacyApiRequest(`/api/ssh/servers/${encodeURIComponent(serverId)}/provision`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateLegacyServer(
+  serverId: string,
+  payload: LegacyServerUpdatePayload,
+): Promise<LegacySshServer> {
+  const data = await legacyApiRequest<{ server: LegacySshServer }>(
+    `/api/ssh/servers/${encodeURIComponent(serverId)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    },
+  );
   return data.server;
 }
 
