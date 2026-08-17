@@ -1863,13 +1863,7 @@ async function readBase64UrlJsonBody(request, maxBytes = 1024 * 1024) {
 }
 
 function getLocalServersFile(session) {
-  const username = normalizeUsername(session?.username);
-
-  if (!username || username === normalizeUsername(ADMIN_USERNAME)) {
-    return SERVERS_FILE;
-  }
-
-  return path.join(DATA_DIR, "users", username, "ssh-servers.json");
+  return path.join(getUserScopedDataDir(session), "ssh-servers.json");
 }
 
 function getCodexHistoriesFile(session) {
@@ -1900,11 +1894,56 @@ function getUserScopedDataDir(session) {
 }
 
 function getUserKnownHostsFile(session) {
-  return path.join(getUserDataDir(session), "known_hosts");
+  return path.join(getUserScopedDataDir(session), "known_hosts");
 }
 
 function getProjectSshConfigFile(session) {
   return path.join(getUserScopedDataDir(session), "ssh-config");
+}
+
+function rebaseUserScopedDataPath(session, value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return raw;
+  }
+
+  const username = normalizeUsername(session?.username) || normalizeUsername(ADMIN_USERNAME);
+  const normalized = raw.replace(/[\\/]+/g, "\\");
+  const marker = `\\data\\users\\${username}\\`;
+  const index = normalized.toLowerCase().lastIndexOf(marker.toLowerCase());
+  if (index < 0) {
+    return raw;
+  }
+
+  const relative = normalized
+    .slice(index + marker.length)
+    .split("\\")
+    .filter(Boolean);
+  return relative.length > 0 ? path.join(getUserScopedDataDir(session), ...relative) : raw;
+}
+
+function normalizeLocalServerStoragePaths(session, server) {
+  if (!isPlainObject(server) || server.source !== "local") {
+    return { server, changed: false };
+  }
+
+  const identityFile = rebaseUserScopedDataPath(session, server.identityFile);
+  const knownHostsFile = server.knownHostsFile
+    ? rebaseUserScopedDataPath(session, server.knownHostsFile)
+    : getUserKnownHostsFile(session);
+  const changed =
+    identityFile !== String(server.identityFile || "") ||
+    knownHostsFile !== String(server.knownHostsFile || "");
+
+  return {
+    changed,
+    server: {
+      ...server,
+      ...(identityFile ? { identityFile } : {}),
+      knownHostsFile,
+      strictHostKeyChecking: server.strictHostKeyChecking || "accept-new",
+    },
+  };
 }
 
 function stripSensitiveServerFields(server) {
@@ -1917,26 +1956,53 @@ function stripSensitiveServerFields(server) {
 }
 
 async function readLocalServers(session) {
+  const file = getLocalServersFile(session);
+  let raw = "";
+
   try {
-    const raw = await readFile(getLocalServersFile(session), "utf8");
+    raw = await readFile(file, "utf8");
+  } catch {
+    const username = normalizeUsername(session?.username) || normalizeUsername(ADMIN_USERNAME);
+    if (username !== normalizeUsername(ADMIN_USERNAME) || file === SERVERS_FILE || !existsSync(SERVERS_FILE)) {
+      return [];
+    }
+
+    try {
+      raw = await readFile(SERVERS_FILE, "utf8");
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, raw, "utf8");
+    } catch {
+      return [];
+    }
+  }
+
+  try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
       return [];
     }
 
     const knownHostsFile = getUserKnownHostsFile(session);
-    return parsed.map((server) => {
+    let changed = false;
+    const servers = parsed.map((server) => {
       const safeServer = stripSensitiveServerFields(server);
       if (safeServer?.source !== "local" || !safeServer.identityFile) {
         return safeServer;
       }
 
+      const normalized = normalizeLocalServerStoragePaths(session, safeServer);
+      changed = changed || normalized.changed;
       return {
-        ...safeServer,
-        knownHostsFile: safeServer.knownHostsFile || knownHostsFile,
-        strictHostKeyChecking: safeServer.strictHostKeyChecking || "accept-new",
+        ...normalized.server,
+        knownHostsFile: normalized.server.knownHostsFile || knownHostsFile,
       };
     });
+
+    if (changed) {
+      await writeLocalServers(session, servers);
+    }
+
+    return servers;
   } catch {
     return [];
   }
@@ -6043,7 +6109,7 @@ function runRemoteCommandWithInput(session, server, remoteCommand, input, timeou
 
 async function ensureDirectSshKey(session, server) {
   const keyPath = path.join(
-    getUserDataDir(session),
+    getUserScopedDataDir(session),
     "keys",
     `${toSafeServerSlug(server.name) || "server"}.ed25519`,
   );
