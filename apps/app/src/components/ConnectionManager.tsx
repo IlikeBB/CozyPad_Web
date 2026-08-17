@@ -314,6 +314,7 @@ export function ConnectionManager({
                 </button>
               ) : null}
               <button
+                className="profile-import-button"
                 disabled={controlsDisabled}
                 onClick={() => fileInputRef.current?.click()}
               >
