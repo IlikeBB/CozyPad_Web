@@ -1,63 +1,14 @@
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vitest/config';
 
-const PROD_CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "worker-src 'self' blob:",
-  "child-src 'self' blob:",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  "connect-src 'self' data: blob: http://127.0.0.1:5174 http://localhost:5174 ws://127.0.0.1:5174 ws://localhost:5174",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join('; ');
-
-export default defineConfig(({ command }) => ({
-  plugins: [
-    react(),
-    {
-      name: 'cozypad-inject-csp',
-      transformIndexHtml(html: string) {
-        if (command !== 'build') return html;
-        return html.replace(
-          '<head>',
-          `<head>\n    <meta http-equiv="Content-Security-Policy" content="${PROD_CSP}" />`,
-        );
-      },
-    },
-  ],
-  base: './',
+const apiPort = Number(process.env.COZYPAD_API_PORT || 5674);
+export default defineConfig({
+  plugins: [react()],
   server: {
-    host: '127.0.0.1',
-    port: 5173,
+    host: process.env.COZYPAD_HOST || '127.0.0.1',
+    port: Number(process.env.COZYPAD_WEB_PORT || 5673),
     strictPort: true,
-    allowedHosts: ['cozypad.modoubletw.com'],
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:5174',
-        ws: true,
-      },
-      '/cozypad-research': {
-        target: 'http://127.0.0.1:5174',
-      },
-      '/cozypad-rpc': {
-        target: 'http://127.0.0.1:5174',
-      },
-      '/cozypad-agent': {
-        target: 'http://127.0.0.1:5174',
-        ws: true,
-      },
-    },
-  },
-  build: {
-    outDir: 'dist',
-    sourcemap: false,
-  },
-  test: {
-    environment: 'node',
-  },
-}));
+    allowedHosts: process.env.COZYPAD_PUBLIC_ORIGIN ? [new URL(process.env.COZYPAD_PUBLIC_ORIGIN).hostname] : [],
+    proxy: { '/api': { target: `http://127.0.0.1:${apiPort}`, ws: true } }
+  }
+});

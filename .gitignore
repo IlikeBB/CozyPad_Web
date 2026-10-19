@@ -1,84 +1,21 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
-.dart_tool/
-.flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/coverage/
-
-# Symbolication related
-app.*.symbols
-
-# Obfuscation related
-app.*.map.json
-
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
-
-# Zip archives
-*.zip
-release/
-
-# Node / pnpm (V4 monorepo)
 node_modules/
-apps/**/dist/
-apps/desktop/release*/
-packages/xterm/
-*.tsbuildinfo
-.env
-.env.local
-.env.*.local
+dist/
 data/
+.env
 .run-logs/
-CozyPad-1.0.2/
-
-# Local secrets / machine state
-credentials.json
-**/credentials.json
-known_hosts
-**/known_hosts
-ssh-config.local
-**/ssh-config.local
-*.key
+test-results/
+playwright-report/
+*.log
+.change-backups/
+.agents/
+/AGENTS.md
+.env.*
+!.env.example
+.ssh/
+.cloudflared/
 *.pem
+*.key
 *.ppk
-id_rsa
-id_rsa.pub
-id_ed25519
-id_ed25519.pub
-*.sqlite
-*.sqlite3
-
-# Local launch helpers
-CozyPad*-Demo.bat
-CozyPad*.bat
-scripts/start-cozypad*-public.ps1
+*.p12
+*.pfx
+/scripts/cloudflare-public.json

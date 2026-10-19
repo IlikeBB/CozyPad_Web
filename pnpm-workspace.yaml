@@ -1,11 +1,9 @@
 packages:
   - apps/app
-  - apps/desktop
-  - packages/*
+  - apps/server
+  - packages/contracts
 
 allowBuilds:
   cpu-features: true
   ssh2: true
-  electron: true
   esbuild: true
-  electron-winstaller: true

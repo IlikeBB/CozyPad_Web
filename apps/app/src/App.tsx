@@ -1,807 +1,115 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  ConnectionProfile,
-  ConnectionState,
-  HostKeyPromptEvent,
-  TmuxStatus,
-} from '@cozypad/contracts';
-import { getBridge } from './platform/bridge';
-import {
-  ConnectionManager,
-  CredentialPrompt,
-  HostKeyDialog,
-} from './components/ConnectionManager';
-import type {
-  ConnectionManagerProfile,
-  CredentialSubmission,
-} from './components/ConnectionManager';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { Activity, BookOpen, Bot, Bug, ChevronDown, FileKey2, Files, LogOut, PlugZap, Settings2, ShieldCheck, SquareTerminal, TerminalSquare, X } from 'lucide-react';
+import type { ServerProfile, Session } from '@cozypad/contracts';
+import { api, ApiError, message, post } from './api';
+import { Busy, Dialog, EmptyConnection, IconButton } from './components/Controls';
 import { LoginScreen } from './components/LoginScreen';
-import {
-  AgentsIcon,
-  FilesIcon,
-  MonitorIcon,
-  ResearchIcon,
-  SettingsIcon,
-  TerminalIcon,
-  WebIcon,
-  WorkIcon,
-} from './components/icons';
-import { TmuxSetupDialog } from './components/TmuxSetupDialog';
-import {
-  OPEN_FILE_PATH_EVENT,
-  type OpenFilePathEventDetail,
-} from './components/markdownComponents';
-import { AgentsWorkspace } from './workspaces/agents/AgentsWorkspace';
-import { FilesWorkspace } from './workspaces/FilesWorkspace';
-import { MonitorWorkspace } from './workspaces/MonitorWorkspace';
-import { PublicWorkspace } from './workspaces/PublicWorkspace';
-import { ResearchWorkspace } from './workspaces/ResearchWorkspace';
-import { SettingsWorkspace } from './workspaces/SettingsWorkspace';
-import { TerminalWorkspace } from './workspaces/TerminalWorkspace';
-import { WorkWorkspace } from './workspaces/WorkWorkspace';
-import type { WorkRun } from './workspaces/workRuns';
-import { reconnectDelayMs } from './reconnectPolicy';
-import {
-  getLegacySession,
-  listLegacyServers,
-  logoutLegacy,
-  setLegacySshExecutionEnabled,
-} from './workspaces/agents/legacySshApi';
-import type { LegacyAuthUser, LegacySshServer } from './workspaces/agents/legacySshApi';
-import { subscribeCodexTrainingTasks } from './workspaces/agents/codexTaskQueue';
-import {
-  readLastSelectedLegacyServerId,
-  rememberLastSelectedLegacyServerId,
-} from './workspaces/sshServerPreference';
+import { ConnectionManager } from './components/ConnectionManager';
+const TerminalWorkspace = lazy(() => import('./workspaces/TerminalWorkspace').then(module => ({ default: module.TerminalWorkspace })));
+const FilesWorkspace = lazy(() => import('./workspaces/FilesWorkspace').then(module => ({ default: module.FilesWorkspace })));
+const AgentsWorkspace = lazy(() => import('./workspaces/AgentsWorkspace').then(module => ({ default: module.AgentsWorkspace })));
+const MonitorWorkspace = lazy(() => import('./workspaces/MonitorWorkspace').then(module => ({ default: module.MonitorWorkspace })));
+const IssuesWorkspace = lazy(() => import('./workspaces/IssuesWorkspace').then(module => ({ default: module.IssuesWorkspace })));
+const MarkdownWorkspace = lazy(() => import('./workspaces/MarkdownWorkspace').then(module => ({ default: module.MarkdownWorkspace })));
 
-type WorkspaceId =
-  | 'agents'
-  | 'research'
-  | 'researchPro'
-  | 'work'
-  | 'terminal'
-  | 'files'
-  | 'monitor'
-  | 'public'
-  | 'settings';
-
-const NAV_ITEMS: { id: WorkspaceId; label: string; icon: () => React.ReactElement }[] = [
-  { id: 'research', label: 'Research', icon: () => <ResearchIcon /> },
-  { id: 'researchPro', label: 'Research (Pro Beta)', icon: () => <ResearchIcon /> },
-  { id: 'agents', label: 'Agents', icon: () => <AgentsIcon /> },
-  { id: 'terminal', label: 'Terminal', icon: () => <TerminalIcon /> },
-  { id: 'files', label: 'File', icon: () => <FilesIcon /> },
-  { id: 'work', label: 'Work', icon: () => <WorkIcon /> },
-  { id: 'monitor', label: 'device Monitor', icon: () => <MonitorIcon /> },
-  { id: 'public', label: 'Public', icon: () => <WebIcon /> },
-  { id: 'settings', label: 'Settings', icon: () => <SettingsIcon /> },
+type Workspace = 'agents' | 'terminal' | 'files' | 'markdown' | 'monitor' | 'settings' | 'issues';
+const navigation = [
+  { id: 'agents' as const, label: 'Agents', icon: Bot }, { id: 'terminal' as const, label: 'Terminal', icon: TerminalSquare },
+  { id: 'files' as const, label: 'Files', icon: Files }, { id: 'markdown' as const, label: 'Markdown', icon: BookOpen }, { id: 'monitor' as const, label: 'Monitor', icon: Activity },
+  { id: 'issues' as const, label: '問題回報', icon: Bug }
 ];
-
-const SSH_AUTO_RECONNECT_MAX_ATTEMPTS = 0;
-
-type AgentTaskOpenTarget = {
-  agent: 'codex' | 'claude' | 'agy' | 'bailian';
-  taskId: string;
-  profileId: string;
-  nonce: number;
-};
-
-type FilesOpenTarget = {
-  serverId: string;
-  path: string;
-  nonce: number;
-};
-
-function isLocalLegacyServer(server: LegacySshServer): boolean {
-  const host = String(server.host || '').trim().toLowerCase();
-  return (
-    server.localOnly === true ||
-    (server.source === 'system' && server.id === 'system:localhost') ||
-    host === 'localhost' ||
-    host === '::1' ||
-    host === 'mock.local' ||
-    host.startsWith('127.')
-  );
-}
-
-function legacyServerToConnectionProfile(server: LegacySshServer): ConnectionProfile {
-  const local = isLocalLegacyServer(server);
-  const hasIdentityFile = Boolean(server.identityFileReady ?? server.hasIdentityFile ?? server.identityFile);
-  return {
-    id: server.id,
-    name: server.name || server.alias || server.host || server.id,
-    host: local ? '127.0.0.1' : server.host,
-    port: local ? 22 : Number(server.port || 22),
-    username: server.user || (local ? 'local' : 'ssh'),
-    authMethod: hasIdentityFile ? 'privateKey' : 'password',
-    hasPassword: local,
-    hasPrivateKey: hasIdentityFile,
-    credentialPersisted: local || hasIdentityFile,
+export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [initializing, setInitializing] = useState(true);
+  const [servers, setServers] = useState<ServerProfile[]>([]);
+  const [selected, setSelected] = useState('');
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [workspace, setWorkspace] = useState<Workspace>('agents');
+  const [manage, setManage] = useState(false);
+  const [error, setError] = useState('');
+  const [hostKey, setHostKey] = useState<{ fingerprint: string; id: string; changed: boolean } | null>(null);
+  const [terminalOpened, setTerminalOpened] = useState(false);
+  const [markdownOpened, setMarkdownOpened] = useState(false);
+  const [taskTarget, setTaskTarget] = useState<{ serverId: string; taskId: string } | null>(null);
+  const server = servers.find(item => item.id === selected);
+  const refreshSession = useCallback(async () => { setSession(await api<Session>('/auth/session')); }, []);
+  const refreshServers = useCallback(async () => { setServers(await api<ServerProfile[]>('/servers')); }, []);
+  const managerRefresh = useCallback(async (changedId?: string) => { await refreshServers(); if (changedId === selected) { setConnected(false); setTerminalOpened(false); } }, [refreshServers, selected]);
+  useEffect(() => {
+    void refreshSession().catch(error => setError(message(error))).finally(() => setInitializing(false));
+    const expire = () => { setSession(previous => previous ? { ...previous, user: null } : null); setConnected(false); setTerminalOpened(false); setError('登入已過期。'); };
+    window.addEventListener('cozypad:session-expired', expire); return () => window.removeEventListener('cozypad:session-expired', expire);
+  }, [refreshSession]);
+  useEffect(() => {
+    if (!session?.user) { setConnected(false); setTerminalOpened(false); return; }
+    const username = session.user.username.toLowerCase();
+    let mounted = true;
+    void api<ServerProfile[]>('/servers').then(items => {
+      if (!mounted) return; setServers(items);
+      const remembered = localStorage.getItem(`cozypad-tt:${username}:server`);
+      setSelected(items.find(item => item.id === remembered)?.id || items[0]?.id || '');
+    }).catch(error => { if (mounted) setError(message(error)); });
+    return () => { mounted = false; };
+  }, [session?.user?.username]);
+  useEffect(() => {
+    if (!session?.user) return;
+    const check = () => { void refreshSession().catch(() => {}); };
+    const timer = window.setInterval(check, 60000);
+    window.addEventListener('focus', check);
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', check); };
+  }, [session?.user?.username, refreshSession]);
+  useEffect(() => {
+    setConnected(false); setTerminalOpened(false); setHostKey(null); setError('');
+    if (selected && session?.user) localStorage.setItem(`cozypad-tt:${session.user.username.toLowerCase()}:server`, selected);
+  }, [selected]);
+  const connect = async (id = selected) => {
+    if (!id || connecting) return; setConnecting(true); setError('');
+    try { await post(`/servers/${encodeURIComponent(id)}/connect`); setConnected(true); }
+    catch (error) {
+      if (error instanceof ApiError && error.details.code === 'HOST_KEY' && error.details.fingerprint) setHostKey({ id, fingerprint: error.details.fingerprint, changed: Boolean(error.details.changed) });
+      else setError(message(error));
+    } finally { setConnecting(false); }
   };
-}
-
-function canUseLegacyProfile(profile: ConnectionProfile): boolean {
-  return profile.hasPrivateKey === true;
-}
-
-function mergeProfileOptions(
-  profiles: ConnectionProfile[],
-  legacyProfiles: ConnectionProfile[],
-): ConnectionProfile[] {
-  const seen = new Set<string>();
-  const options: ConnectionProfile[] = [];
-  for (const profile of [...profiles, ...legacyProfiles]) {
-    if (seen.has(profile.id)) continue;
-    seen.add(profile.id);
-    options.push(profile);
-  }
-  return options;
-}
-
-function manageableLegacyServers(servers: LegacySshServer[]): LegacySshServer[] {
-  return servers.filter((server) => !isLocalLegacyServer(server));
-}
-
-function legacyServerToManagerProfile(server: LegacySshServer): ConnectionManagerProfile {
-  return {
-    ...legacyServerToConnectionProfile(server),
-    managerSource: 'legacy',
-    legacySource: server.source,
-    defaultPath: server.defaultPath ?? '~',
+  const logout = async () => {
+    try { await post('/auth/logout'); setSession(previous => previous ? { ...previous, user: null } : null); setServers([]); setConnected(false); setTerminalOpened(false); }
+    catch (error) { setError(message(error)); }
   };
-}
-
-function isDefaultMockProfile(profile: ConnectionProfile): boolean {
-  return profile.id === 'mock-local' || profile.host === 'mock.local';
-}
-
-function chooseSelectedProfileId(
-  current: string | null,
-  profiles: ConnectionProfile[],
-  legacyProfiles: ConnectionProfile[],
-): string | null {
-  const currentProfile = current === null
-    ? undefined
-    : profiles.find((profile) => profile.id === current);
-  if (currentProfile !== undefined && !isDefaultMockProfile(currentProfile)) {
-    return current;
-  }
-
-  if (current !== null) {
-    const currentLegacy = legacyProfiles.find((profile) => profile.id === current);
-    if (currentLegacy && canUseLegacyProfile(currentLegacy)) return currentLegacy.id;
-  }
-
-  const rememberedId = readLastSelectedLegacyServerId();
-  const remembered = legacyProfiles.find(
-    (profile) => profile.id === rememberedId && canUseLegacyProfile(profile),
-  );
-  if (remembered) return remembered.id;
-
-  const remote = legacyProfiles.find(
-    (profile) => profile.id !== 'system:localhost' && canUseLegacyProfile(profile),
-  );
-  return remote?.id ?? profiles[0]?.id ?? legacyProfiles[0]?.id ?? null;
-}
-
-export function App() {
-  const bridge = useMemo(() => getBridge(), []);
-  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>(
-    'checking',
-  );
-  const [currentUser, setCurrentUser] = useState<LegacyAuthUser | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceId>('agents');
-  const [agentTaskOpenTarget, setAgentTaskOpenTarget] = useState<AgentTaskOpenTarget | null>(null);
-  const [filesOpenTarget, setFilesOpenTarget] = useState<FilesOpenTarget | null>(null);
-  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
-  const [legacyServers, setLegacyServers] = useState<LegacySshServer[]>([]);
-  const [legacyProfileOptions, setLegacyProfileOptions] = useState<ConnectionProfile[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [state, setState] = useState<ConnectionState>('disconnected');
-  const [error, setError] = useState<string | null>(null);
-  const [managerOpen, setManagerOpen] = useState(false);
-  const [credentialPrompt, setCredentialPrompt] = useState<ConnectionProfile | null>(null);
-  const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPromptEvent | null>(null);
-  const [mockData, setMockData] = useState(false);
-  const [tmuxStatus, setTmuxStatus] = useState<TmuxStatus | null>(null);
-  const [tmuxPromptDismissed, setTmuxPromptDismissed] = useState(false);
-  const [reconnect, setReconnect] = useState<{
-    attempt: number;
-    secondsLeft: number;
-  } | null>(null);
-
-  const manualDisconnect = useRef(true);
-  const wasConnected = useRef(false);
-  const attempts = useRef(0);
-  const connectInFlight = useRef(false);
-  const reconnectScheduled = useRef(false);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectTicker = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    setLegacySshExecutionEnabled(state === 'connected');
-  }, [state]);
-
-  useEffect(() => {
-    let active = true;
-    async function checkAuthSession() {
-      try {
-        const session = await getLegacySession();
-        if (!active) return;
-        if (session.authenticated && session.user) {
-          setCurrentUser(session.user);
-          setAuthState('authenticated');
-        } else {
-          setCurrentUser(null);
-          setAuthState('anonymous');
-        }
-      } catch {
-        if (!active) return;
-        setCurrentUser(null);
-        setAuthState('anonymous');
-      }
-    }
-
-    void checkAuthSession();
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => subscribeCodexTrainingTasks(() => setWorkspace('agents')), []);
-
-  const clearTimers = useCallback(() => {
-    if (reconnectTimer.current !== null) clearTimeout(reconnectTimer.current);
-    if (reconnectTicker.current !== null) clearInterval(reconnectTicker.current);
-    reconnectTimer.current = null;
-    reconnectTicker.current = null;
-    reconnectScheduled.current = false;
-  }, []);
-
-  const refreshProfiles = useCallback(async () => {
-    const list = await bridge.listProfiles();
-    setProfiles(list);
-    setSelectedId((current) =>
-      current !== null && (bridge.kind === 'mock' || list.some((profile) => profile.id === current))
-        ? current
-        : (list[0]?.id ?? null),
-    );
-  }, [bridge]);
-
-  useEffect(() => {
-    void refreshProfiles();
-  }, [refreshProfiles]);
-
-  useEffect(() => {
-    if (bridge.kind !== 'mock') return;
-    const scopedBridge = bridge as typeof bridge & {
-      setBrowserStorageOwner?: (owner: string | null) => void;
-    };
-    scopedBridge.setBrowserStorageOwner?.(
-      authState === 'authenticated' ? currentUser?.username ?? null : null,
-    );
-    void refreshProfiles();
-  }, [authState, bridge, currentUser?.username, refreshProfiles]);
-
-  useEffect(() => {
-    if (bridge.kind !== 'mock' || authState !== 'authenticated') {
-      setLegacyServers([]);
-      setLegacyProfileOptions([]);
-      return;
-    }
-
-    let active = true;
-    void listLegacyServers(false)
-      .then((servers) => {
-        if (!active) return;
-        const nextLegacyServers = manageableLegacyServers(servers);
-        const nextLegacyProfiles = nextLegacyServers.map(legacyServerToConnectionProfile);
-        setLegacyServers(nextLegacyServers);
-        setLegacyProfileOptions(nextLegacyProfiles);
-        setSelectedId((current) => chooseSelectedProfileId(current, profiles, nextLegacyProfiles));
-      })
-      .catch(() => {
-        if (active) {
-          setLegacyServers([]);
-          setLegacyProfileOptions([]);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [authState, bridge.kind, profiles]);
-
-  const refreshConnectionSources = useCallback(async () => {
-    const nextProfiles = await bridge.listProfiles();
-    setProfiles(nextProfiles);
-
-    if (bridge.kind !== 'mock' || authState !== 'authenticated') {
-      setLegacyServers([]);
-      setLegacyProfileOptions([]);
-      setSelectedId((current) =>
-        current !== null && nextProfiles.some((profile) => profile.id === current)
-          ? current
-          : (nextProfiles[0]?.id ?? null),
-      );
-      return;
-    }
-
-    const servers = await listLegacyServers(false);
-    const nextLegacyServers = manageableLegacyServers(servers);
-    const nextLegacyProfiles = nextLegacyServers.map(legacyServerToConnectionProfile);
-    setLegacyServers(nextLegacyServers);
-    setLegacyProfileOptions(nextLegacyProfiles);
-    setSelectedId((current) =>
-      chooseSelectedProfileId(current, nextProfiles, nextLegacyProfiles),
-    );
-  }, [authState, bridge]);
-
-  useEffect(() => bridge.onHostKeyPrompt(setHostKeyPrompt), [bridge]);
-
-  useEffect(() => {
-    void bridge.getAppInfo().then((info) => setMockData(info.mockData));
-  }, [bridge]);
-
-  useEffect(
-    () =>
-      bridge.onTmuxStatus((status) => {
-        setTmuxStatus(status);
-        if (status.installed && status.satisfiesTarget) setTmuxPromptDismissed(false);
-      }),
-    [bridge],
-  );
-
-  const doConnect = useCallback(
-    (profileId: string) => {
-      if (connectInFlight.current) return;
-      connectInFlight.current = true;
-      manualDisconnect.current = false;
-      setError(null);
-      void bridge
-        .connect({ profileId })
-        .then(() => {
-          connectInFlight.current = false;
-        })
-        .catch((err: unknown) => {
-          connectInFlight.current = false;
-          setState('error');
-          setError(String(err));
-          scheduleRef.current(profileId);
-        });
-    },
-    [bridge],
-  );
-
-  const scheduleReconnect = useCallback(
-    (profileId: string) => {
-      if (manualDisconnect.current || reconnectScheduled.current || connectInFlight.current) return;
-      if (SSH_AUTO_RECONNECT_MAX_ATTEMPTS <= 0) {
-        manualDisconnect.current = true;
-        connectInFlight.current = false;
-        clearTimers();
-        setReconnect(null);
-        setError('SSH auto reconnect is disabled to avoid repeated server-side login attempts. Check the server, network, and credentials, then press Connect manually.');
-        return;
-      }
-      if (attempts.current >= SSH_AUTO_RECONNECT_MAX_ATTEMPTS) {
-        manualDisconnect.current = true;
-        connectInFlight.current = false;
-        clearTimers();
-        setReconnect(null);
-        setError(`SSH auto reconnect stopped after ${SSH_AUTO_RECONNECT_MAX_ATTEMPTS} failed attempt(s). Check the server, network, and credentials, then press Connect manually.`);
-        return;
-        setError(
-          `SSH 自動重連已停止：連續失敗 ${SSH_AUTO_RECONNECT_MAX_ATTEMPTS} 次。為避免 IP 被封鎖，請確認 server、網路與憑證後再手動按 Connect。`,
-        );
-        return;
-      }
-      reconnectScheduled.current = true;
-      const delayMs = reconnectDelayMs(attempts.current);
-      attempts.current += 1;
-      const attempt = attempts.current;
-      let secondsLeft = Math.round(delayMs / 1000);
-      setReconnect({ attempt, secondsLeft });
-      const ticker = setInterval(() => {
-        secondsLeft -= 1;
-        if (secondsLeft > 0) setReconnect({ attempt, secondsLeft });
-      }, 1000);
-      reconnectTicker.current = ticker;
-      const timer = setTimeout(() => {
-        clearInterval(ticker);
-        reconnectTicker.current = null;
-        reconnectTimer.current = null;
-        reconnectScheduled.current = false;
-        setReconnect(null);
-        doConnect(profileId);
-      }, delayMs);
-      reconnectTimer.current = timer;
-    },
-    [clearTimers, doConnect],
-  );
-
-  const scheduleRef = useRef(scheduleReconnect);
-  scheduleRef.current = scheduleReconnect;
-
-  useEffect(() => {
-    return bridge.onConnectionState((event) => {
-      setState(event.state);
-      setError(event.error ?? null);
-      if (event.state === 'connected') {
-        connectInFlight.current = false;
-        wasConnected.current = true;
-        attempts.current = 0;
-        clearTimers();
-        setReconnect(null);
-      }
-      if (event.state === 'error') {
-        connectInFlight.current = false;
-        if (!manualDisconnect.current && wasConnected.current) {
-          scheduleRef.current(event.profileId);
-        }
-      }
-      if (
-        event.state === 'disconnected' &&
-        !manualDisconnect.current &&
-        wasConnected.current
-      ) {
-        scheduleRef.current(event.profileId);
-      }
-    });
-  }, [bridge, clearTimers]);
-
-  const profileOptions = useMemo(
-    () => mergeProfileOptions(profiles, legacyProfileOptions),
-    [legacyProfileOptions, profiles],
-  );
-  const connectionManagerProfiles = useMemo<ConnectionManagerProfile[]>(
-    () => [
-      ...profiles.map((profile) => ({
-        ...profile,
-        managerSource: 'bridge' as const,
-        sourceName: profile.id.startsWith('ssh-config:')
-          ? 'SSH config'
-          : bridge.kind === 'mock'
-            ? 'Browser'
-            : 'Desktop',
-      })),
-      ...legacyServers.map(legacyServerToManagerProfile),
-    ],
-    [bridge.kind, legacyServers, profiles],
-  );
-  const connectionManagerDefaultSource =
-    bridge.kind === 'mock' && authState === 'authenticated' ? 'legacy' : 'bridge';
-  const selectedProfile = profileOptions.find((profile) => profile.id === selectedId) ?? null;
-  const selectedLegacyProfile = legacyProfileOptions.some((profile) => profile.id === selectedId);
-  const effectiveMockData = mockData && !selectedLegacyProfile;
-
-  const handleConnect = () => {
-    if (!selectedProfile) return;
-    attempts.current = 0;
-    const hasCredential =
-      (selectedProfile.authMethod ?? 'password') === 'privateKey'
-        ? selectedProfile.hasPrivateKey === true
-        : selectedProfile.hasPassword === true;
-    if (!hasCredential && bridge.kind !== 'mock') {
-      setCredentialPrompt(selectedProfile);
-      return;
-    }
-    doConnect(selectedProfile.id);
-  };
-
-  const handleDisconnect = () => {
-    manualDisconnect.current = true;
-    wasConnected.current = false;
-    connectInFlight.current = false;
-    clearTimers();
-    setReconnect(null);
-    if (selectedId !== null) void bridge.disconnect({ profileId: selectedId });
-  };
-
-  const handleLogout = async () => {
-    handleDisconnect();
-    try {
-      await logoutLegacy();
-    } catch {
-      // The local session may already be gone. The UI should still leave the app shell.
-    } finally {
-      setCurrentUser(null);
-      setAuthState('anonymous');
-    }
-  };
-
-  const handleOpenWorkRun = useCallback((run: WorkRun) => {
-    if (run.profileId) rememberLastSelectedLegacyServerId(run.profileId);
-    setAgentTaskOpenTarget({
-      agent: run.agent,
-      taskId: run.taskId,
-      profileId: run.profileId,
-      nonce: Date.now(),
-    });
-    setWorkspace('agents');
-  }, []);
-
-  const handleOpenFilesPath = useCallback((target: { serverId: string; path: string }) => {
-    const serverId = target.serverId.trim();
-    const path = target.path.trim();
-    if (!serverId || !path) return;
-    rememberLastSelectedLegacyServerId(serverId);
-    setFilesOpenTarget({ serverId, path, nonce: Date.now() });
-    setWorkspace('files');
-  }, []);
-
-  useEffect(() => {
-    const openFromElement = (element: Element): boolean => {
-      const target = element.closest<HTMLElement>('[data-cozypad-file-path]');
-      if (!target) return false;
-      const serverId = target.dataset.cozypadFileServerId || '';
-      const path = target.dataset.cozypadFilePath || '';
-      if (!serverId || !path) return false;
-      handleOpenFilesPath({ serverId, path });
-      return true;
-    };
-
-    const handleOpenFilePathEvent = (event: Event) => {
-      const detail = (event as CustomEvent<OpenFilePathEventDetail>).detail;
-      if (!detail?.serverId || !detail.path) return;
-      handleOpenFilesPath(detail);
-    };
-
-    const handleDocumentClick = (event: MouseEvent) => {
-      if (!(event.target instanceof Element)) return;
-      if (!openFromElement(event.target)) return;
-      event.preventDefault();
-      event.stopPropagation();
-    };
-
-    window.addEventListener(OPEN_FILE_PATH_EVENT, handleOpenFilePathEvent);
-    document.addEventListener('click', handleDocumentClick, true);
-    return () => {
-      window.removeEventListener(OPEN_FILE_PATH_EVENT, handleOpenFilePathEvent);
-      document.removeEventListener('click', handleDocumentClick, true);
-    };
-  }, [handleOpenFilesPath]);
-
-  const submitCredential = async (credential: CredentialSubmission) => {
-    const profile = credentialPrompt;
-    if (!profile) return;
-    setCredentialPrompt(null);
-    try {
-      await bridge.saveProfile({
-        id: profile.id,
-        name: profile.name,
-        host: profile.host,
-        port: profile.port,
-        username: profile.username,
-        ...credential,
-      });
-      await refreshProfiles();
-      doConnect(profile.id);
-    } catch (credentialError) {
-      setState('error');
-      setError(
-        credentialError instanceof Error
-          ? credentialError.message
-          : String(credentialError),
-      );
-    }
-  };
-
-  if (authState === 'checking') {
-    return (
-      <main className="login-screen">
-        <section className="login-card login-loading" aria-label="CozyPad loading">
-          <header className="login-card-head">
-            <div className="login-mark" aria-hidden="true">
-              &gt;_
-            </div>
-            <div>
-              <h1>CozyPad</h1>
-              <span>檢查 session</span>
-            </div>
-          </header>
-        </section>
-      </main>
-    );
-  }
-
-  if (authState === 'anonymous') {
-    return (
-      <LoginScreen
-        onAuthenticated={(user) => {
-          setCurrentUser(user);
-          setAuthState('authenticated');
-        }}
-      />
-    );
-  }
-
-  return (
-    <div className="app">
-      <header className="topbar">
-        <span className="brand">CozyPad</span>
-        <select
-          className="profile-select"
-          value={selectedId ?? ''}
-          onChange={(event) => {
-            const nextId = event.target.value;
-            setSelectedId(nextId);
-            if (legacyProfileOptions.some((profile) => profile.id === nextId)) {
-              rememberLastSelectedLegacyServerId(nextId);
-            }
-          }}
-          disabled={state === 'connected' || state === 'connecting'}
-        >
-          {profileOptions.length === 0 ? <option value="">（無連線設定）</option> : null}
-          {profileOptions.map((profile) => (
-            <option key={profile.id} value={profile.id}>
-              {profile.name}
-            </option>
-          ))}
-        </select>
-        <button
-          className="ghost"
-          title="管理連線"
-          onClick={() => setManagerOpen(true)}
-        >
-          ⚙
-        </button>
-        <span className={`status status-${state}`}>{state}</span>
-        <span className={`mode-tag${effectiveMockData ? ' mode-mock' : ' mode-ssh'}`}>
-          {effectiveMockData ? 'MOCK 資料' : 'SSH'}
-        </span>
-        <span className="spacer" />
-        {currentUser ? (
-          <span className="topbar-user">
-            {currentUser.username}
-            <small>{currentUser.role}</small>
-          </span>
-        ) : null}
-        {state === 'connected' ? (
-          <button onClick={handleDisconnect}>Disconnect</button>
-        ) : (
-          <button
-            onClick={handleConnect}
-            disabled={!selectedProfile || state === 'connecting'}
-          >
-            {state === 'connecting' ? 'Connecting…' : 'Connect'}
-          </button>
-        )}
-        <button className="topbar-logout" onClick={() => void handleLogout()}>
-          登出
-        </button>
-      </header>
-      {reconnect ? (
-        <div className="reconnect-banner">
-          <span>
-            連線中斷 — {reconnect.secondsLeft}s 後重試（第 {reconnect.attempt} 次）
-          </span>
-          <button
-            onClick={() => {
-              clearTimers();
-              setReconnect(null);
-              if (selectedId !== null) doConnect(selectedId);
-            }}
-          >
-            立即重連
-          </button>
-          <button
-            onClick={() => {
-              manualDisconnect.current = true;
-              clearTimers();
-              setReconnect(null);
-            }}
-          >
-            取消
-          </button>
-        </div>
-      ) : null}
-      {error !== null && !reconnect ? <div className="error-banner">{error}</div> : null}
-      <div className="shell">
-        <nav className="nav-rail">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              className={`nav-item${workspace === item.id ? ' nav-item-active' : ''}`}
-              onClick={() => setWorkspace(item.id)}
-              title={item.label}
-            >
-              {item.icon()}
-              <span className="nav-label">{item.label}</span>
-            </button>
-          ))}
-        </nav>
-        <main className="workspace">
-          <section className="workspace-page" hidden={workspace !== 'agents'}>
-            <AgentsWorkspace
-              mockData={effectiveMockData}
-              selectedProfile={selectedProfile}
-              connected={state === 'connected'}
-              openTarget={agentTaskOpenTarget}
-              onOpenFilesPath={handleOpenFilesPath}
-            />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'research'}>
-            <ResearchWorkspace key="research-standard" connected={state === 'connected'} variant="standard" />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'researchPro'}>
-            <ResearchWorkspace key="research-pro" connected={state === 'connected'} variant="proBeta" />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'work'}>
-            <WorkWorkspace active={workspace === 'work'} onOpenRun={handleOpenWorkRun} />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'terminal'}>
-            <TerminalWorkspace
-              active={workspace === 'terminal'}
-              connected={state === 'connected'}
-              profileId={selectedId}
-            />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'files'}>
-            <FilesWorkspace
-              active={workspace === 'files'}
-              connected={state === 'connected'}
-              profileId={selectedId}
-              openTarget={filesOpenTarget}
-            />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'monitor'}>
-            <MonitorWorkspace
-              active={workspace === 'monitor'}
-              connected={state === 'connected'}
-              host={selectedProfile ? `${selectedProfile.username}@${selectedProfile.host}` : null}
-              selectedServerId={selectedId}
-            />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'public'}>
-            <PublicWorkspace />
-          </section>
-          <section className="workspace-page" hidden={workspace !== 'settings'}>
-            <SettingsWorkspace
-              bridgeKind={bridge.kind}
-              mockData={effectiveMockData}
-              connected={state === 'connected'}
-            />
-          </section>
-        </main>
-      </div>
-      {managerOpen ? (
-        <ConnectionManager
-          profiles={connectionManagerProfiles}
-          defaultSource={connectionManagerDefaultSource}
-          onClose={() => setManagerOpen(false)}
-          onChanged={refreshConnectionSources}
-        />
-      ) : null}
-      {credentialPrompt ? (
-        <CredentialPrompt
-          profile={credentialPrompt}
-          onCancel={() => setCredentialPrompt(null)}
-          onSubmit={(credential) => void submitCredential(credential)}
-        />
-      ) : null}
-      {tmuxStatus !== null &&
-      !tmuxPromptDismissed &&
-      state === 'connected' &&
-      !(tmuxStatus.installed && tmuxStatus.satisfiesTarget) ? (
-        <TmuxSetupDialog
-          status={tmuxStatus}
-          onDismiss={() => setTmuxPromptDismissed(true)}
-          onInstalled={(status) => {
-            setTmuxStatus(status);
-            setTmuxPromptDismissed(true);
-          }}
-        />
-      ) : null}
-      {hostKeyPrompt ? (
-        <HostKeyDialog
-          prompt={hostKeyPrompt}
-          onRespond={(accept) => {
-            void bridge.respondHostKey({ requestId: hostKeyPrompt.requestId, accept });
-            setHostKeyPrompt(null);
-          }}
-        />
-      ) : null}
+  if (initializing) return <main className="app-loading"><Busy label="連接 CozyPad TT" /></main>;
+  if (!session) return <main className="app-loading"><p className="error">{error || '無法連線至 API。'}</p><button className="secondary" onClick={() => void refreshSession().catch(error => setError(message(error)))}>重新連線</button></main>;
+  if (!session.user) return <LoginScreen trustDays={session.trustDays} onLogin={refreshSession} />;
+  return <div className="app-shell">
+    <aside className="app-sidebar"><div className="brand" title="CozyPad TT"><SquareTerminal size={24} /><strong>CozyPad<span>TT</span></strong></div>
+      <span className="nav-section-label">WORKSPACE</span><nav>{navigation.map(item => <button key={item.id} aria-label={item.label} title={item.label} disabled={server?.kind === 'local' && ['terminal', 'monitor'].includes(item.id)} className={workspace === item.id ? 'active' : ''} onClick={() => { setWorkspace(item.id); if (item.id === 'terminal') setTerminalOpened(true); if (item.id === 'markdown') setMarkdownOpened(true); }}><item.icon size={18} /><span>{item.label}</span>{workspace === item.id && <i />}</button>)}</nav>
+      <div className="sidebar-bottom"><button onClick={() => setManage(true)}><FileKey2 size={18} /><span>連線管理</span><span className="count">{servers.length}</span></button><button className={workspace === 'settings' ? 'active' : ''} onClick={() => setWorkspace('settings')}><Settings2 size={18} /><span>設定</span></button><div className="user-row"><div className="avatar">{session.user.username.slice(0, 1).toUpperCase()}</div><div><strong>{session.user.username}</strong><span>{session.user.role}</span></div><IconButton label="登出" onClick={() => void logout()}><LogOut size={17} /></IconButton></div></div>
+    </aside>
+    <main className="app-main">
+    <div className="app-statusbar" aria-label="主機與版本資訊"><span><i className={`status-dot ${connected ? 'completed' : ''}`} />{workspace === 'issues' ? `回報帳號 · ${session.user.username}` : server ? server.kind === 'local' ? `本機 · ${server.name}` : `${server.username}@${server.host}:${server.port}` : '尚未選擇伺服器'}</span><span>CozyPad TT · V4.0</span></div>
+    <header className={`app-header ${workspace === 'issues' ? 'issues-header' : ''}`}><h1>{workspace === 'settings' ? '設定' : navigation.find(item => item.id === workspace)?.label}</h1>{workspace !== 'issues' && <><div className="header-divider" />
+      <label className="server-select"><PlugZap size={16} /><select aria-label="選擇伺服器" value={selected} disabled={connecting} onChange={event => { setSelected(event.target.value); if (workspace !== 'markdown') setWorkspace('agents'); }}>{!servers.length && <option value="">尚無伺服器</option>}{servers.map(item => <option key={item.id} value={item.id}>{item.kind === 'local' ? '本機' : 'SSH'} · {item.name}</option>)}</select><ChevronDown size={14} /></label>
+      <span className={`connection-badge ${connected ? 'connected' : ''}`}><i />{connected ? '已連線' : '未連線'}</span><div className="toolbar-spacer" />
+      <button className={connected ? 'secondary connect-button' : 'primary connect-button'} disabled={!server || connecting} onClick={() => {
+        if (connected) void post(`/servers/${encodeURIComponent(selected)}/disconnect`).then(() => { setConnected(false); setTerminalOpened(false); }).catch(error => setError(message(error)));
+        else void connect();
+      }}>{connecting ? <Busy label="連線中" /> : <><PlugZap size={16} />{connected ? '中斷連線' : '連線'}</>}</button><IconButton label="開啟連線管理" onClick={() => setManage(true)}><Settings2 size={18} /></IconButton></>}
+    </header>
+    {error && <div className="global-alert" role="alert"><span>{error}</span><IconButton label="關閉錯誤訊息" onClick={() => setError('')}><X size={16} /></IconButton></div>}
+    <div className="workspace-content">
+      {workspace === 'settings' && <section className="settings-workspace"><h2>帳號與登入</h2><dl><div><dt>使用者</dt><dd>{session.user.username}</dd></div><div><dt>瀏覽器驗證期限</dt><dd>{session.trustDays} 天</dd></div><div><dt>信任有效至</dt><dd>{session.trustedUntil ? new Date(session.trustedUntil).toLocaleString('zh-TW') : '未記住此瀏覽器'}</dd></div></dl><button className="secondary" onClick={() => void post('/auth/forget').then(refreshSession).catch(error => setError(message(error)))}><ShieldCheck size={17} />撤銷此瀏覽器信任</button><h2>連線</h2><button className="secondary" onClick={() => setManage(true)}><FileKey2 size={17} />管理 SSH 連線</button></section>}
+      {workspace === 'issues' && <Suspense fallback={<div className="app-loading"><Busy /></div>}><IssuesWorkspace key={session.user.username} user={session.user} /></Suspense>}
+      {markdownOpened && <Suspense fallback={<div className="app-loading"><Busy /></div>}><div className="retained-markdown" hidden={workspace !== 'markdown'}><MarkdownWorkspace key={`markdown:${session.user.username}`} server={server} connected={connected} /></div></Suspense>}
+      {!['settings', 'issues', 'markdown'].includes(workspace) && (!server || !connected) && <EmptyConnection onManage={() => setManage(true)} />}
+      {server && connected && <Suspense fallback={<div className="app-loading"><Busy /></div>}>
+        <div className="retained-agents" hidden={workspace !== 'agents'}><AgentsWorkspace key={`agents:${session.user.username}:${server.id}:${taskTarget?.serverId === server.id ? taskTarget.taskId : ''}`} server={server} servers={servers} username={session.user.username} initialTaskId={taskTarget?.serverId === server.id ? taskTarget.taskId : undefined} onOpenTask={(serverId, taskId) => { if (connecting || !servers.some(server => server.id === serverId)) return; setTaskTarget({ serverId, taskId }); setSelected(serverId); setWorkspace('agents'); void connect(serverId); }} /></div>
+        {terminalOpened && <div className="retained-terminal" hidden={workspace !== 'terminal'}><TerminalWorkspace key={`terminal:${server.id}`} server={server} /></div>}
+        {workspace === 'files' && <FilesWorkspace key={`files:${server.id}`} server={server} />}
+        {workspace === 'monitor' && <MonitorWorkspace key={`monitor:${server.id}`} server={server} />}
+      </Suspense>}
     </div>
-  );
+    </main>
+    {manage && <ConnectionManager servers={servers} onClose={() => setManage(false)} onRefresh={managerRefresh} />}
+    {hostKey && <Dialog title={hostKey.changed ? 'SSH 主機金鑰已變更' : '確認 SSH 主機'} onClose={() => setHostKey(null)}><div className="dialog-body"><p>{hostKey.changed ? '已停止連線。請向伺服器管理員確認主機金鑰。' : '請確認以下指紋與伺服器提供的金鑰相同。'}</p><code className="host-fingerprint">{hostKey.fingerprint}</code><div className="dialog-actions"><button className="secondary" onClick={() => setHostKey(null)}>取消</button>{!hostKey.changed && <button className="primary" onClick={() => {
+      const key = hostKey; setHostKey(null); void post(`/servers/${encodeURIComponent(key.id)}/trust`, { fingerprint: key.fingerprint }).then(() => connect(key.id)).catch(error => setError(message(error)));
+    }}><ShieldCheck size={16} />信任並連線</button>}</div></div></Dialog>}
+  </div>;
 }

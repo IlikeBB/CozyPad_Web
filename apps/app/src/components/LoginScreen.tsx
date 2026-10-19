@@ -1,213 +1,54 @@
 import { useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
 import QRCode from 'qrcode';
-import {
-  loginLegacy,
-  verifyLegacyTwoFactor,
-} from '../workspaces/agents/legacySshApi';
-import type {
-  LegacyAuthUser,
-  LegacyLoginResponse,
-  LegacyTwoFactorSetup,
-} from '../workspaces/agents/legacySshApi';
+import { ArrowRight, ShieldCheck, SquareTerminal, ArrowLeft } from 'lucide-react';
+import type { LoginResult } from '@cozypad/contracts';
+import { message, post } from '../api';
+import { Busy } from './Controls';
 
-type LoginStep =
-  | { kind: 'credentials' }
-  | {
-      kind: 'twoFactor';
-      challengeId: string;
-      username: string;
-      setup?: LegacyTwoFactorSetup;
-    };
-
-function getTwoFactorStep(
-  response: LegacyLoginResponse,
-  fallbackUsername: string,
-): LoginStep | null {
-  if ((response.requiresTwoFactor || response.requiresTwoFactorSetup) && response.challengeId) {
-    return {
-      kind: 'twoFactor',
-      challengeId: response.challengeId,
-      username: response.user?.username || fallbackUsername,
-      setup: response.requiresTwoFactorSetup ? response.setup : undefined,
-    };
-  }
-  return null;
-}
-
-export function LoginScreen({
-  onAuthenticated,
-}: {
-  onAuthenticated: (user: LegacyAuthUser) => void;
-}) {
-  const [step, setStep] = useState<LoginStep>({ kind: 'credentials' });
-  const [username, setUsername] = useState('admin');
+export function LoginScreen({ trustDays, onLogin }: { trustDays: number; onLogin: () => Promise<void> }) {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
-  const [qrDataUrl, setQrDataUrl] = useState('');
+  const [challenge, setChallenge] = useState<LoginResult | null>(null);
+  const [remember, setRemember] = useState(true);
+  const [qr, setQr] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-
   useEffect(() => {
     let active = true;
-    const otpauthUrl = step.kind === 'twoFactor' ? step.setup?.otpauthUrl || '' : '';
-    if (!otpauthUrl) {
-      setQrDataUrl('');
-      return () => {
-        active = false;
-      };
-    }
-
-    QRCode.toDataURL(otpauthUrl, {
-      errorCorrectionLevel: 'M',
-      margin: 1,
-      scale: 5,
-      color: {
-        dark: '#050506',
-        light: '#f5f5f5',
-      },
-    })
-      .then((dataUrl) => {
-        if (active) setQrDataUrl(dataUrl);
-      })
-      .catch(() => {
-        if (active) setQrDataUrl('');
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [step]);
-
-  const submitCredentials = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
+    if (challenge?.setup) void QRCode.toDataURL(challenge.setup.otpauthUrl, { margin: 2, width: 176 }).then(value => { if (active) setQr(value); });
+    return () => { active = false; };
+  }, [challenge]);
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault(); setBusy(true); setError('');
     try {
-      const cleanUsername = username.trim();
-      const response = await loginLegacy(cleanUsername, password);
-      const nextStep = getTwoFactorStep(response, cleanUsername);
-      if (nextStep) {
-        setStep(nextStep);
-        setPassword('');
-        return;
-      }
-      if (response.user) {
-        onAuthenticated(response.user);
-        return;
-      }
-      throw new Error(response.error || '登入回應格式不正確');
-    } catch (loginError) {
-      setError(loginError instanceof Error ? loginError.message : '登入失敗');
-    } finally {
-      setBusy(false);
-    }
+      const result = challenge
+        ? await post<LoginResult>('/auth/verify', { challengeId: challenge.challengeId, code, remember })
+        : await post<LoginResult>('/auth/login', { username, password });
+      setPassword('');
+      if (result.user) await onLogin(); else setChallenge(result);
+    } catch (error) { setError(message(error)); } finally { setBusy(false); }
   };
-
-  const submitTwoFactor = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (step.kind !== 'twoFactor') return;
-    setBusy(true);
-    setError('');
-    try {
-      const response = await verifyLegacyTwoFactor(step.challengeId, code.trim());
-      if (!response.user) {
-        throw new Error(response.error || '驗證回應格式不正確');
-      }
-      onAuthenticated(response.user);
-    } catch (verifyError) {
-      setError(verifyError instanceof Error ? verifyError.message : '驗證失敗');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <main className="login-screen">
-      <section className="login-card" aria-labelledby="login-title">
-        <header className="login-card-head">
-          <div className="login-mark" aria-hidden="true">
-            &gt;_
-          </div>
-          <div>
-            <h1 id="login-title">CozyPad</h1>
-            <span>{step.kind === 'twoFactor' ? '雙重驗證' : '登入'}</span>
-          </div>
-        </header>
-
-        {step.kind === 'credentials' ? (
-          <form className="login-form" onSubmit={(event) => void submitCredentials(event)}>
-            <label>
-              <span>帳號</span>
-              <input
-                autoComplete="username"
-                autoFocus
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              <span>密碼</span>
-              <input
-                autoComplete="current-password"
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-              />
-            </label>
-            {error ? <p className="login-error">{error}</p> : null}
-            <button type="submit" disabled={busy || !username.trim() || !password}>
-              {busy ? '登入中...' : '登入'}
-            </button>
-          </form>
-        ) : (
-          <form className="login-form" onSubmit={(event) => void submitTwoFactor(event)}>
-            <label>
-              <span>帳號</span>
-              <input value={step.username} readOnly />
-            </label>
-            {step.setup ? (
-              <div className="login-setup">
-                <strong>首次設定 TOTP</strong>
-                {qrDataUrl ? (
-                  <img className="login-qr" src={qrDataUrl} alt="TOTP QR code" />
-                ) : null}
-                <span>Secret: {step.setup.secret}</span>
-                <code>{step.setup.otpauthUrl}</code>
-              </div>
-            ) : null}
-            <label>
-              <span>驗證碼</span>
-              <input
-                autoFocus
-                inputMode="numeric"
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-                placeholder="6 位數"
-                required
-              />
-            </label>
-            {error ? <p className="login-error">{error}</p> : null}
-            <button type="submit" disabled={busy || !code.trim()}>
-              {busy ? '驗證中...' : '驗證'}
-            </button>
-            <button
-              type="button"
-              className="login-secondary"
-              onClick={() => {
-                setStep({ kind: 'credentials' });
-                setCode('');
-                setError('');
-              }}
-              disabled={busy}
-            >
-              返回
-            </button>
-          </form>
-        )}
-      </section>
-    </main>
-  );
+  return <main className="login-page">
+    <div className="login-brand"><SquareTerminal size={24} /><strong>CozyPad<span>TT</span></strong></div>
+    <section className="login-form">
+      <div className="login-mark"><ShieldCheck size={26} /></div>
+      <h1>{challenge ? (challenge.setup ? '設定雙重驗證' : '確認是你本人') : '登入工作空間'}</h1>
+      <p className="muted">{challenge ? username : 'CozyPad TT'}</p>
+      <form onSubmit={submit}>
+        {!challenge ? <>
+          <label>帳號<input autoFocus autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required disabled={busy} /></label>
+          <label>密碼<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required disabled={busy} /></label>
+        </> : <>
+          {challenge.setup && <div className="totp-setup">{qr && <img src={qr} alt="驗證器設定 QR Code" />}<code>{challenge.setup.secret}</code></div>}
+          <label>驗證碼<input autoFocus type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" value={code} onChange={event => setCode(event.target.value.replace(/\D/g, ''))} required disabled={busy} /></label>
+          <label className="checkbox"><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)} disabled={busy} />信任此瀏覽器 {trustDays} 天</label>
+        </>}
+        {error && <p className="error" role="alert">{error}</p>}
+        <button className="primary login-submit" disabled={busy}>{busy ? <Busy label="驗證中" /> : <>{challenge ? '驗證並登入' : '登入'}<ArrowRight size={17} /></>}</button>
+        {challenge && <button type="button" className="text-button" disabled={busy} onClick={() => { setChallenge(null); setCode(''); setError(''); }}><ArrowLeft size={15} />返回登入</button>}
+      </form>
+    </section>
+    <footer>COZYPAD TT <span>V4.0 · SSH WORKSPACE</span></footer>
+  </main>;
 }

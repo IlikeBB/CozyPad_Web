@@ -1,29 +1,22 @@
 {
-  "name": "cozypad4",
+  "name": "cozypad-web-tt",
+  "version": "4.0.0",
   "private": true,
-  "version": "4.0.0-alpha.0",
-  "packageManager": "pnpm@11.17.0",
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
   "scripts": {
-    "dev": "pnpm --filter @cozypad/app dev",
-    "dev:v2-web": "concurrently -k \"pnpm legacy-v2:api\" \"pnpm legacy-v2:local-cmd\" \"pnpm dev\"",
-    "dev:desktop": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev\"",
-    "dev:desktop:ssh": "concurrently -k \"pnpm --filter @cozypad/app dev\" \"pnpm --filter @cozypad/desktop dev:ssh\"",
-    "build": "pnpm -r build",
-    "test": "pnpm -r test",
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --filter @cozypad/contracts typecheck && pnpm --filter @cozypad/app build",
+    "build:connector": "node scripts/build-local-connector.mjs",
+    "start": "node apps/server/src/index.mjs",
     "typecheck": "pnpm -r typecheck",
-    "lint": "eslint .",
-    "legacy-v2:api": "node scripts/legacy-v2-api-server.mjs",
-    "legacy-v2:local-cmd": "node scripts/legacy-v2-local-cmd-bridge.mjs"
-  },
-  "dependencies": {
-    "jose": "^5.10.0",
-    "ssh2": "^1.17.0"
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "playwright test",
+    "import:legacy": "node scripts/import-legacy.mjs"
   },
   "devDependencies": {
-    "concurrently": "^10.0.4",
-    "eslint": "^10.8.0",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.65.0",
-    "vitest": "^4.1.10"
+    "@playwright/test": "1.64.0",
+    "jszip": "^3.10.2",
+    "typescript": "^6.0.3"
   }
 }
