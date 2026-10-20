@@ -11,6 +11,7 @@ import { sshFixture } from '../tests/helpers/ssh-fixture.mjs';
 import { seedDownloadFiles } from '../tests/helpers/download-fixtures.mjs';
 import { seedSearchFiles, searchRoot } from '../tests/helpers/search-fixtures.mjs';
 import { seedMarkdownBrowser, markdownRoot as markdownBrowserRoot } from '../tests/helpers/markdown-browser-fixtures.mjs';
+import { seedMediaFiles, mediaRoot } from '../tests/helpers/media-fixtures.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const directory = await mkdtemp(path.join(os.tmpdir(), 'cozypad-tt-browser-'));
@@ -19,6 +20,7 @@ fixture.directories.set('/home/tester/projects', 0o700);
 seedDownloadFiles(fixture);
 seedSearchFiles(fixture);
 seedMarkdownBrowser(fixture);
+seedMediaFiles(fixture);
 await vault.initialize();
 const salt = 'browser-test-salt';
 const user = { username: 'tester', role: 'user', salt, passwordHash: crypto.scryptSync('test-password', salt, 64).toString('base64url'),
@@ -43,6 +45,10 @@ for (let index = 0; index < 6; index++) await writeFile(path.join(markdownRoot, 
 await writeFile(path.join(markdownRoot, 'sub', 'nested.md'), '# 子資料夾\nPHYSICAL_NESTED_MARKDOWN', 'utf8');
 await store.write(store.userPath('collaborator', 'local-devices.json'), [{ id: 'local-fixture', name: 'Former Local Fixture', roots: [localRoot], platform: process.platform, tokenDigest: 'inert-fixture' }]);
 const profiles = new ProfileRepository(store, vault);
+for (const username of ['media_files', 'media_agents', 'media_errors', 'media_owner']) {
+  await store.update('auth-users.json', {}, users => { users[username] = { ...user, username }; });
+  await profiles.save(username, { name: 'Media Preview Fixture', host: '127.0.0.1', port: fixture.port, username: 'tester', defaultPath: mediaRoot, privateKey: fixture.privateKey }, { fingerprints: [fixture.fingerprint] });
+}
 for (const username of ['md_browser_remote', 'md_browser_local', 'md_browser_edit', 'md_agent_preview']) {
   await store.update('auth-users.json', {}, users => { users[username] = { ...user, username }; });
   await profiles.save(username, { name: 'Markdown Browser Fixture', host: '127.0.0.1', port: fixture.port, username: 'tester', defaultPath: username === 'md_agent_preview' ? '/home/tester/explorer-project' : markdownBrowserRoot, privateKey: fixture.privateKey }, { fingerprints: [fixture.fingerprint] });

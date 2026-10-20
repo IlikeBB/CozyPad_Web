@@ -9,6 +9,7 @@ import { IssueService } from './issues/issue-service.mjs';
 import { ProfileRepository } from './ssh/profile-repository.mjs';
 import { SshService } from './ssh/ssh-service.mjs';
 import { FilesService } from './ssh/files-service.mjs';
+import { serveMedia } from './ssh/media-preview.mjs';
 import { FileSearchService } from './ssh/file-search-service.mjs';
 import { FoldersService } from './ssh/folders-service.mjs';
 import { AgentService } from './ssh/agent-service.mjs';
@@ -45,7 +46,7 @@ async function staticFile(request, response, pathname) {
     const content = await readFile(file);
     const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
     response.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream', 'x-content-type-options': 'nosniff',
-      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
       'cache-control': path.extname(file) === '.html' ? 'no-cache' : 'public, max-age=3600' });
     response.end(request.method === 'HEAD' ? undefined : content);
   } catch { json(response, 503, { error: '前端尚未建置。開發時請使用 pnpm dev；正式啟動前請執行 pnpm build。' }); }
@@ -60,7 +61,7 @@ const server = createServer(async (request, response) => {
       await staticFile(request, response, route); return;
     }
     validateOrigin(request);
-    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true } }); return; }
+    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true, mediaPreview: true } }); return; }
     if (route === '/api/auth/session' && request.method === 'GET') { json(response, 200, await auth.session(request)); return; }
     if (route === '/api/auth/login' && request.method === 'POST') { const result = await auth.login(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
     if (route === '/api/auth/verify' && request.method === 'POST') { const result = await auth.verify(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
@@ -94,6 +95,9 @@ const server = createServer(async (request, response) => {
     if (route === '/api/agents/directories' && request.method === 'GET') { json(response, 200, await directories.list(owner, id)); return; }
     if (route === '/api/agents/directories' && request.method === 'POST') { const payload = await body(request, 16384); json(response, 200, await directories.select(owner, payload.serverId, payload.path)); return; }
     if (route === '/api/files' && request.method === 'GET') { json(response, 200, await files.list(owner, id, url.searchParams.get('path') || '~')); return; }
+    if (route === '/api/files/media' && ['GET', 'HEAD'].includes(request.method)) {
+      await serveMedia(request, response, files, owner, id, url.searchParams.get('path'), url.searchParams.get('download') === '1'); return;
+    }
     if (route === '/api/files/search' && request.method === 'POST') {
       const payload = await body(request, 8192), controller = new AbortController();
       const cancel = () => { if (!response.writableEnded) controller.abort(); };

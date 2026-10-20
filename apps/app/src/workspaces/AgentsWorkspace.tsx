@@ -15,6 +15,7 @@ import { BrowserDirectoryPicker } from '../components/BrowserDirectoryPicker';
 import { AgentFileExplorer } from '../components/AgentFileExplorer';
 import { AgentEditorTabs, type EditorTab } from '../components/AgentEditorTabs';
 import { AgentFilePreview, type FilePreview } from '../components/AgentFilePreview';
+import { mediaType } from '../../../../packages/contracts/src/media-types.mjs';
 import { attachmentAccept, attachmentLimits } from '@cozypad/contracts';
 import type { LocalMarkdownReader } from './markdown-directory.mjs';
 import { useAgentAttachments, type PendingAttachment } from './use-agent-attachments';
@@ -285,6 +286,10 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
   };
   const loadPreview = async (entry: Pick<FileEntry, 'name' | 'path'>) => {
     const generation = (previewRequests.current.get(entry.path) || 0) + 1; previewRequests.current.set(entry.path, generation);
+    if (mediaType(entry.path)) {
+      setPreviewFiles(previous => previous.map(file => file.path === entry.path ? { ...file, loading: false, error: '', version: generation } : file));
+      return;
+    }
     setPreviewFiles(previous => previous.map(file => file.path === entry.path ? { ...file, loading: true, error: '' } : file));
     try {
       const result = await api<{ path: string; content: string }>(`/files/content?${serverQuery(server.id, entry.path)}`);

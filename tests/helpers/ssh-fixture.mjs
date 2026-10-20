@@ -245,6 +245,7 @@ export async function sshFixture({ modelError = false, codexVersion = 'codex-cli
       });
       session.on('sftp', accept => {
         const sftp = accept(), handles = new Map();
+        sftp.on('end', () => sftp.end());
         let sequence = 0;
         const handle = value => { const key = String(++sequence); handles.set(key, value); return Buffer.from(key); };
         const attrs = (directory, length = 0) => ({ mode: directory ? 0o40755 : 0o100644, uid: 1000, gid: 1000, size: length, atime: 1720000000, mtime: 1720000000 });
