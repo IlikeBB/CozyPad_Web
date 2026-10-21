@@ -53,12 +53,46 @@ test('moves never overwrite a file, folder or link and concurrent moves serializ
   assert.equal(fixture.fileMap.get('/home/tester/歸檔/race.txt').toString(), 'first');
 });
 
-test('moves reject directories, symlinks, malformed paths and foreign owners without another SSH login', async t => {
+test('folder moves preserve the complete subtree with a single rename and no file reads', async t => {
+  const { fixture, ssh, moves } = await workspace(t); await ssh.connect('alice', 'server');
+  const source = '/home/tester/專案', target = '/home/tester/歸檔/專案';
+  for (const directory of [source, `${source}/nested`, `${source}/nested/empty`]) fixture.directories.set(directory, 0o700);
+  const bytes = Buffer.from([0, 255, 42]); fixture.fileMap.set(`${source}/nested/image.bin`, bytes);
+  fixture.symlinks.add(`${source}/nested/link`);
+  const result = await moves.moveFile('alice', 'server', source, '/home/tester/歸檔');
+  assert.deepEqual(result, { source, path: target, directory: '/home/tester/歸檔', moved: true, kind: 'directory' });
+  assert.equal(fixture.directories.has(source), false); assert.equal(fixture.directories.has(`${target}/nested/empty`), true);
+  assert.deepEqual(fixture.fileMap.get(`${target}/nested/image.bin`), bytes); assert.equal(fixture.symlinks.has(`${target}/nested/link`), true);
+  assert.equal((await moves.moveFile('alice', 'server', target, '/home/tester/歸檔')).moved, false);
+  assert.deepEqual(fixture.sftpRequests.filter(request => ['rename', 'open', 'readdir'].includes(request.method)), [{ method: 'rename', path: source, target }]);
+  assert.deepEqual(fixture.commands, []); assert.equal(fixture.stats.authenticated, 1);
+});
+
+test('folder moves reject self, descendants, protected directories and existing targets', async t => {
+  const { fixture, ssh, moves } = await workspace(t); await ssh.connect('alice', 'server');
+  fixture.directories.set('/home/tester/second/child', 0o700);
+  for (const destination of ['/home/tester/second', '/home/tester/second/child']) {
+    await assert.rejects(moves.moveFile('alice', 'server', '/home/tester/second', destination), error => error.status === 400);
+  }
+  for (const source of ['/', '/home/tester']) await assert.rejects(moves.moveFile('alice', 'server', source, '/home/tester/歸檔'), error => error.status === 403);
+  for (const kind of ['file', 'directory', 'link']) {
+    const target = '/home/tester/歸檔/second';
+    if (kind === 'file') fixture.fileMap.set(target, Buffer.from('RETAINED'));
+    if (kind === 'directory') fixture.directories.set(target, 0o700);
+    if (kind === 'link') fixture.symlinks.add(target);
+    await assert.rejects(moves.moveFile('alice', 'server', '/home/tester/second', '/home/tester/歸檔'), error => error.status === 409);
+    fixture.fileMap.delete(target); fixture.directories.delete(target); fixture.symlinks.delete(target);
+  }
+  assert.equal(fixture.directories.has('/home/tester/second/child'), true);
+  assert.equal(fixture.sftpRequests.filter(request => request.method === 'rename').length, 0);
+});
+
+test('moves reject symlinks, malformed paths and foreign owners without another SSH login', async t => {
   const { fixture, ssh, moves } = await workspace(t); await ssh.connect('alice', 'server');
   fixture.fileMap.set('/home/tester/link.txt', Buffer.from('link')); fixture.symlinks.add('/home/tester/link.txt');
   fixture.symlinks.add('/home/tester/linked-directory');
   for (const [source, destination, status] of [
-    ['/home/tester/second', '~/歸檔', 400], ['/home/tester/link.txt', '~/歸檔', 400],
+    ['/home/tester/link.txt', '~/歸檔', 400],
     ['/home/tester/readme.txt', '/home/tester/linked-directory', 400], ['/home/tester/missing.txt', '~/歸檔', 404],
     ['/home/tester/readme.txt', '~/missing', 404], ['../readme.txt', '~/歸檔', 400],
     ['/home/tester/../readme.txt', '~/歸檔', 400], ['/home/tester/readme.txt', '/bad\0path', 400],

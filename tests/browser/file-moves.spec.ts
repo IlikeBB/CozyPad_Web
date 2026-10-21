@@ -86,3 +86,61 @@ test('a delayed drop remains single-submit and exposes a folder drop target', as
   await target.dispatchEvent('drop', { dataTransfer: transfer }); expect(requests).toBe(1); release();
   await expect(page.getByRole('button', { name: moveFileName, exact: true })).toHaveCount(0); expect(requests).toBe(1);
 });
+
+test('Files moves complete folders without rereading the list and offers a mobile folder action', async ({ page, context }) => {
+  const errors: string[] = [], lists: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => { const url = new URL(request.url()); if (url.pathname === '/api/files') lists.push(url.searchParams.get('path')!); });
+  await login(page, 'folder_files'); await page.getByRole('button', { name: 'Files', exact: true }).click();
+  const folder = page.getByRole('button', { name: 'bundle', exact: true }), archive = page.getByRole('button', { name: 'archive', exact: true });
+  await expect(folder).toHaveAttribute('draggable', 'true'); const before = lists.length;
+  await folder.dragTo(archive); await expect(folder).toHaveCount(0); await expect(page.getByRole('status')).toContainText('已將');
+  expect(lists).toHaveLength(before);
+  const profile = (await (await context.request.get('/api/servers')).json())[0];
+  const nested = await context.request.get(`/api/files/content?${new URLSearchParams({ serverId: profile.id, path: `${profile.defaultPath}/archive/bundle/nested/note.txt` })}`);
+  expect((await nested.json()).content).toContain('NESTED_CONTENT_PRESERVED');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: '移動資料夾 other', exact: true }).focus(); await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: '移動資料夾', exact: true });
+  await dialog.getByLabel('移動目的地資料夾').fill(`${profile.defaultPath}/other`); await dialog.getByRole('button', { name: '移動', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('不能將資料夾移入自己');
+  await dialog.getByLabel('移動目的地資料夾').fill(`${profile.defaultPath}/archive`); await dialog.getByRole('button', { name: '移動', exact: true }).click();
+  await expect(dialog).toHaveCount(0); await expect(page.getByRole('button', { name: 'other', exact: true })).toHaveCount(0);
+  expect(lists).toHaveLength(before); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/folder-move-mobile.png', fullPage: true });
+  await archive.click(); await expect(page.getByRole('button', { name: 'bundle', exact: true })).toBeVisible(); await page.getByRole('button', { name: 'bundle', exact: true }).click();
+  await page.getByRole('button', { name: 'nested', exact: true }).click(); await page.getByRole('button', { name: 'note.txt', exact: true }).click();
+  await expect(page.getByLabel('檔案內容', { exact: true })).toHaveValue(/NESTED_CONTENT_PRESERVED/); expect(errors).toEqual([]);
+});
+
+test('moving an expanded folder retargets descendant previews, cwd, drafts and cached child listings', async ({ page }) => {
+  const errors: string[] = [], reads: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => { const url = new URL(request.url()); if (['/api/files', '/api/files/content'].includes(url.pathname)) reads.push(url.pathname + ':' + url.searchParams.get('path')); });
+  await login(page, 'folder_agents');
+  await page.getByRole('treeitem', { name: '資料夾 bundle', exact: true }).click(); await page.getByRole('treeitem', { name: '資料夾 nested', exact: true }).click();
+  await page.getByLabel('Codex 訊息', { exact: true }).fill('資料夾移動後保留草稿');
+  await page.getByRole('treeitem', { name: '檔案 note.txt', exact: true }).click(); await expect(page.getByLabel('檔案預覽內容')).toContainText('NESTED_CONTENT_PRESERVED');
+  const before = reads.length;
+  await page.getByRole('treeitem', { name: '資料夾 bundle', exact: true }).dragTo(page.getByRole('treeitem', { name: '資料夾 archive', exact: true }));
+  await expect(page.getByRole('tab', { name: 'note.txt', exact: true })).toHaveAttribute('title', '/home/tester/folder_agents/archive/bundle/nested/note.txt');
+  await expect(page.getByLabel('目前 SSH pwd', { exact: true })).toHaveText('/home/tester/folder_agents/archive/bundle/nested');
+  await expect(page.getByLabel('檔案預覽內容')).toContainText('NESTED_CONTENT_PRESERVED'); expect(reads).toHaveLength(before);
+  await page.getByRole('tab', { name: '新對話 1', exact: true }).click(); await expect(page.getByLabel('Codex 訊息', { exact: true })).toHaveValue('資料夾移動後保留草稿');
+  await page.getByRole('treeitem', { name: '資料夾 archive', exact: true }).click();
+  await expect(page.getByRole('treeitem', { name: '檔案 duplicate.txt', exact: true })).toHaveCount(2);
+  await expect(page.getByRole('treeitem', { name: '檔案 note.txt', exact: true })).toBeVisible();
+  expect(reads).toHaveLength(before + 1);
+  await page.screenshot({ path: 'test-results/folder-move-explorer.png', fullPage: true }); expect(errors).toEqual([]);
+});
+
+test('directory listing starts alongside cwd validation and repeated clicks share the in-flight read', async ({ page }) => {
+  await login(page, 'explorer_fast'); const bundle = page.getByRole('treeitem', { name: '資料夾 bundle', exact: true }); await expect(bundle).toBeVisible();
+  let selections = 0, listings = 0, release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/agents/directories', async route => { if (route.request().method() === 'POST') { selections++; await gate; } await route.continue(); });
+  await page.route('**/api/files?*', async route => { if (new URL(route.request().url()).searchParams.get('path')?.endsWith('/bundle')) { listings++; await gate; } await route.continue(); });
+  try {
+    await bundle.click(); await expect.poll(() => selections).toBe(1); await expect.poll(() => listings).toBe(1);
+    await bundle.click(); await expect.poll(() => selections).toBe(2); expect(listings).toBe(1);
+  } finally { release(); }
+  await expect(page.getByRole('treeitem', { name: '資料夾 nested', exact: true })).toBeVisible();
+  await expect(page.getByLabel('目前 SSH pwd', { exact: true })).toHaveText('/home/tester/explorer_fast/bundle'); expect(listings).toBe(1);
+});

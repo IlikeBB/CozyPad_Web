@@ -7,6 +7,9 @@ export class FilesService {
   async location(sftp, requested = '~', base = '~') {
     requested = virtualDirectoryPath(requested, sftp.platform); base = virtualDirectoryPath(base, sftp.platform);
     if ([requested, base].some(value => typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value))) throw Object.assign(new Error('檔案路徑不正確。'), { status: 400 });
+    // The browser normally supplies absolute paths. Resolving the SSH home for
+    // those paths adds a network round trip without affecting the result.
+    if (requested.startsWith('/')) return path.posix.resolve('/', requested);
     const home = await invoke(sftp, 'realpath', '.');
     const resolve = value => value === '~' ? home : value.startsWith('~/') ? path.posix.join(home, value.slice(2)) : path.posix.resolve(home, value);
     return requested === '~' || requested.startsWith('~/') ? resolve(requested) : path.posix.resolve(resolve(base), requested);

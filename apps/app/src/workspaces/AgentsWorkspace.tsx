@@ -17,6 +17,7 @@ import { AgentEditorTabs, type EditorTab } from '../components/AgentEditorTabs';
 import { AgentFilePreview, type FilePreview } from '../components/AgentFilePreview';
 import { mediaType } from '../../../../packages/contracts/src/media-types.mjs';
 import type { FileMove } from '../components/use-file-move';
+import { pathAfterMove } from '../../../../packages/contracts/src/file-moves.mjs';
 import { attachmentAccept, attachmentLimits } from '@cozypad/contracts';
 import type { LocalMarkdownReader } from './markdown-directory.mjs';
 import { useAgentAttachments, type PendingAttachment } from './use-agent-attachments';
@@ -308,11 +309,14 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
     if (overlay) closeLeft();
   };
   const fileMoved = (result: FileMove) => {
-    const opened = previewFiles.some(file => file.path === result.source);
-    previewRequests.current.set(result.source, (previewRequests.current.get(result.source) || 0) + 1);
-    setPreviewFiles(previous => previous.filter(file => file.path !== result.path || file.path === result.source).map(file => file.path === result.source ? { ...file, path: result.path, name: result.path.split('/').at(-1) || file.name, error: '', version: (file.version || 0) + 1 } : file));
-    setPreviewPath(previous => previous === result.source ? result.path : previous);
-    if (opened) void loadPreview({ path: result.path, name: result.path.split('/').at(-1) || '' });
+    const affected = previewFiles.filter(file => pathAfterMove(file.path, result) !== file.path);
+    const targets = new Set(affected.map(file => pathAfterMove(file.path, result)));
+    for (const file of affected) previewRequests.current.set(file.path, (previewRequests.current.get(file.path) || 0) + 1);
+    setPreviewFiles(previous => previous.filter(file => !targets.has(file.path) || pathAfterMove(file.path, result) !== file.path).map(file => pathAfterMove(file.path, result) === file.path ? file : { ...file, path: pathAfterMove(file.path, result), error: '', version: (file.version || 0) + 1 }));
+    setPreviewPath(previous => previous ? pathAfterMove(previous, result) : previous);
+    setPath(previous => pathAfterMove(previous, result));
+    for (const [key, draft] of drafts.current) drafts.current.set(key, { ...draft, path: pathAfterMove(draft.path, result) });
+    for (const file of affected) if (file.loading || file.error) void loadPreview({ path: pathAfterMove(file.path, result), name: file.name });
   };
   const closeTab = (key: string, confirmed = false) => {
     if (tabsDisabled) return;

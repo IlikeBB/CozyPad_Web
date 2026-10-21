@@ -64,22 +64,28 @@ export class FoldersService {
   async moveFile(owner, id, source, destination) {
     for (const value of [source, destination]) if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw problem('來源檔案或目的地路徑不正確。');
     if (!source.startsWith('/') || source.startsWith('//') || source.split('/').some(part => ['.', '..'].includes(part))) throw problem('請提供檔案的完整路徑。');
+    if (source === '/') throw problem('不能移動根目錄或 SSH 家目錄。', 403);
     const name = validName(path.posix.basename(source));
     if (source.endsWith('/')) throw problem('請選擇一般檔案。');
-    return this.operate(owner, id, path.posix.dirname(source), async (sftp, parent) => {
+    return this.operate(owner, id, path.posix.dirname(source), async (sftp, parent, home) => {
       const file = path.posix.join(parent, name);
+      this.protected(file, home);
       const attributes = await invoke(sftp, 'lstat', file);
-      if (!attributes.isFile() || attributes.isSymbolicLink()) throw problem('只能移動一般檔案，請勿拖曳資料夾或符號連結。');
+      if (attributes.isSymbolicLink() || !attributes.isFile() && !attributes.isDirectory()) throw problem('只能移動一般檔案或資料夾，不支援符號連結。');
+      const kind = attributes.isDirectory() ? 'directory' : 'file';
+      if (kind === 'directory') await directory(sftp, file);
       const targetDirectory = await this.files.location(sftp, destination);
       await directory(sftp, targetDirectory);
+      if (kind === 'directory' && (targetDirectory === file || targetDirectory.startsWith(`${file}/`))) throw problem('不能將資料夾移入自己或自己的子資料夾。');
       const target = path.posix.join(targetDirectory, name);
+      this.protected(target, home);
       if (target.length > 4096) throw problem('目的地檔案路徑過長。');
-      if (file === target) return { source, path: target, directory: targetDirectory, moved: false };
+      if (file === target) return { source, path: target, directory: targetDirectory, moved: false, kind };
       await missing(sftp, target);
       // SFTP v3 rename refuses an existing target; never use the overwriting
       // OpenSSH POSIX extension or a copy/delete fallback for this user action.
       await invoke(sftp, 'rename', file, target);
-      return { source, path: target, directory: targetDirectory, moved: true };
+      return { source, path: target, directory: targetDirectory, moved: true, kind };
     });
   }
   async delete(owner, id, parent, name, recursive = false, confirmation = '') {

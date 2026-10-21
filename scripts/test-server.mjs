@@ -46,7 +46,7 @@ for (let index = 0; index < 6; index++) await writeFile(path.join(markdownRoot, 
 await writeFile(path.join(markdownRoot, 'sub', 'nested.md'), '# 子資料夾\nPHYSICAL_NESTED_MARKDOWN', 'utf8');
 await store.write(store.userPath('collaborator', 'local-devices.json'), [{ id: 'local-fixture', name: 'Former Local Fixture', roots: [localRoot], platform: process.platform, tokenDigest: 'inert-fixture' }]);
 const profiles = new ProfileRepository(store, vault);
-for (const username of ['move_files', 'move_agents', 'move_errors', 'move_slow']) {
+for (const username of ['move_files', 'move_agents', 'move_errors', 'move_slow', 'folder_files', 'folder_agents', 'explorer_fast']) {
   const moveRoot = `/home/tester/${username}`; seedFileMoves(fixture, moveRoot);
   await store.update('auth-users.json', {}, users => { users[username] = { ...user, username }; });
   await profiles.save(username, { name: 'File Move Fixture', host: '127.0.0.1', port: fixture.port, username: 'tester', defaultPath: moveRoot, privateKey: fixture.privateKey }, { fingerprints: [fixture.fingerprint] });

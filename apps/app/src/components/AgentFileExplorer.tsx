@@ -6,6 +6,7 @@ import { api, message, post, serverQuery } from '../api';
 import { IconButton } from './Controls';
 import { useFileMove, parentDirectory, type FileMove } from './use-file-move';
 import { FileMoveDialog } from './FileMoveDialog';
+import { pathAfterMove, treeAfterMove } from '../../../../packages/contracts/src/file-moves.mjs';
 
 export function AgentFileExplorer({ server, path, contextKey, enabled, disabled, onPath, onFile, onBusy, onFileMoved, onMoving }: {
   server: ServerProfile; path: string; contextKey: string; enabled: boolean; disabled: boolean;
@@ -16,29 +17,33 @@ export function AgentFileExplorer({ server, path, contextKey, enabled, disabled,
   const [expanded, setExpanded] = useState(new Set<string>()), [pending, setPending] = useState(''), [error, setError] = useState('');
   const [notice, setNotice] = useState(''), [moveTarget, setMoveTarget] = useState<FileEntry | null>(null);
   const request = useRef(0), rootPath = useRef(''), scope = useRef(''), chosen = useRef('');
+  const listings = useRef(new Map<string, Promise<{ path: string; entries: FileEntry[] }>>());
+  const list = (target: string) => {
+    const key = `${server.id}:${target}`;
+    const existing = listings.current.get(key); if (existing) return existing;
+    const work = api<{ path: string; entries: FileEntry[] }>(`/files?${serverQuery(server.id, target)}`).finally(() => { if (listings.current.get(key) === work) listings.current.delete(key); });
+    listings.current.set(key, work); return work;
+  };
   const callbacks = useRef({ onPath, onFile }); callbacks.current = { onPath, onFile };
   useEffect(() => () => { request.current++; onBusy(false); }, [onBusy]);
   const moves = useFileMove({ serverId: server.id, disabled: disabled || !!pending, onError: setError, onNotice: setNotice, onBusy: value => { onBusy(value); onMoving(value); }, onMoved: async result => {
+    setEntries(previous => treeAfterMove(previous, result));
+    setExpanded(previous => new Set([...previous].map(directory => pathAfterMove(directory, result))));
+    rootPath.current = pathAfterMove(rootPath.current, result); chosen.current = pathAfterMove(chosen.current, result);
+    setRoot(previous => pathAfterMove(previous, result));
     onFileMoved(result);
-    const current = request.current;
-    const directories = [...new Set([parentDirectory(result.source), result.directory])];
-    const refreshed = await Promise.all(directories.map(async directory => [directory, (await api<{ entries: FileEntry[] }>(`/files?${serverQuery(server.id, directory)}`)).entries] as const));
-    if (current !== request.current) return;
-    setEntries(previous => ({ ...previous, ...Object.fromEntries(refreshed) }));
-    setExpanded(previous => new Set([...previous, result.directory]));
   } });
   const unavailable = disabled || moves.moving;
 
   const loadRoot = async (target: string, select = false, current = ++request.current) => {
     setPending(target); setError(''); onBusy(select);
     try {
-      const result = await api<{ path: string; entries: FileEntry[] }>(`/files?${serverQuery(server.id, target)}`);
+      const [result, selected] = await Promise.all([
+        list(target),
+        select ? post<{ path: string }>('/agents/directories', { serverId: server.id, path: target }) : Promise.resolve(null)
+      ]);
       if (current !== request.current) return;
-      let resolved = result.path;
-      if (select) {
-        const selected = await post<{ path: string }>('/agents/directories', { serverId: server.id, path: result.path });
-        if (current !== request.current) return; resolved = selected.path;
-      }
+      const resolved = selected?.path || result.path;
       rootPath.current = resolved; chosen.current = select || path === target ? resolved : path;
       setRoot(resolved); setEntries({ [resolved]: result.entries }); setExpanded(new Set([resolved]));
       if (select || path === target) callbacks.current.onPath(resolved);
@@ -54,9 +59,10 @@ export function AgentFileExplorer({ server, path, contextKey, enabled, disabled,
     const within = path === rootPath.current || path.startsWith(`${rootPath.current}/`);
     if (!rootPath.current || (!within && path !== chosen.current)) {
       const current = ++request.current; setPending(path);
-      const timer = window.setTimeout(() => void loadRoot(path, false, current), 250);
+      let cancelled = false;
+      queueMicrotask(() => { if (!cancelled && current === request.current) void loadRoot(path, false, current); });
       return () => {
-        window.clearTimeout(timer);
+        cancelled = true;
         if (current === request.current) { request.current++; setPending(''); onBusy(false); }
       };
     }
@@ -67,15 +73,15 @@ export function AgentFileExplorer({ server, path, contextKey, enabled, disabled,
     const current = ++request.current; setPending(entry.path); setError(''); onBusy(true);
     try {
       const target = entry.directory ? entry.path : entry.path.slice(0, entry.path.lastIndexOf('/')) || '/';
-      const result = target === path ? { path } : await post<{ path: string }>('/agents/directories', { serverId: server.id, path: target });
+      // Listing and cwd validation use independent SFTP channels on the same
+      // authenticated connection. Neither needs to wait for the other.
+      const [result, children] = await Promise.all([
+        target === path ? Promise.resolve({ path }) : post<{ path: string }>('/agents/directories', { serverId: server.id, path: target }),
+        entry.directory && !entries[entry.path] ? list(entry.path) : Promise.resolve(null)
+      ]);
       if (current !== request.current) return;
       if (entry.directory) {
-        let children = entries[entry.path];
-        if (!children) {
-          const loaded = (await api<{ entries: FileEntry[] }>(`/files?${serverQuery(server.id, entry.path)}`)).entries;
-          if (current !== request.current) return;
-          setEntries(previous => ({ ...previous, [entry.path]: loaded }));
-        }
+        if (children) setEntries(previous => ({ ...previous, [entry.path]: children.entries }));
         setExpanded(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
       }
       chosen.current = result.path; callbacks.current.onPath(result.path);
@@ -93,7 +99,7 @@ export function AgentFileExplorer({ server, path, contextKey, enabled, disabled,
       {pending === entry.path ? <LoaderCircle size={14} className="spin" /> : entry.directory ? expanded.has(entry.path) ? <ChevronDown size={14} /> : <ChevronRight size={14} /> : <span className="explorer-indent" />}
       {entry.directory ? expanded.has(entry.path) ? <FolderOpen size={16} className="folder-icon" /> : <Folder size={16} className="folder-icon" /> : <FileText size={16} className="muted" />}<span>{entry.name}</span>
     </button>
-    {!entry.directory && <IconButton className="explorer-move" label={`移動檔案 ${entry.name}`} disabled={unavailable || !!pending} onClick={() => { setError(''); setMoveTarget(entry); }}><FolderInput size={14} /></IconButton>}
+    <IconButton className="explorer-move" label={`移動${entry.directory ? '資料夾' : '檔案'} ${entry.name}`} disabled={unavailable || !!pending} onClick={() => { setError(''); setMoveTarget(entry); }}><FolderInput size={14} /></IconButton>
     </div>
     {entry.directory && expanded.has(entry.path) && <div role="group">{rows(entry.path, depth + 1)}{entries[entry.path]?.length === 0 && <p className="explorer-empty" style={{ paddingLeft: 38 + depth * 14 }}>空目錄</p>}</div>}
   </div>);
@@ -110,7 +116,7 @@ export function AgentFileExplorer({ server, path, contextKey, enabled, disabled,
       {!!pending && !root && <p className="explorer-empty"><LoaderCircle size={15} className="spin" />讀取目錄…</p>}
       {root && entries[root]?.length === 0 && !pending && <p className="explorer-empty">空目錄</p>}
     </div>
-    <div className="explorer-hint" role={moves.moving ? 'status' : undefined}>{moves.moving ? '正在移動檔案…' : moves.dropTarget ? `放開即可移動到 ${displayDirectoryPath(moves.dropTarget, server.platform)}` : '點選資料夾切換 pwd；點選檔案預覽。可拖曳檔案到資料夾。'}</div>
+    <div className="explorer-hint" role={moves.moving ? 'status' : undefined}>{moves.moving ? '正在移動項目…' : moves.dropTarget ? `放開即可移動到 ${displayDirectoryPath(moves.dropTarget, server.platform)}` : '點選資料夾切換 pwd；點選檔案預覽。可拖曳檔案與資料夾。'}</div>
     {moveTarget && <FileMoveDialog file={moveTarget} onMove={destination => moves.moveFile(moveTarget.path, destination, false)} onClose={() => setMoveTarget(null)} />}
   </div>;
 }
