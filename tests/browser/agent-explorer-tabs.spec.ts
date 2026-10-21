@@ -87,7 +87,7 @@ test('Explorer previews files and independent conversation tabs retain their dra
   await expect(page.getByRole('dialog', { name: '檔案總管', exact: true })).toBeVisible();
   const note = page.getByRole('treeitem', { name: '檔案 筆記.md', exact: true }); await expect(note).toBeVisible();
   await page.getByRole('button', { name: '收合檔案總管抽屜', exact: true }).focus();
-  await page.keyboard.press('Shift+Tab'); await expect(note).toBeFocused();
+  await page.keyboard.press('Shift+Tab'); await expect(page.getByRole('button', { name: '移動檔案 筆記.md', exact: true })).toBeFocused();
   await page.keyboard.press('Escape'); await expect(page.getByRole('button', { name: '檔案總管抽屜', exact: true })).toBeFocused();
   expect(errors).toEqual([]);
 });

@@ -297,6 +297,11 @@ export async function sshFixture({ modelError = false, codexVersion = 'codex-cli
           directories.delete(directory); sftp.status(id, STATUS.OK);
         });
         sftp.on('RENAME', (id, source, target) => {
+          sftpRequests.push({ method: 'rename', path: source, target });
+          if (fileMap.has(source)) {
+            if (directories.has(target) || fileMap.has(target) || symlinks.has(target) || !directories.has(target.slice(0, target.lastIndexOf('/')) || '/')) { sftp.status(id, STATUS.FAILURE); return; }
+            fileMap.set(target, fileMap.get(source)); fileMap.delete(source); sftp.status(id, STATUS.OK); return;
+          }
           if (!directories.has(source)) { sftp.status(id, STATUS.NO_SUCH_FILE); return; }
           if (directories.has(target) || fileMap.has(target) || symlinks.has(target) || !directories.has(target.slice(0, target.lastIndexOf('/')) || '/')) { sftp.status(id, STATUS.FAILURE); return; }
           for (const map of [directories, fileMap]) for (const [file, value] of [...map]) if (file === source || file.startsWith(`${source}/`)) {

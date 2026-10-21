@@ -30,6 +30,7 @@ The optional Windows Cloudflare launcher requires your own tunnel. Copy `scripts
 - Per-user SSH connection management: add, edit, delete, and upload/import `ssh_config` with matching private keys.
 - Interactive SSH terminal using xterm.js and WebSocket, with heartbeat and retained-shell reconnection.
 - SFTP directory browsing, text editing with revision checks, upload and download.
+- Drag existing files onto folders in Files or the Codex explorer to move them on the selected SSH server. Conflicting names are never overwritten; open previews and unsaved editors follow the new path. A Move action also supports keyboard and touch input.
 - Inline image and video previews in Files and Codex file tabs. Images support fit-to-window and zoom; videos use native playback, seeking, volume and fullscreen controls. Authenticated byte-range streaming supports large media without buffering the whole file. PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG, MP4/M4V, WebM, OGV and MOV are recognized; decoding depends on browser support. Unreadable media offers retry and download.
 - Remote Codex tasks, expandable process records, streaming responses, persistent history, continuation, mid-turn guidance and cancellation. Interactive questions open a selection dialog and wait for explicit confirmation.
 - Streaming Codex output does not use a cumulative 4 MB transport limit; individual protocol records and displayed history remain bounded.

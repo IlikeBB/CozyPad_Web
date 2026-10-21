@@ -61,7 +61,7 @@ const server = createServer(async (request, response) => {
       await staticFile(request, response, route); return;
     }
     validateOrigin(request);
-    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true, mediaPreview: true } }); return; }
+    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true, mediaPreview: true, fileMoves: true } }); return; }
     if (route === '/api/auth/session' && request.method === 'GET') { json(response, 200, await auth.session(request)); return; }
     if (route === '/api/auth/login' && request.method === 'POST') { const result = await auth.login(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
     if (route === '/api/auth/verify' && request.method === 'POST') { const result = await auth.verify(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
@@ -112,6 +112,10 @@ const server = createServer(async (request, response) => {
         : request.method === 'PUT' ? await folders.rename(owner, payload.serverId, payload.parent, payload.name, payload.newName)
         : await folders.delete(owner, payload.serverId, payload.parent, payload.name, payload.recursive ?? false, payload.confirmation);
       json(response, request.method === 'POST' ? 201 : 200, result); return;
+    }
+    if (route === '/api/files/move' && request.method === 'POST') {
+      const payload = await body(request, 16384);
+      json(response, 200, await folders.moveFile(owner, payload.serverId, payload.source, payload.destination)); return;
     }
     if (route === '/api/files/content' && request.method === 'GET') {
       const result = await files.read(owner, id, url.searchParams.get('path'));

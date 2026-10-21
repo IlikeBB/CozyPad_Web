@@ -16,6 +16,7 @@ import { AgentFileExplorer } from '../components/AgentFileExplorer';
 import { AgentEditorTabs, type EditorTab } from '../components/AgentEditorTabs';
 import { AgentFilePreview, type FilePreview } from '../components/AgentFilePreview';
 import { mediaType } from '../../../../packages/contracts/src/media-types.mjs';
+import type { FileMove } from '../components/use-file-move';
 import { attachmentAccept, attachmentLimits } from '@cozypad/contracts';
 import type { LocalMarkdownReader } from './markdown-directory.mjs';
 import { useAgentAttachments, type PendingAttachment } from './use-agent-attachments';
@@ -57,6 +58,7 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
   const [path, setPath] = useState(server.defaultPath);
   const [directoryBusy, setDirectoryBusy] = useState(false), [localBusy, setLocalBusy] = useState(false);
   const [explorerBusy, setExplorerBusy] = useState(false);
+  const [fileMoving, setFileMoving] = useState(false);
   const [localContext, setLocalContext] = useState<BrowserDirectoryContext | undefined>(undefined);
   const markdownReader = useRef<LocalMarkdownReader | undefined>(undefined), markdownAbort = useRef<AbortController | null>(null);
   const [preparingMarkdown, setPreparingMarkdown] = useState(false);
@@ -103,7 +105,7 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
     : !running && !cooperationReady ? canCooperate ? '請選擇協同端，或改用一般處理。' : '此對話未載入協同工具，請新增對話或改用一般處理。'
     : '';
   const canSubmit = (!!prompt.trim() || (!running && !!attachments.files.length)) && !sendBlockedReason;
-  const tabsDisabled = busy || attachments.reading || loadingTasks;
+  const tabsDisabled = busy || attachments.reading || loadingTasks || fileMoving;
   const closeLeft = useCallback(() => { setDrawers(previous => ({ ...previous, left: false })); setHovered(previous => previous === 'left' ? null : previous); }, []);
   const closeRight = useCallback(() => { setDrawers(previous => ({ ...previous, right: false })); setHovered(previous => previous === 'right' ? null : previous); }, []);
   const toggleDrawer = (side: 'left' | 'right') => {
@@ -305,6 +307,13 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
     }
     if (overlay) closeLeft();
   };
+  const fileMoved = (result: FileMove) => {
+    const opened = previewFiles.some(file => file.path === result.source);
+    previewRequests.current.set(result.source, (previewRequests.current.get(result.source) || 0) + 1);
+    setPreviewFiles(previous => previous.filter(file => file.path !== result.path || file.path === result.source).map(file => file.path === result.source ? { ...file, path: result.path, name: result.path.split('/').at(-1) || file.name, error: '', version: (file.version || 0) + 1 } : file));
+    setPreviewPath(previous => previous === result.source ? result.path : previous);
+    if (opened) void loadPreview({ path: result.path, name: result.path.split('/').at(-1) || '' });
+  };
   const closeTab = (key: string, confirmed = false) => {
     if (tabsDisabled) return;
     if (key.startsWith('file:')) {
@@ -364,7 +373,7 @@ export function AgentsWorkspace({ server, servers, username, initialTaskId, onOp
     <div className={`agent-panes ${leftOpen ? 'left-open' : ''} ${rightOpen ? 'right-open' : ''}`}>
     {overlay && (leftOpen || rightOpen) && <div className="drawer-backdrop" onClick={() => { setDrawers({ left: false, right: false }); setHovered(null); }} />}
     <AgentDrawer side="left" title={leftMode === 'files' ? '檔案總管' : '工作階段'} open={leftOpen} overlay={overlay} interactive={drawers.left} onOpen={() => toggleDrawer('left')} onClose={closeLeft} onHover={() => hoverDrawer('left')} onLeave={() => leaveDrawer('left')}>
-      <div className="agent-drawer-content" hidden={leftMode !== 'files'}><AgentFileExplorer server={server} path={path} contextKey={tabKey} enabled={!loadingTasks && leftMode === 'files' && leftOpen} disabled={busy || loadingTasks || attachments.reading || directoryBusy} onPath={setPath} onFile={openPreview} onBusy={setExplorerBusy} /></div>
+      <div className="agent-drawer-content" hidden={leftMode !== 'files'}><AgentFileExplorer server={server} path={path} contextKey={tabKey} enabled={!loadingTasks && leftMode === 'files' && leftOpen} disabled={busy || loadingTasks || attachments.reading || directoryBusy} onPath={setPath} onFile={openPreview} onBusy={setExplorerBusy} onMoving={setFileMoving} onFileMoved={fileMoved} /></div>
       <div className="agent-drawer-content" hidden={leftMode !== 'history'}>
       <AgentTaskList tasks={tasks} selected={selected} search={search} stage={stage} loading={loadingTasks} onSearch={setSearch} onStage={setStage} onSelect={selectTask} onDelete={task => { setDeleteTarget(task); setDeleteError(''); }} onNew={newTask} />
       </div>

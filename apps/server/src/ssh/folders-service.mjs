@@ -61,6 +61,27 @@ export class FoldersService {
       return { path: target };
     });
   }
+  async moveFile(owner, id, source, destination) {
+    for (const value of [source, destination]) if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw problem('來源檔案或目的地路徑不正確。');
+    if (!source.startsWith('/') || source.startsWith('//') || source.split('/').some(part => ['.', '..'].includes(part))) throw problem('請提供檔案的完整路徑。');
+    const name = validName(path.posix.basename(source));
+    if (source.endsWith('/')) throw problem('請選擇一般檔案。');
+    return this.operate(owner, id, path.posix.dirname(source), async (sftp, parent) => {
+      const file = path.posix.join(parent, name);
+      const attributes = await invoke(sftp, 'lstat', file);
+      if (!attributes.isFile() || attributes.isSymbolicLink()) throw problem('只能移動一般檔案，請勿拖曳資料夾或符號連結。');
+      const targetDirectory = await this.files.location(sftp, destination);
+      await directory(sftp, targetDirectory);
+      const target = path.posix.join(targetDirectory, name);
+      if (target.length > 4096) throw problem('目的地檔案路徑過長。');
+      if (file === target) return { source, path: target, directory: targetDirectory, moved: false };
+      await missing(sftp, target);
+      // SFTP v3 rename refuses an existing target; never use the overwriting
+      // OpenSSH POSIX extension or a copy/delete fallback for this user action.
+      await invoke(sftp, 'rename', file, target);
+      return { source, path: target, directory: targetDirectory, moved: true };
+    });
+  }
   async delete(owner, id, parent, name, recursive = false, confirmation = '') {
     validName(name);
     if (typeof recursive !== 'boolean' || (recursive && confirmation !== name)) throw problem('刪除所有內容前，請輸入完整資料夾名稱確認。');
