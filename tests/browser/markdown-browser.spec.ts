@@ -9,7 +9,7 @@ async function login(page: Page, username: string) {
   await page.getByRole('button', { name: '登入', exact: true }).click();
   await page.getByLabel('驗證碼', { exact: true }).fill(generateTotp('GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'));
   await page.getByRole('button', { name: '驗證並登入' }).click();
-  await expect(page.getByRole('button', { name: 'Markdown', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Files', exact: true })).toBeVisible();
 }
 async function connect(page: Page, context: BrowserContext) {
   const servers = await (await context.request.get('/api/servers')).json();
@@ -18,7 +18,9 @@ async function connect(page: Page, context: BrowserContext) {
   await expect(page.getByText('已連線', { exact: true })).toBeVisible();
 }
 
-test('SSH Markdown browser renders formatted documents by default and follows relative documents safely on all screen sizes', async ({ page, context }) => {
+// The standalone reader is temporarily hidden at the user's request. Keep its
+// coverage available for re-enabling; Files and Codex previews remain active below.
+test.skip('SSH Markdown browser renders formatted documents by default and follows relative documents safely on all screen sizes', async ({ page, context }) => {
   const errors: string[] = [], writes: string[] = []; let connections = 0;
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => {
@@ -67,7 +69,7 @@ test('SSH Markdown browser renders formatted documents by default and follows re
   expect(connections).toBe(1); expect(writes).toEqual([]); expect(errors).toEqual([]);
 });
 
-test('local Markdown opens without SSH, supports multiple files and source mode, preserves reading across navigation and rejects oversized files', async ({ page }) => {
+test.skip('local Markdown opens without SSH, supports multiple files and source mode, preserves reading across navigation and rejects oversized files', async ({ page }) => {
   const networkWrites: string[] = [], errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => { if (['POST', 'PUT'].includes(request.method()) && /\/api\/(?:files|tasks|servers)/.test(request.url())) networkWrites.push(request.url()); });
@@ -129,4 +131,8 @@ test('Agents Markdown file tabs open in formatted preview and can switch to orig
   await expect(page.getByLabel('檔案預覽內容', { exact: true })).toContainText('# 筆記');
   await page.getByRole('button', { name: '預覽', exact: true }).click();
   await expect(page.getByRole('heading', { name: '筆記', exact: true })).toBeVisible();
+  for (const width of [320, 768, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.screenshot({ path: `test-results/markdown-preview-navigation-${width}.png`, fullPage: true });
+  }
 });

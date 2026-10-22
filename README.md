@@ -35,7 +35,7 @@ The optional Windows Cloudflare launcher requires your own tunnel. Copy `scripts
 - Inline image and video previews in Files and Codex file tabs. Images support fit-to-window and zoom; videos use native playback, seeking, volume and fullscreen controls. Authenticated byte-range streaming supports large media without buffering the whole file. PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG, MP4/M4V, WebM, OGV and MOV are recognized; decoding depends on browser support. Unreadable media offers retry and download.
 - Remote Codex tasks, expandable process records, streaming responses, persistent history, continuation, mid-turn guidance and cancellation. Interactive questions open a selection dialog and wait for explicit confirmation.
 - Streaming Codex output does not use a cumulative 4 MB transport limit; individual protocol records and displayed history remain bounded.
-- Read formatted Markdown from SSH or explicitly selected local files, with preview/source switching. Local Markdown previews stay in the browser.
+- Read formatted Markdown from SSH in Files or Codex file tabs, with preview/source switching. The separate Markdown workspace is temporarily hidden; its implementation is retained for later use.
 - Interactive `nvtop` and `htop` terminals stacked vertically for remote GPU and process monitoring.
 
 SSH runs from this backend host to the selected server using that user's encrypted private key. Public keys must already be installed in the server account's `authorized_keys`. Encrypted keys require their passphrase when uploaded. Jump hosts are not supported; imports report these as skipped. Remote Codex uses the selected SSH account's installed CLI and login.

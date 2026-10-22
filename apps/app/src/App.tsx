@@ -13,6 +13,7 @@ const IssuesWorkspace = lazy(() => import('./workspaces/IssuesWorkspace').then(m
 const MarkdownWorkspace = lazy(() => import('./workspaces/MarkdownWorkspace').then(module => ({ default: module.MarkdownWorkspace })));
 
 type Workspace = 'agents' | 'terminal' | 'files' | 'markdown' | 'monitor' | 'settings' | 'issues';
+const temporarilyHiddenWorkspaces: ReadonlySet<Workspace> = new Set(['markdown']);
 const navigation = [
   { id: 'agents' as const, label: 'Agents', icon: Bot }, { id: 'terminal' as const, label: 'Terminal', icon: TerminalSquare },
   { id: 'files' as const, label: 'Files', icon: Files }, { id: 'markdown' as const, label: 'Markdown', icon: BookOpen }, { id: 'monitor' as const, label: 'Monitor', icon: Activity },
@@ -80,7 +81,7 @@ export default function App() {
   if (!session.user) return <LoginScreen trustDays={session.trustDays} onLogin={refreshSession} />;
   return <div className="app-shell">
     <aside className="app-sidebar"><div className="brand" title="CozyPad TT"><SquareTerminal size={24} /><strong>CozyPad<span>TT</span></strong></div>
-      <span className="nav-section-label">WORKSPACE</span><nav>{navigation.map(item => <button key={item.id} aria-label={item.label} title={item.label} disabled={server?.kind === 'local' && ['terminal', 'monitor'].includes(item.id)} className={workspace === item.id ? 'active' : ''} onClick={() => { setWorkspace(item.id); if (item.id === 'terminal') setTerminalOpened(true); if (item.id === 'markdown') setMarkdownOpened(true); }}><item.icon size={18} /><span>{item.label}</span>{workspace === item.id && <i />}</button>)}</nav>
+      <span className="nav-section-label">WORKSPACE</span><nav>{navigation.filter(item => !temporarilyHiddenWorkspaces.has(item.id)).map(item => <button key={item.id} aria-label={item.label} title={item.label} disabled={server?.kind === 'local' && ['terminal', 'monitor'].includes(item.id)} className={workspace === item.id ? 'active' : ''} onClick={() => { setWorkspace(item.id); if (item.id === 'terminal') setTerminalOpened(true); if (item.id === 'markdown') setMarkdownOpened(true); }}><item.icon size={18} /><span>{item.label}</span>{workspace === item.id && <i />}</button>)}</nav>
       <div className="sidebar-bottom"><button onClick={() => setManage(true)}><FileKey2 size={18} /><span>連線管理</span><span className="count">{servers.length}</span></button><button className={workspace === 'settings' ? 'active' : ''} onClick={() => setWorkspace('settings')}><Settings2 size={18} /><span>設定</span></button><div className="user-row"><div className="avatar">{session.user.username.slice(0, 1).toUpperCase()}</div><div><strong>{session.user.username}</strong><span>{session.user.role}</span></div><IconButton label="登出" onClick={() => void logout()}><LogOut size={17} /></IconButton></div></div>
     </aside>
     <main className="app-main">
