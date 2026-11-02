@@ -13,6 +13,7 @@ import { seedSearchFiles, searchRoot } from '../tests/helpers/search-fixtures.mj
 import { seedMarkdownBrowser, markdownRoot as markdownBrowserRoot } from '../tests/helpers/markdown-browser-fixtures.mjs';
 import { seedMediaFiles, mediaRoot } from '../tests/helpers/media-fixtures.mjs';
 import { seedFileMoves } from '../tests/helpers/file-move-fixtures.mjs';
+import { seedFolderDownloads } from '../tests/helpers/folder-download-fixtures.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const directory = await mkdtemp(path.join(os.tmpdir(), 'cozypad-tt-browser-'));
@@ -46,6 +47,11 @@ for (let index = 0; index < 6; index++) await writeFile(path.join(markdownRoot, 
 await writeFile(path.join(markdownRoot, 'sub', 'nested.md'), '# 子資料夾\nPHYSICAL_NESTED_MARKDOWN', 'utf8');
 await store.write(store.userPath('collaborator', 'local-devices.json'), [{ id: 'local-fixture', name: 'Former Local Fixture', roots: [localRoot], platform: process.platform, tokenDigest: 'inert-fixture' }]);
 const profiles = new ProfileRepository(store, vault);
+const fileDownloadRoot = '/home/tester/files-download-browser'; await seedFolderDownloads(fixture, fileDownloadRoot);
+for (const username of ['file_downloader', 'file_download_other']) {
+  await store.update('auth-users.json', {}, users => { users[username] = { ...user, username }; });
+  await profiles.save(username, { name: 'Folder Download Fixture', host: '127.0.0.1', port: fixture.port, username: 'tester', defaultPath: fileDownloadRoot, privateKey: fixture.privateKey }, { fingerprints: [fixture.fingerprint] });
+}
 for (const username of ['move_files', 'move_agents', 'move_errors', 'move_slow', 'folder_files', 'folder_agents', 'explorer_fast']) {
   const moveRoot = `/home/tester/${username}`; seedFileMoves(fixture, moveRoot);
   await store.update('auth-users.json', {}, users => { users[username] = { ...user, username }; });

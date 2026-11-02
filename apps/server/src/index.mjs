@@ -9,11 +9,12 @@ import { IssueService } from './issues/issue-service.mjs';
 import { ProfileRepository } from './ssh/profile-repository.mjs';
 import { SshService } from './ssh/ssh-service.mjs';
 import { FilesService } from './ssh/files-service.mjs';
-import { serveMedia } from './ssh/media-preview.mjs';
+import { serveMedia, serveRemoteFile } from './ssh/media-preview.mjs';
 import { FileSearchService } from './ssh/file-search-service.mjs';
 import { FoldersService } from './ssh/folders-service.mjs';
 import { AgentService } from './ssh/agent-service.mjs';
 import { AgentFileDownloads } from './ssh/agent-file-downloads.mjs';
+import { serveFolderArchive } from './ssh/folder-download.mjs';
 import { CodexModels } from './ssh/codex-models.mjs';
 import { RemoteDirectories } from './ssh/remote-directories.mjs';
 import { terminalSockets } from './ssh/terminal-sockets.mjs';
@@ -61,7 +62,7 @@ const server = createServer(async (request, response) => {
       await staticFile(request, response, route); return;
     }
     validateOrigin(request);
-    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true, mediaPreview: true, fileMoves: true, folderMoves: true } }); return; }
+    if (route === '/api/health' && request.method === 'GET') { json(response, 200, { ok: true, name: 'CozyPad TT', version: '4.0.0', features: { scopedSearch: true, clientDirectoryContext: true, directoryHistory: true, localConnector: false, installationRequired: false, cooperation: true, issueReports: true, mediaPreview: true, fileMoves: true, folderMoves: true, folderDownloads: true, streamingFileDownloads: true } }); return; }
     if (route === '/api/auth/session' && request.method === 'GET') { json(response, 200, await auth.session(request)); return; }
     if (route === '/api/auth/login' && request.method === 'POST') { const result = await auth.login(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
     if (route === '/api/auth/verify' && request.method === 'POST') { const result = await auth.verify(request, await body(request)); json(response, 200, result.body, result.cookies); return; }
@@ -133,10 +134,11 @@ const server = createServer(async (request, response) => {
       const payload = await body(request);
       await files.write(owner, payload.serverId, payload.path, Buffer.from(String(payload.content), 'base64')); json(response, 200, { ok: true }); return;
     }
-    if (route === '/api/files/download' && request.method === 'GET') {
-      const result = await files.read(owner, id, url.searchParams.get('path'), 10485760);
-      response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.posix.basename(result.path))}`, 'cache-control': 'no-store' });
-      response.end(result.data); return;
+    if (route === '/api/files/archive' && request.method === 'GET') {
+      await serveFolderArchive(request, response, files, owner, id, url.searchParams.get('path')); return;
+    }
+    if (route === '/api/files/download' && ['GET', 'HEAD'].includes(request.method)) {
+      await serveRemoteFile(request, response, files, owner, id, url.searchParams.get('path')); return;
     }
     if (route === '/api/monitor' && request.method === 'GET') {
       const result = await ssh.exec(owner, id, "printf '=== Host ===\\n'; hostname; uname -sr; printf '\\n=== Uptime ===\\n'; uptime; printf '\\n=== Memory ===\\n'; free -m; printf '\\n=== Disk ===\\n'; df -h /; printf '\\n=== GPU ===\\n'; if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader; else printf 'No NVIDIA GPU\\n'; fi");

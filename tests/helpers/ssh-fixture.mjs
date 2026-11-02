@@ -15,6 +15,7 @@ export async function sshFixture({ modelError = false, codexVersion = 'codex-cli
   const deletion = { error: null, disconnect: false, malformed: false };
   const stats = { connections: 0, authenticated: 0, rejected: 0 };
   const sftpRequests = [];
+  const folderArchives = new Map(), archiveControl = { exitCode: 0, stall: false }, archiveStats = { opened: 0, closed: 0 };
   const fileMap = new Map([['/home/tester/readme.txt', Buffer.from('CozyPad test file\n')]]);
   const directories = new Map([['/', 0o755], ['/home', 0o755], ['/home/tester', 0o700]]), symlinks = new Set();
   const server = new Server({ hostKeys: [hostKey] }, client => {
@@ -36,6 +37,15 @@ export async function sshFixture({ modelError = false, codexVersion = 'codex-cli
       session.on('exec', (accept, reject, info) => {
         const stream = accept();
         commands.push(info.command);
+        if (info.command.startsWith('unset TAR_OPTIONS; exec tar -czf - -C ')) {
+          archiveStats.opened++; stream.once('close', () => { archiveStats.closed++; });
+          stream.resume(); stream.once('finish', () => stream.close());
+          if (archiveControl.stall) return;
+          const bytes = folderArchives.get(info.command);
+          const code = bytes ? archiveControl.exitCode : 2;
+          if (code) stream.stderr.write('fixture archive command failed\n');
+          stream.exit(code); stream.end(code === 127 ? undefined : bytes); return;
+        }
         const monitorTool = info.command.startsWith('if command -v nvtop ') ? 'nvtop' : info.command.startsWith('if command -v htop ') ? 'htop' : '';
         if (monitorTool) {
           const lines = monitorTool === 'nvtop' ? [
@@ -314,6 +324,6 @@ export async function sshFixture({ modelError = false, codexVersion = 'codex-cli
     }); });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { privateKey, fingerprint, port: server.address().port, fileMap, directories, symlinks, commands, modelRequests, chatRequests, cleanupRequests, threads, rollouts, deletion, stats, sftpRequests,
+  return { privateKey, fingerprint, port: server.address().port, fileMap, directories, symlinks, commands, modelRequests, chatRequests, cleanupRequests, threads, rollouts, deletion, stats, sftpRequests, folderArchives, archiveControl, archiveStats,
     close: () => new Promise(resolve => { for (const client of clients) client.end(); server.close(resolve); }) };
 }
